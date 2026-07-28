@@ -1,0 +1,20 @@
+*.iml
+.gradle/
+/local.properties
+.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+
+# Gradle wrapper jar and launcher scripts are deliberately NOT committed —
+# see docs/handoff/PHASE-00.md for why and how to generate them.
+gradlew
+gradlew.bat
+gradle/wrapper/gradle-wrapper.jar
+
+# Local NDK/CMake host-test build output
+core/audio/src/main/cpp/host/build/

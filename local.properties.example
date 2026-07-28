@@ -1,0 +1,4 @@
+# Copy this to local.properties (gitignored) and point it at your SDK install.
+# Android Studio writes this automatically on first sync — you usually don't
+# need to create it by hand.
+sdk.dir=/path/to/Android/sdk

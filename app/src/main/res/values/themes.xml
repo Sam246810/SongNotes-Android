@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Plain Material3 base theme — Compose owns actual styling. -->
+    <style name="Theme.SongNotes" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
