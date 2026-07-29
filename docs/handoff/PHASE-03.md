@@ -63,18 +63,52 @@ formula has a real bug, or the processing-gain assumption underpinning this
 whole approach needs a second look — not a tolerance to loosen until it's
 green.
 
-**Only wired into the host CMake target**, deliberately not the Android
-`.so` build yet — nothing on the Android side calls any of this code, so
-compiling it into the shipped library now would just be dead weight. It gets
-added to `core/audio/src/main/cpp/CMakeLists.txt` alongside the JNI wrapping
-work.
+**Now wired into the Android `.so` build too** (2026-07-29) — see "JNI
+wrapping, verified on device" below. Originally deliberately excluded from
+`core/audio/src/main/cpp/CMakeLists.txt` since nothing on the Android side
+called any of it; that's no longer true.
+
+## JNI wrapping, verified on device (2026-07-29)
+
+`generateSweepAndInverse`/`convolve`+`findPeak`/the stats functions are now
+exposed through a Kotlin-facing `Calibration` object
+(`core/audio/src/main/java/com/songnotes/core/audio/Calibration.kt`,
+backed by `core/audio/src/main/cpp/calibration_jni.cpp`):
+
+- `convolve()` and `findPeak()` are **not** exposed as separate JNI calls —
+  they're kept paired on the native side in
+  `nativeMeasureRoundTripDelay(recording, inverseFilter, sweepLength)`,
+  mirroring `host/test_calibration_roundtrip.cpp`'s own `recoverDelay()`
+  helper exactly. The intermediate convolved buffer (up to
+  `recording.size() + inverseFilter.size() - 1` samples, padded to the next
+  power of two internally) never crosses the JNI boundary — only the
+  4-field result does. Exposing the low-level primitives separately would
+  have meant marshaling that full buffer across JNI twice per measurement
+  for no reason.
+- `generateSweepAndInverse` returns one packed `float[2N]` (sweep, then
+  inverseFilter) rather than a constructed Kotlin object — no existing code
+  in this repo builds Java objects from JNI (class/method-ID lookups), and
+  a single primitive array keeps `calibration_jni.cpp` free of that
+  machinery. `Calibration.kt` unpacks it into a `SweepData` data class.
+- **JNI method-name-mangling risk is real, not theoretical, and C++
+  compiling clean does not catch it** — a mismatch between
+  `Java_com_songnotes_core_audio_Calibration_nativeXxx` and the Kotlin
+  `external fun` declarations only surfaces as `UnsatisfiedLinkError` at
+  first *call*. Added a one-tap smoke test to `DiagnosticsScreen.kt`
+  (`CalibrationDspSmokeTestSection`) specifically to exercise this at
+  runtime: generates a sweep, synthesizes a recording with a known
+  500-frame delay in Kotlin (no engine/audio hardware involved — pure
+  array manipulation), and confirms `measureRoundTripDelay` recovers it.
+  **Ran clean on the physical device**: `recovered delay: 500.003 frames
+  (expected 500)`, `pnr: 84.5 dB`, MAD rejection correctly dropped a
+  synthetic outlier, `peakToNoiseRatioDb(10,1)` exact. Confirms the array
+  marshaling (`jfloatArray`/`jdoubleArray`, both directions) and the method
+  linkage all work, not just the pure C++ underneath.
 
 ## What's left for Phase 3 (not started)
 
 Roughly in the order the plan's architecture section implies:
 
-- **JNI wrapping** of `generateSweepAndInverse`/`convolve`/`findPeak`/the
-  stats functions, exposed through a Kotlin-facing calibration API.
 - **Engine integration**: running N sweep repetitions through the *same*
   duplex engine record/playback path Phase 1 built (per the plan's "same
   engine path for calibration and real recording" principle) — play the

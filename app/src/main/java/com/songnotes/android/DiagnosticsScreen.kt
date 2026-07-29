@@ -27,6 +27,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.Alignment
@@ -35,9 +36,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.songnotes.core.audio.AudioEngine
+import com.songnotes.core.audio.Calibration
 import com.songnotes.core.audio.EngineCapabilities
 import com.songnotes.core.audio.EngineState
+import kotlin.math.abs
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -127,6 +133,103 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         }
 
         RecordPlaybackSection(engine)
+        CalibrationDspSmokeTestSection()
+    }
+}
+
+/**
+ * Not a product feature — a one-tap on-device check that the new
+ * Calibration JNI wrapping (calibration_jni.cpp) actually links and
+ * marshals correctly. The host GoogleTest suite already proves the
+ * underlying math is right (test_calibration_roundtrip.cpp); JNI method
+ * name mangling can only be verified by actually calling it from Kotlin at
+ * runtime — a mismatch there is an UnsatisfiedLinkError the C++ compiler
+ * can't catch. Runs on Dispatchers.Default since the FFT-based convolution,
+ * while fast, isn't free enough to block the UI thread on tap.
+ */
+@Composable
+private fun CalibrationDspSmokeTestSection() {
+    var resultText by remember { mutableStateOf<String?>(null) }
+    var isRunning by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Calibration DSP smoke test (Phase 3 JNI)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Generates a sweep via JNI, synthesizes a recording with a known " +
+            "500-frame delay in Kotlin, and confirms measureRoundTripDelay " +
+            "recovers it — proves the JNI boundary works, not just the " +
+            "underlying C++ (that's what the host GoogleTest suite is for).",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isRunning,
+        onClick = {
+            isRunning = true
+            resultText = null
+            scope.launch {
+                val result = withContext(Dispatchers.Default) { runCalibrationSmokeTest() }
+                resultText = result
+                isRunning = false
+            }
+        },
+    ) {
+        Text(if (isRunning) "Running..." else "Run smoke test")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+private fun runCalibrationSmokeTest(): String {
+    val sampleRate = 48000.0
+    val knownDelayFrames = 500
+    val tailPadding = 4800
+
+    val sweepData = Calibration.generateSweepAndInverse(
+        sampleRate = sampleRate,
+        f1Hz = 200.0,
+        f2Hz = 8000.0,
+        lengthSeconds = 0.5,
+        amplitude = 0.7f,
+    )
+
+    val recording = FloatArray(knownDelayFrames + sweepData.sweep.size + tailPadding)
+    sweepData.sweep.copyInto(recording, destinationOffset = knownDelayFrames)
+
+    val measurement = Calibration.measureRoundTripDelay(
+        recording = recording,
+        inverseFilter = sweepData.inverseFilter,
+        sweepLength = sweepData.sweep.size,
+    )
+
+    val statsSample = Calibration.rejectOutliersMad(doubleArrayOf(42.0, 42.1, 41.9, 90.0))
+    val pnrSample = Calibration.peakToNoiseRatioDb(10.0f, 1.0f)
+
+    val delayOk = abs(measurement.frames - knownDelayFrames) < 1.0
+    val pnrOk = measurement.pnrDb > 20.0
+    val statsOk = statsSample.size == 3
+    val pnrSampleOk = abs(pnrSample - 20.0) < 0.01
+
+    val pass = delayOk && pnrOk && statsOk && pnrSampleOk
+    return buildString {
+        appendLine(if (pass) "PASS — JNI boundary verified" else "FAIL — see values below")
+        appendLine("sweep frames: ${sweepData.sweep.size}, inverseFilter frames: ${sweepData.inverseFilter.size}")
+        appendLine(
+            "recovered delay: %.3f frames (expected %d, ok=%s)".format(
+                measurement.frames, knownDelayFrames, delayOk,
+            ),
+        )
+        appendLine("pnr: %.1f dB (ok=%s)".format(measurement.pnrDb, pnrOk))
+        appendLine("MAD outlier rejection kept ${statsSample.size}/4 values (ok=$statsOk)")
+        append("peakToNoiseRatioDb(10,1)=%.2f dB, expected 20.00 (ok=%s)".format(pnrSample, pnrSampleOk))
     }
 }
 

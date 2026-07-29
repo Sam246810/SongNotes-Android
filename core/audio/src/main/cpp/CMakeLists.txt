@@ -10,8 +10,13 @@ find_package(oboe REQUIRED CONFIG)
 add_library(songnotes_audio SHARED
     audio_engine.cpp
     jni_bridge.cpp
+    calibration_jni.cpp
     dsp/sine_wave.cpp
     dsp/click.cpp
+    dsp/fft.cpp
+    dsp/sweep.cpp
+    dsp/matched_filter.cpp
+    dsp/calibration_stats.cpp
 )
 
 target_include_directories(songnotes_audio PRIVATE .)
