@@ -30,6 +30,10 @@ FetchContent_MakeAvailable(googletest)
 add_library(songnotes_dsp STATIC
     ../dsp/sine_wave.cpp
     ../dsp/click.cpp
+    ../dsp/fft.cpp
+    ../dsp/sweep.cpp
+    ../dsp/matched_filter.cpp
+    ../dsp/calibration_stats.cpp
 )
 target_include_directories(songnotes_dsp PUBLIC ..)
 
@@ -38,6 +42,11 @@ enable_testing()
 add_executable(dsp_tests
     test_sine_wave.cpp
     test_click.cpp
+    test_fft.cpp
+    test_sweep.cpp
+    test_matched_filter.cpp
+    test_calibration_stats.cpp
+    test_calibration_roundtrip.cpp
 )
 target_link_libraries(dsp_tests PRIVATE songnotes_dsp GTest::gtest_main)
 
