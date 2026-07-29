@@ -30,10 +30,54 @@ Java_com_songnotes_core_audio_AudioEngine_nativeStartTestTone(JNIEnv *, jobject,
 }
 
 JNIEXPORT void JNICALL
-Java_com_songnotes_core_audio_AudioEngine_nativeStop(JNIEnv *, jobject, jlong handle) {
+Java_com_songnotes_core_audio_AudioEngine_nativeStopTestTone(JNIEnv *, jobject, jlong handle) {
     if (auto *engine = toEngine(handle)) {
-        engine->stop();
+        engine->stopTestTone();
     }
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeStartRecording(JNIEnv *env, jobject, jlong handle,
+                                                                jstring filePath) {
+    auto *engine = toEngine(handle);
+    if (!engine || !filePath) return JNI_FALSE;
+    const char *path = env->GetStringUTFChars(filePath, nullptr);
+    const bool ok = engine->startRecording(std::string(path));
+    env->ReleaseStringUTFChars(filePath, path);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeStopRecording(JNIEnv *, jobject, jlong handle) {
+    if (auto *engine = toEngine(handle)) {
+        engine->stopRecording();
+    }
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeStartPlayback(JNIEnv *env, jobject, jlong handle,
+                                                               jstring filePath) {
+    auto *engine = toEngine(handle);
+    if (!engine || !filePath) return JNI_FALSE;
+    const char *path = env->GetStringUTFChars(filePath, nullptr);
+    const bool ok = engine->startPlayback(std::string(path));
+    env->ReleaseStringUTFChars(filePath, path);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeStopPlayback(JNIEnv *, jobject, jlong handle) {
+    if (auto *engine = toEngine(handle)) {
+        engine->stopPlayback();
+    }
+}
+
+JNIEXPORT jobject JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeGetStateBuffer(JNIEnv *env, jobject, jlong handle) {
+    auto *engine = toEngine(handle);
+    if (!engine) return nullptr;
+    auto *state = engine->stateBlock();
+    return env->NewDirectByteBuffer(state, sizeof(*state));
 }
 
 JNIEXPORT void JNICALL

@@ -1,14 +1,21 @@
 package com.songnotes.core.audio
 
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
 /**
- * Kotlin facade over the native (Oboe-based) audio engine.
+ * Kotlin facade over the native (Oboe-based) duplex audio engine.
  *
- * Phase 0 scope only: open an output stream, play a 440 Hz test tone, report
- * what was actually obtained. There is deliberately no continuous state
- * channel yet — [capabilities] is a handful of cheap JNI calls, fine to poll
- * a couple of times a second. Once Phase 1+ needs a 60 Hz meter, that becomes
- * a direct-ByteBuffer state block instead, per the plan's threading design —
- * a real callback-rate audio thread must never make a JNI call per frame.
+ * One output stream owns the data callback; a second input stream is read
+ * non-blockingly from inside it (Oboe's FullDuplexStream pattern). The test
+ * tone, recording, and playback are three different things that single
+ * callback can do — never three different stream configurations — per the
+ * plan's "same engine path for calibration and real recording" principle.
+ *
+ * [state] polls a direct `ByteBuffer` written by the native side with plain
+ * atomic stores; reading it from Kotlin costs zero JNI calls beyond the one
+ * `nativeGetStateBuffer` call made at engine creation. Fine to poll at UI
+ * frame rate.
  *
  * Every `external fun` here is implemented in
  * `core/audio/src/main/cpp/jni_bridge.cpp`.
@@ -16,18 +23,42 @@ package com.songnotes.core.audio
 class AudioEngine {
 
     private var handle: Long = 0L
+    private var stateBuffer: ByteBuffer? = null
 
-    /** Starts (creating the native engine on first call) and plays the test tone. Returns whether the stream opened. */
-    fun start(): Boolean {
+    private fun ensureCreated(): Boolean {
         if (handle == 0L) {
             handle = nativeCreate()
+            if (handle != 0L) {
+                stateBuffer = nativeGetStateBuffer(handle)?.order(ByteOrder.nativeOrder())
+            }
         }
-        if (handle == 0L) return false
-        return nativeStartTestTone(handle)
+        return handle != 0L
     }
 
-    fun stop() {
-        if (handle != 0L) nativeStop(handle)
+    fun startTestTone(): Boolean = ensureCreated() && nativeStartTestTone(handle)
+
+    fun stopTestTone() {
+        if (handle != 0L) nativeStopTestTone(handle)
+    }
+
+    /** [filePath] should live under the app's own storage (e.g. `context.filesDir`) — no permission-scoped storage handling here yet. */
+    fun startRecording(filePath: String): Boolean = ensureCreated() && nativeStartRecording(handle, filePath)
+
+    fun stopRecording() {
+        if (handle != 0L) nativeStopRecording(handle)
+    }
+
+    fun startPlayback(filePath: String): Boolean = ensureCreated() && nativeStartPlayback(handle, filePath)
+
+    fun stopPlayback() {
+        if (handle != 0L) nativeStopPlayback(handle)
+    }
+
+    /** Stops everything except an in-progress recording — call when the app backgrounds. The mic foreground service is what keeps a recording alive past that point. */
+    fun pauseForBackground() {
+        if (handle == 0L) return
+        nativeStopTestTone(handle)
+        nativeStopPlayback(handle)
     }
 
     fun capabilities(): EngineCapabilities {
@@ -47,19 +78,39 @@ class AudioEngine {
         )
     }
 
+    /** Reads the live engine state (recording/playback progress, xruns, dropped frames) with no JNI call. */
+    fun state(): EngineState {
+        val buf = stateBuffer ?: return EngineState.idle()
+        return EngineState(
+            isRecording = buf.getInt(EngineState.OFFSET_IS_RECORDING) != 0,
+            isPlaying = buf.getInt(EngineState.OFFSET_IS_PLAYING) != 0,
+            framesRecorded = buf.getInt(EngineState.OFFSET_FRAMES_RECORDED),
+            playbackFrame = buf.getInt(EngineState.OFFSET_PLAYBACK_FRAME),
+            playbackTotalFrames = buf.getInt(EngineState.OFFSET_PLAYBACK_TOTAL_FRAMES),
+            xRunCount = buf.getInt(EngineState.OFFSET_XRUN_COUNT),
+            framesDropped = buf.getInt(EngineState.OFFSET_FRAMES_DROPPED),
+        )
+    }
+
     /** Releases the native engine. Safe to call more than once; must be called from onDestroy. */
     fun release() {
         val h = handle
         if (h != 0L) {
             nativeDestroy(h)
             handle = 0L
+            stateBuffer = null
         }
     }
 
     private external fun nativeCreate(): Long
-    private external fun nativeStartTestTone(handle: Long): Boolean
-    private external fun nativeStop(handle: Long)
     private external fun nativeDestroy(handle: Long)
+    private external fun nativeStartTestTone(handle: Long): Boolean
+    private external fun nativeStopTestTone(handle: Long)
+    private external fun nativeStartRecording(handle: Long, filePath: String): Boolean
+    private external fun nativeStopRecording(handle: Long)
+    private external fun nativeStartPlayback(handle: Long, filePath: String): Boolean
+    private external fun nativeStopPlayback(handle: Long)
+    private external fun nativeGetStateBuffer(handle: Long): ByteBuffer?
     private external fun nativeGetAudioApi(handle: Long): String
     private external fun nativeGetSampleRate(handle: Long): Int
     private external fun nativeGetFramesPerBurst(handle: Long): Int

@@ -25,7 +25,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        audioEngine.stop()
+        // Deliberately does NOT stop an in-progress recording — that's the
+        // whole point of RecordingForegroundService. Test tone and
+        // playback have no reason to keep running once the app isn't visible.
+        audioEngine.pauseForBackground()
         super.onStop()
     }
 

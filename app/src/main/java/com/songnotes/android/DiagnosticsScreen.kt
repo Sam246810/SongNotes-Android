@@ -1,5 +1,10 @@
 package com.songnotes.android
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -22,27 +28,27 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.audio.EngineCapabilities
+import com.songnotes.core.audio.EngineState
 import kotlinx.coroutines.delay
+import java.io.File
 
 /**
- * Phase 0's entire product surface: open an output stream, play a 440 Hz test
- * tone, and show exactly what Oboe actually negotiated — this is the "hello
- * Oboe" screen the plan's Phase 0 Done bar (clean sine, zero xruns over 60s)
- * is checked against by hand on a real device.
+ * Phase 0's "hello Oboe" tone test, plus Phase 1's real duplex record/
+ * playback round trip. Still one screen, still no navigation — there's
+ * nothing yet to navigate to.
  */
 @Composable
 fun DiagnosticsScreen(engine: AudioEngine) {
-    var isPlaying by remember { mutableStateOf(false) }
+    var isTonePlaying by remember { mutableStateOf(false) }
     var caps by remember { mutableStateOf(EngineCapabilities.unavailable()) }
 
-    // No continuous state channel yet (that's Phase 1's direct-ByteBuffer
-    // block, once there's a meter worth polling at 60 Hz). A slow poll here
-    // is enough to watch the xrun counter during a 60s soak test.
-    LaunchedEffect(isPlaying) {
-        while (isPlaying) {
+    LaunchedEffect(isTonePlaying) {
+        while (isTonePlaying) {
             caps = engine.capabilities()
             delay(500)
         }
@@ -64,16 +70,16 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         Spacer(Modifier.height(24.dp))
 
         Button(onClick = {
-            if (isPlaying) {
-                engine.stop()
-                isPlaying = false
+            if (isTonePlaying) {
+                engine.stopTestTone()
+                isTonePlaying = false
                 caps = engine.capabilities()
             } else {
-                isPlaying = engine.start()
+                isTonePlaying = engine.startTestTone()
                 caps = engine.capabilities()
             }
         }) {
-            Text(if (isPlaying) "Stop test tone" else "Play test tone")
+            Text(if (isTonePlaying) "Stop test tone" else "Play test tone")
         }
 
         Spacer(Modifier.height(24.dp))
@@ -94,6 +100,146 @@ fun DiagnosticsScreen(engine: AudioEngine) {
             Spacer(Modifier.height(16.dp))
             Text("Last error: $error", color = MaterialTheme.colorScheme.error)
         }
+
+        RecordPlaybackSection(engine)
+    }
+}
+
+@Composable
+private fun RecordPlaybackSection(engine: AudioEngine) {
+    val context = LocalContext.current
+    var hasRecordPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    var isPolling by remember { mutableStateOf(false) }
+    var engineState by remember { mutableStateOf(EngineState.idle()) }
+    var statusMessage by remember { mutableStateOf<String?>(null) }
+
+    val takeFile = remember {
+        File(context.filesDir, "takes/phase1_test.f32").also { it.parentFile?.mkdirs() }
+    }
+    // Recomputed each recomposition on purpose — cheap, and file existence
+    // can change from a button click above without a full screen rebuild.
+    val takeFileExists = takeFile.exists()
+
+    fun beginRecording() {
+        context.startForegroundService(Intent(context, RecordingForegroundService::class.java))
+        if (engine.startRecording(takeFile.absolutePath)) {
+            engineState = engine.state()
+            isPolling = true
+            statusMessage = null
+        } else {
+            statusMessage = "Failed to start recording — see Last error above."
+            context.stopService(Intent(context, RecordingForegroundService::class.java))
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        hasRecordPermission = granted
+        if (granted) {
+            beginRecording()
+        } else {
+            statusMessage = "Microphone permission is required to record."
+        }
+    }
+
+    LaunchedEffect(isPolling) {
+        while (isPolling) {
+            engineState = engine.state()
+            if (!engineState.isRecording && !engineState.isPlaying) {
+                isPolling = false
+            }
+            delay(200)
+        }
+    }
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Record & Playback (Phase 1)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Records real mic input to ${takeFile.name}, then plays it back through the same duplex engine.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(16.dp))
+
+    Row {
+        Button(
+            enabled = !engineState.isRecording && !engineState.isPlaying,
+            onClick = {
+                if (!hasRecordPermission) {
+                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                } else {
+                    beginRecording()
+                }
+            },
+        ) {
+            Text("Record")
+        }
+
+        Spacer(Modifier.width(12.dp))
+
+        Button(
+            enabled = engineState.isRecording,
+            onClick = {
+                engine.stopRecording()
+                context.stopService(Intent(context, RecordingForegroundService::class.java))
+                engineState = engine.state()
+                isPolling = false
+            },
+        ) {
+            Text("Stop recording")
+        }
+    }
+
+    Spacer(Modifier.height(8.dp))
+
+    Row {
+        Button(
+            enabled = !engineState.isRecording && !engineState.isPlaying && takeFileExists,
+            onClick = {
+                if (engine.startPlayback(takeFile.absolutePath)) {
+                    engineState = engine.state()
+                    isPolling = true
+                    statusMessage = null
+                } else {
+                    statusMessage = "Failed to start playback — see Last error above."
+                }
+            },
+        ) {
+            Text("Play last take")
+        }
+
+        Spacer(Modifier.width(12.dp))
+
+        Button(
+            enabled = engineState.isPlaying,
+            onClick = {
+                engine.stopPlayback()
+                engineState = engine.state()
+                isPolling = false
+            },
+        ) {
+            Text("Stop playback")
+        }
+    }
+
+    Spacer(Modifier.height(16.dp))
+    CapabilityRow("Recording", if (engineState.isRecording) "yes" else "no")
+    CapabilityRow("Playing", if (engineState.isPlaying) "yes" else "no")
+    CapabilityRow("Frames recorded", "${engineState.framesRecorded}")
+    CapabilityRow("Playback position", "${engineState.playbackFrame} / ${engineState.playbackTotalFrames}")
+    CapabilityRow("Frames dropped", "${engineState.framesDropped}")
+
+    statusMessage?.let {
+        Spacer(Modifier.height(8.dp))
+        Text(it, color = MaterialTheme.colorScheme.error)
     }
 }
 
