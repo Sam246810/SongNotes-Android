@@ -216,13 +216,53 @@ reports the *output* stream's `sharingMode`/`performanceMode`/
 stream's now-independently-variable path. Worth adding equivalent
 input-side capability getters before this becomes confusing to debug later.
 
+## N-repetition sessions + AEC-defeat detection, verified on device (2026-07-29)
+
+`CalibrationSession` (new, `:core:audio`) runs N repetitions of the same
+sweep back-to-back through `AudioEngine`, aggregates the recovered delays
+via `Calibration.rejectOutliersMad`, and implements the plan's specific
+AEC-defeat heuristic ("PNR high on rep 1, collapsed by rep 5") as a
+first-vs-last-repetition PNR drop exceeding a reasoning-based 15dB
+threshold — not measured against a real AEC-can't-be-disabled device (none
+available to test against), documented as such in the source. Deliberately
+separate from `EngineCalibrationCaptureSection`'s single-capture flow
+(both stay in `DiagnosticsScreen` as distinct, still-useful diagnostics)
+and placed in `:core:audio` rather than the app module specifically because
+this is real reusable business logic the eventual wizard needs directly,
+not verification scaffolding. Required adding an explicit
+`kotlinx-coroutines-core` dependency to `:core:audio` — it was previously
+only available there transitively through nothing, since this module has
+no Compose dependency to inherit it from.
+
+**Ran a real 5-repetition session on the physical device**: all 5
+repetitions landed on the *exact same* delay (1059.07 frames / 22.06ms,
+spread 0.01 frames — essentially zero jitter within one session), PNR held
+flat around 56dB across all 5, all 5/5 accepted by MAD rejection, correctly
+reported "no AEC-defeat signature detected" (nothing to detect — PNR never
+collapsed). This confirms the aggregation and defeat-detection logic
+itself works correctly against a real measurement run.
+
+**One finding worth flagging honestly, not glossing over**: this 22.06ms
+figure is a *third* distinct number from the same device, following the
+engine-integration baseline's ~19.4ms (no session, no AEC) and the
+single-capture AEC test's 97.18ms (session + AEC, run moments earlier in a
+different app process). Same code path both times, same input
+configuration (`sharing=1` in both logs) — the difference is real
+session-to-session variability, not a bug in the measurement. Most likely
+explanation: the device was actively being used for phone calls between
+runs, which plausibly leaves the audio subsystem in a different state
+(possibly Bluetooth reconnecting, possibly a lingering communication-mode
+audio route) for some time after. Not chased down further — if anything
+this is a point *in favor* of Phase 3's whole premise: if latency were
+always identical regardless of system state, per-session calibration
+wouldn't be necessary at all. Worth keeping in mind once the real wizard
+exists: a "measure again" affordance is probably worth having, not just a
+one-shot measurement trusted forever.
+
 ## What's left for Phase 3 (not started)
 
 Roughly in the order the plan's architecture section implies:
 
-- **AEC-defeat detection by convergence signature** (PNR high on rep 1,
-  collapsed by rep 5 — the plan's specific heuristic for "adaptive AEC ate
-  our sweep").
 - **Per-route calibration storage** (`route_key` = device type + product
   hash), swapped on `AudioDeviceCallback` route changes.
 - **Bluetooth handling**: refuse to auto-calibrate by default with a

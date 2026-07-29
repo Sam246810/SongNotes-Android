@@ -51,4 +51,5 @@ android {
 
 dependencies {
     implementation(libs.oboe)
+    implementation(libs.kotlinx.coroutines.core)
 }

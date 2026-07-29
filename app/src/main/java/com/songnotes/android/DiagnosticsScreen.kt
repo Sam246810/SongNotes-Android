@@ -38,6 +38,7 @@ import androidx.core.content.ContextCompat
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.audio.Calibration
 import com.songnotes.core.audio.CalibrationAudioEffects
+import com.songnotes.core.audio.CalibrationSession
 import com.songnotes.core.audio.EngineCapabilities
 import com.songnotes.core.audio.EngineState
 import kotlin.math.abs
@@ -136,6 +137,96 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         RecordPlaybackSection(engine)
         CalibrationDspSmokeTestSection()
         EngineCalibrationCaptureSection(engine)
+        CalibrationSessionSection(engine)
+    }
+}
+
+/**
+ * Exercises [CalibrationSession] — the N-repetition, MAD-aggregated,
+ * AEC-defeat-checking flow the eventual wizard will call directly. Separate
+ * from [EngineCalibrationCaptureSection] above (a single manual capture)
+ * rather than replacing it — both remain useful, distinct diagnostics.
+ */
+@Composable
+private fun CalibrationSessionSection(engine: AudioEngine) {
+    val context = LocalContext.current
+    var hasRecordPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    var isRunning by remember { mutableStateOf(false) }
+    var resultText by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun beginSession() {
+        resultText = null
+        isRunning = true
+        scope.launch {
+            val result = CalibrationSession(engine).run(repetitionCount = 5)
+            isRunning = false
+            resultText = buildString {
+                appendLine("${result.repetitions.size} repetitions:")
+                result.repetitions.forEachIndexed { i, rep ->
+                    appendLine("  rep $i: %.2f frames, PNR %.1f dB".format(rep.delayFrames, rep.pnrDb))
+                }
+                appendLine(
+                    "Accepted after MAD rejection: ${result.acceptedDelayFrames.size}/${result.repetitions.size}",
+                )
+                appendLine(
+                    "Mean accepted delay: %.2f frames (%.2f ms), spread %.2f frames".format(
+                        result.meanAcceptedDelayFrames,
+                        result.meanAcceptedDelayFrames / 48000.0 * 1000.0,
+                        result.spreadFrames,
+                    ),
+                )
+                append(
+                    if (result.aecDefeatSuspected) {
+                        "AEC-DEFEAT SUSPECTED — PNR collapsed across repetitions"
+                    } else {
+                        "No AEC-defeat signature detected"
+                    },
+                )
+            }
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        hasRecordPermission = granted
+        if (granted) beginSession() else resultText = "Microphone permission is required."
+    }
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Calibration session — 5 reps + AEC-defeat check", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Runs CalibrationSession: 5 real captures back-to-back, MAD-rejects outliers, and " +
+            "flags the plan's AEC-defeat signature (PNR high on rep 1, collapsed by rep 5) if seen.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isRunning,
+        onClick = {
+            if (!hasRecordPermission) {
+                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            } else {
+                beginSession()
+            }
+        },
+    ) {
+        Text(if (isRunning) "Running session..." else "Run 5-rep calibration session")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
     }
 }
 
