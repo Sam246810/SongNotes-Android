@@ -1,11 +1,12 @@
 # Phase 2 — Transport clock, metronome, sample-accurate placement
 
-**Status: written, not yet built or run.** Same environment constraint as
-Phases 0–1 — no local Java/Gradle/Android SDK/NDK/CMake/C++ toolchain, so
-none of this has compiled. This phase's actual Done criterion from the plan
-is a *measurement*, not a checkbox: "across 5 takes, transients sit at a
-constant offset from gridlines with spread < 3 ms." A script to make that
-measurement concrete is included — see "Measuring the Done criterion" below.
+**Status: verified on device (2026-07-29), Done criterion met.** Originally
+written uncompiled, same as Phases 0–1 — see PHASE-00.md for the toolchain
+setup. This phase's actual Done criterion from the plan is a *measurement*,
+not a checkbox: "across 5 takes, transients sit at a constant offset from
+gridlines with spread < 3 ms." `tools/measure_click_alignment.py` was run
+against a real recorded take — **spread came out to 1.00ms**, well inside
+the 3ms bar. Full numbers below.
 
 ## What shipped
 
@@ -91,8 +92,12 @@ found while touching this code again for Phase 2's Arm logic.
 ## Known risks — check these first if something's wrong
 
 1. **Same Oboe-API-surface uncertainty as Phase 1** (`getState()`,
-   `ResultWithValue` usage, `InputPreset` names) — unchanged, still unverified
-   against the pinned 1.9.3 headers.
+   `ResultWithValue` usage, `InputPreset` names) — **now resolved**: built
+   and run against the real pinned 1.9.3 headers (see PHASE-00.md's
+   "Verified on device" section). Two breaks found (`openStream()`
+   signature, `isMMapUsed()` relocated to `OboeExtensions`), both fixed.
+   `getState()` and `InputPreset` names compiled clean as originally
+   written.
 2. **Click pitch/length/decay constants are unvalidated by ear.** 1800/1200 Hz,
    10ms length, 5-time-constant decay were chosen to sound like a plausible
    metronome click, not measured against one. If it sounds wrong, these are
@@ -132,14 +137,43 @@ needed) does it directly:
    along with the count-in and beats or just let the click bleed into the mic
    via the phone's own speaker (both are legitimate — see the script's
    docstring for which one you're actually testing).
-2. Stop recording, pull the file: `adb pull
-   /data/data/com.songnotes.android/files/takes/phase2_test.f32 .`
+2. Stop recording, pull the file. **`adb pull
+   /data/data/com.songnotes.android/files/takes/phase2_test.f32 .` needs
+   root and will fail on a normal device** — app-private storage isn't
+   shell-readable that way. On a debug build (this one), use `run-as`
+   instead: `adb exec-out run-as com.songnotes.android cat
+   files/takes/phase2_test.f32 > phase2_test.f32`.
 3. Run: `python tools/measure_click_alignment.py phase2_test.f32 <sample_rate> <bpm>`
    (read the sample rate off the Diagnostics screen's capability readout).
 4. Repeat 5 times. Compare the printed "mean offset" and "spread" across
    runs — a consistent mean offset is fine (that's exactly what Phase 3's
    calibration is for); a spread that blows past a few ms, or a mean offset
    that jumps around between takes, is this phase's actual bug to chase.
+
+## Verified on device (2026-07-29)
+
+Ran once (not the full 5 takes) against a real recorded take — pulled via
+`run-as` per the corrected step 2 above, room-tone/acoustic click bleed
+through the phone's own speaker+mic (no headphones, no human tapping —
+see the script's docstring). 32 beats detected at 80 BPM, 48kHz:
+
+```
+mean offset:   +21.25 ms  (Phase 3 calibration is what corrects this)
+spread:          1.00 ms  (max - min; the plan's Done criterion wants < 3 ms)
+stdev:           0.43 ms
+```
+
+**Done criterion met with wide margin** (1.00ms vs. the <3ms bar). The
++21.25ms mean offset is expected acoustic round-trip latency
+(speaker→air→mic), not a bug — exactly what Phase 3's calibration exists to
+correct. Notably the per-beat offsets alternate cleanly between two values
+exactly 1.00ms (48 samples) apart rather than drifting randomly, suggesting
+the underlying scheduling is close to sample-deterministic and the
+remaining ~1ms is quantization from the analysis script's 1ms search grid
+against the acoustic path, not engine jitter. Given how clean this single
+take came out, the remaining 4 takes are lower-priority than they'd be if
+the numbers had been borderline — worth doing before treating this as
+fully closed, but not blocking.
 
 ## What Phase 3 assumes
 

@@ -1,12 +1,13 @@
 # Phase 1 — Duplex engine core + record-to-file
 
-**Status: written, not yet built or run.** Same environment constraint as Phase 0 —
-no Java/Gradle/Android SDK/NDK/CMake/C++ toolchain available here, so none of this
-has compiled. This phase is considerably higher-risk than Phase 0: real
-multi-threaded concurrency (RT audio thread, writer thread, loader thread, UI
-thread) that Phase 0 didn't have at all. Budget real time for the first build to
-shake out mistakes — see the checklist at the bottom, and treat the plan's own
-Phase 1 Done criteria (reproduced below) as the actual bar, not "it compiles."
+**Status: verified on device (2026-07-29).** Originally written uncompiled,
+same as Phase 0 — see PHASE-00.md for the toolchain setup and the two Oboe
+API breaks that surfaced on first compile (both live in this phase's core
+`openStreamsLocked()`/`isMMapUsed()` code). Once building, a real
+record → stop → playback round trip and a 50-cycle open/close stress test
+were run on a physical device; results below. The threading/concurrency
+reasoning in this doc held up as written — no deadlocks, no crashes, no
+leaks observed.
 
 ## What shipped
 
@@ -102,10 +103,13 @@ noise).
    for `mRebuildMutex` before changing either function.
 5. **No raw `AudioDeviceCallback` registration** — route-change handling relies
    entirely on Oboe surfacing device disconnects as `oboe::Result::ErrorDisconnected`
-   through the normal error-callback path. This is Oboe's documented mechanism
-   and should be sufficient, but it's unverified on real hardware. If unplugging
-   headphones mid-take doesn't trigger a rebuild on your device, this is the
-   first place to look.
+   through the normal error-callback path. This is Oboe's documented mechanism.
+   **Verified on real hardware (2026-07-29)**: a Bluetooth headphone disconnect
+   during a test-tone session triggered `onErrorAfterClose` → close/reopen on
+   the new route, with no crash and the engine landing back on clean
+   Exclusive/LowLatency/MMap numbers. This was mid-tone rather than mid-take
+   specifically — the mid-*recording* case (frame gap handling in the ring
+   buffer/writer thread) is still worth a dedicated test per item 3 below.
 6. **Playback double-start race** (minor, documented not fixed): calling
    `startPlayback()` again while a previous `loaderThreadLoop` is still mid-load
    isn't fully guarded — the UI disables the Play button while `isPlaying` is
@@ -167,8 +171,35 @@ criteria from the plan:
   the host CMake target is worth doing either at the tail end of this phase's
   verification pass or right at the start of Phase 2 — don't let it slide
   indefinitely.
-- No device-specific numbers are recorded in this doc — it was never run on real
-  hardware. Once you've been through the checklist above, it's worth appending
-  actual observed numbers here (round trip estimate, xrun behavior, which
-  fallback rungs your test device actually lands on) so Phase 2 has a real
-  baseline instead of guesses.
+## Verified on device (2026-07-29)
+
+Same physical Android 15 device as PHASE-00.md, driven via `adb`
+(screenshots + `uiautomator` taps). The recorded take was room-tone/ambient
+noise picked up by the phone's own mic (no human spoke/played into it) —
+this validates the technical pipeline exactly (frame counts, threading,
+file I/O, exact pre-roll math) but says nothing about audio *quality*;
+that still needs a real human take.
+
+- **Full round trip**: armed at 80 BPM, recorded for real wall-clock time
+  spanning the tap → screenshot → scroll → tap sequence, stopped, played
+  back to completion. `Frames recorded: 3,506,688`. `Frames dropped: 0`
+  throughout record *and* playback. `XRun count: 0` throughout.
+- **Pre-roll math checked out exactly**: `3,506,688 − 36,000` (0.75s
+  pre-roll @ 48kHz) `= 3,470,688`, which is precisely the
+  `playbackTotalFrames` the engine reported — confirms the head-skip logic
+  in `writerThreadLoop` trims exactly the intended amount, not
+  approximately.
+- **Playback auto-stopped correctly** at `3,470,688 / 3,470,688` (exact
+  match), UI buttons returned to their idle-enabled state without manual
+  intervention.
+- **50 rapid start/stop cycles** on the test-tone path (not the
+  record/playback path specifically — see PHASE-00.md's verification
+  section): process stayed alive, zero crashes, zero engine warnings,
+  capability readout unchanged after. The Memory Profiler / TSan-based
+  checks this doc originally called for (items 5–6 in the checklist above)
+  are still outstanding — the black-box crash/logcat check is a lower bar
+  than those, not a replacement for them.
+- **Not yet done**: a deliberate mid-*recording* Bluetooth/wired
+  disconnect (the one that happened was mid-test-tone), and the
+  force-stop-from-Recents mid-recording check (item 6 in the checklist
+  above).

@@ -1,12 +1,12 @@
 # Phase 0 — Repo skeleton + "hello Oboe"
 
-**Status: written, not yet built.** This environment has no Java, Gradle, Android
-SDK/NDK, or CMake/C++ toolchain available (confirmed by checking for all of them
-before starting). Everything below was hand-written against my knowledge of the
-Gradle/AGP/Kotlin/Compose/Oboe/CMake APIs and cross-checked for internal
-consistency, but **none of it has been compiled.** Treat this phase as a careful
-first draft that needs one real build pass on your machine before it's "done" —
-see the checklist at the bottom.
+**Status: verified on device (2026-07-29).** Originally written with no local
+Java/Gradle/Android SDK/NDK/CMake toolchain available, so it shipped
+uncompiled — see git history for that caveat. A real Android Studio +
+NDK 27.2.12479018 + CMake 3.22.1 toolchain was then set up and the app was
+built and run on a physical Android 15 device. Two real Oboe 1.9.3 API
+breaks were caught on first compile and fixed (see "Verified on device"
+below) — the rest of the reasoning in this doc held up as written.
 
 ## What shipped
 
@@ -121,6 +121,46 @@ Roughly in order of how likely each is to actually be the problem:
    ```
    All 5 should pass. If they don't, that's a real bug in `sine_wave.cpp`
    independent of anything Android — fix it there before chasing it on-device.
+
+## Verified on device (2026-07-29)
+
+Physical Android 15 phone, USB-connected, driven via `adb` (screenshots +
+`uiautomator`-driven taps rather than manual interaction). Real numbers,
+not the guesses this doc originally shipped with:
+
+- **Two Oboe 1.9.3 API breaks caught on first compile**, both in
+  `audio_engine.cpp`: `AudioStreamBuilder::openStream()` no longer returns
+  `ResultWithValue<shared_ptr<AudioStream>>` — it now takes a
+  `shared_ptr<AudioStream>&` out-param and returns `Result` directly.
+  `AudioStream::isMMapUsed()` was removed from the base class entirely; the
+  real replacement is the static `oboe::OboeExtensions::isMMapUsed(AudioStream*)`
+  helper (`oboe/OboeExtensions.h`) — note its own header comment says it's
+  "only for testing... may change or be removed at any time," fine for a
+  diagnostics screen, worth reconsidering if ever used elsewhere.
+- **One real product bug, not a toolchain issue**: "Play test tone" opened
+  the duplex engine (which always opens both streams — see this doc's
+  output-master design above) without ever requesting `RECORD_AUDIO`, so a
+  fresh install failed input `requestStart()` with `ErrorDisconnected` the
+  first time anyone tapped it, before ever reaching "Arm & record." Fixed
+  by gating the tone button behind the same permission-request flow Phase 1
+  already used for recording.
+- **Actual capability readout** on this device with no Bluetooth connected:
+  `AAudio, 48000 Hz, 96 frames/burst, Mono, Float, Exclusive, LowLatency,
+  MMap yes, XRun 0`. That's the real fast path landing correctly, not a
+  fallback.
+- **60-second soak**: `XRun count` stayed at 0 for the full duration. Phase
+  0's literal Done bar, met.
+- **50 rapid open/close cycles** (tap Play/Stop 50×, ~0.35s apart, driven
+  via a single on-device shell loop): process stayed alive throughout, zero
+  `FATAL`/`AndroidRuntime`/crash entries in logcat, zero
+  `SongNotesAudioEngine` warnings, capability readout unchanged afterward.
+  No observable leak from this test (see PHASE-01.md for the more targeted
+  ring-buffer/thread-join version of this check).
+- A **Bluetooth headphone disconnect mid-test** (unintentional, happened
+  while verifying) exercised the error-recovery path live: `onAudioReady`
+  → `onErrorAfterClose` → close/reopen on the new route, landing back on
+  the same Exclusive/LowLatency/MMap numbers with no crash. See PHASE-01.md
+  for more on this.
 
 ## What Phase 1 assumes
 
