@@ -203,6 +203,16 @@ criteria from the plan:
   physical device.
 ## Verified on device (2026-07-29)
 
+**Superseded for the input stream specifically, same day**: the numbers
+below were captured before Phase 3's AEC/NS/AGC work added
+`setSessionId(oboe::SessionId::Allocate)` to the input stream builder — at
+capture time, input was still Exclusive/MMap, matching output. It no longer
+is; see PHASE-03.md's "AEC/NS/AGC disabling, verified on device" section
+for what changed and why it was kept permanent rather than
+calibration-only. Everything below about frame counts, dropped frames, and
+the pre-roll math is still accurate — only the input stream's own
+sharing/performance-mode/frames-per-burst characteristics changed.
+
 Same physical Android 15 device as PHASE-00.md, driven via `adb`
 (screenshots + `uiautomator` taps). The recorded take was room-tone/ambient
 noise picked up by the phone's own mic (no human spoke/played into it) —

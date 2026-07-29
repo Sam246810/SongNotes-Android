@@ -41,6 +41,12 @@ public:
     NativeAudioEngine(const NativeAudioEngine &) = delete;
     NativeAudioEngine &operator=(const NativeAudioEngine &) = delete;
 
+    // Opens the duplex streams if not already open, without starting any
+    // particular mode. Lets a caller query inputSessionId() — and set up
+    // AEC/NS/AGC on it — before startCalibrationCapture() begins, rather
+    // than racing the very first captured frames against effect setup.
+    bool ensureReady();
+
     bool startTestTone();
     void stopTestTone();
 
@@ -96,6 +102,12 @@ public:
     bool isMMapUsed();
     int32_t xRunCount();
     std::string lastError();
+
+    // The input stream's allocated session ID (see setSessionId in
+    // openStreamsLocked), for attaching android.media.audiofx.* effects
+    // from Kotlin. -1 (matches oboe::SessionId::None / AudioManager's
+    // AUDIO_SESSION_ID_NONE) if no input stream is open.
+    int32_t inputSessionId();
 
 private:
     // Must be called with mRebuildMutex already held.

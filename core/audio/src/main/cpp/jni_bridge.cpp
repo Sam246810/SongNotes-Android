@@ -24,6 +24,12 @@ Java_com_songnotes_core_audio_AudioEngine_nativeCreate(JNIEnv *, jobject) {
 }
 
 JNIEXPORT jboolean JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeEnsureReady(JNIEnv *, jobject, jlong handle) {
+    auto *engine = toEngine(handle);
+    return engine != nullptr && engine->ensureReady();
+}
+
+JNIEXPORT jboolean JNICALL
 Java_com_songnotes_core_audio_AudioEngine_nativeStartTestTone(JNIEnv *, jobject, jlong handle) {
     auto *engine = toEngine(handle);
     return engine != nullptr && engine->startTestTone();
@@ -175,6 +181,12 @@ JNIEXPORT jstring JNICALL
 Java_com_songnotes_core_audio_AudioEngine_nativeGetLastError(JNIEnv *env, jobject, jlong handle) {
     auto *engine = toEngine(handle);
     return toJString(env, engine ? engine->lastError() : "");
+}
+
+JNIEXPORT jint JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeGetInputSessionId(JNIEnv *, jobject, jlong handle) {
+    auto *engine = toEngine(handle);
+    return engine ? engine->inputSessionId() : -1;
 }
 
 } // extern "C"

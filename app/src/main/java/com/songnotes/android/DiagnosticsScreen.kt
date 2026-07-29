@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.audio.Calibration
+import com.songnotes.core.audio.CalibrationAudioEffects
 import com.songnotes.core.audio.EngineCapabilities
 import com.songnotes.core.audio.EngineState
 import kotlin.math.abs
@@ -171,7 +172,17 @@ private fun EngineCalibrationCaptureSection(engine: AudioEngine) {
         // 0.5s of room for the real acoustic round trip + reverb tail to
         // actually land in the capture, past where the sweep's dry image ends.
         val tailPaddingFrames = 24000
+
+        // Open streams first (without starting a mode) so inputSessionId()
+        // is real before AEC/NS/AGC setup, rather than racing capture start.
+        if (!engine.ensureReady()) {
+            resultText = "Failed to open streams — see Last error above."
+            return
+        }
+        val effects = CalibrationAudioEffects(engine.inputSessionId())
+
         if (!engine.startCalibrationCapture(sweepData.sweep, tailPaddingFrames)) {
+            effects.release()
             resultText = "Failed to start calibration capture — see Last error above."
             return
         }
@@ -181,10 +192,16 @@ private fun EngineCalibrationCaptureSection(engine: AudioEngine) {
                 delay(100)
             }
             val recording = engine.takeCalibrationCapture()
+            effects.release()
             isCapturing = false
             resultText = withContext(Dispatchers.Default) {
+                val effectsLine = "AEC: %s, NS: %s, AGC: %s".format(
+                    effectStatusText(effects.status.aecAvailable, effects.status.aecDisabled),
+                    effectStatusText(effects.status.nsAvailable, effects.status.nsDisabled),
+                    effectStatusText(effects.status.agcAvailable, effects.status.agcDisabled),
+                )
                 if (recording.isEmpty()) {
-                    "No capture retrieved — aborted, or see Last error above."
+                    "No capture retrieved — aborted, or see Last error above.\n$effectsLine"
                 } else {
                     val measurement = Calibration.measureRoundTripDelay(
                         recording = recording,
@@ -193,8 +210,8 @@ private fun EngineCalibrationCaptureSection(engine: AudioEngine) {
                     )
                     val delayMs = measurement.frames / sampleRate * 1000.0
                     "Captured ${recording.size} frames (expected ${sweepData.sweep.size + tailPaddingFrames}).\n" +
-                        "Recovered round-trip delay: %.2f frames (%.2f ms)\nPNR: %.1f dB".format(
-                            measurement.frames, delayMs, measurement.pnrDb,
+                        "Recovered round-trip delay: %.2f frames (%.2f ms)\nPNR: %.1f dB\n%s".format(
+                            measurement.frames, delayMs, measurement.pnrDb, effectsLine,
                         )
                 }
             }
@@ -216,7 +233,9 @@ private fun EngineCalibrationCaptureSection(engine: AudioEngine) {
     Text(
         "Plays a real sweep through the duplex engine and captures the actual acoustic " +
             "loopback via the mic, then measures it with the same code the smoke test above " +
-            "already proved works — this is the real device round trip, not synthesized data.",
+            "already proved works — this is the real device round trip, not synthesized data. " +
+            "Requests AEC/NS/AGC disabled on the input session first (reports what was actually " +
+            "available and actually disabled below — some devices can't fully honor this).",
         style = MaterialTheme.typography.bodySmall,
     )
     Spacer(Modifier.height(12.dp))
@@ -499,6 +518,12 @@ private fun RecordPlaybackSection(engine: AudioEngine) {
         Spacer(Modifier.height(8.dp))
         Text(it, color = MaterialTheme.colorScheme.error)
     }
+}
+
+private fun effectStatusText(available: Boolean, disabled: Boolean) = when {
+    !available -> "n/a on this device"
+    disabled -> "disabled"
+    else -> "available but failed to disable"
 }
 
 @Composable

@@ -161,15 +161,65 @@ aggregation baked in (currently each tap is one manual repetition; the
 wizard's own repeat-and-aggregate loop is still ahead), and what happens
 under a genuinely noisy room rather than a quiet one.
 
+## AEC/NS/AGC disabling, verified on device (2026-07-29)
+
+The input stream now requests `oboe::SessionId::Allocate` (in
+`openStreamsLocked()`), and a new `AudioEngine.inputSessionId()` +
+`CalibrationAudioEffects` (pure `android.media.audiofx.*` Kotlin, no
+JNI/Oboe involvement — matches the plan's own note that this is Java-side
+surface) attach and disable `AcousticEchoCanceler`/`NoiseSuppressor`/
+`AutomaticGainControl` on that session before a calibration capture starts.
+A new `AudioEngine.ensureReady()` opens streams without starting a mode, so
+the session ID is real *before* `startCalibrationCapture()` begins, rather
+than racing effect setup against the first captured frames.
+
+**On the physical test device**: `AcousticEchoCanceler` and
+`NoiseSuppressor` are both available and both successfully report disabled
+after the request; `AutomaticGainControl` isn't implemented on this device
+at all (`isAvailable() == false` — not uncommon; many OEMs bake AGC into
+mic hardware/gain-stage rather than exposing it as a toggleable platform
+effect).
+
+**A real, significant, and non-obvious side effect surfaced immediately**:
+requesting a session ID dropped the recovered round-trip delay measurement
+from ~932-937 frames (~19.4ms, the three Engine-integration baseline runs
+with no session/AEC handling) to **4664.51 frames (97.18ms)** — roughly 5x.
+Confirmed via logcat this is NOT a bug: the *output* stream stayed
+Exclusive/MMap/96-frames-per-burst throughout (only the input builder got
+`setSessionId`), but the *input* stream fell from Exclusive/MMap
+(`sharing=0`, 96 frames/burst) to Shared (`sharing=1`, 882 frames/burst) the
+moment a session was requested. Oboe's own doc comment on `SessionId::Allocate`
+warns exactly this: "the use of this flag may result in higher latency" —
+Exclusive/MMap streams get their speed by bypassing the platform's effects
+processing chain entirely, which is structurally incompatible with
+attaching a Java `AudioEffect` that needs to sit in that chain.
+
+**Decision: this is now permanent for every input stream, not toggled per
+calibration.** The alternative — only requesting a session during
+calibration, reverting to session-less Exclusive input for plain Phase 1/2
+recording — was seriously considered and rejected: calibration's entire
+purpose is measuring *this stream's* round-trip latency so it can be
+corrected for later. If real recording used a different (faster, no
+session) input configuration than what calibration measured, the measured
+offset would be correcting for the wrong path — actively wrong, not just
+imprecise. Keeping the session permanent means Phase 1/2 recording's own
+input stream now runs at the same ~5x-larger buffer Shared-mode calibration
+measures against, which costs nothing in recorded audio *quality* (no live
+monitoring depends on this stream's own round-trip latency being small)
+but is a real, worth-knowing change from Phase 0/1's original
+Exclusive/MMap/96-frame numbers for the input side specifically. Output is
+untouched.
+
+**Not yet done**: the diagnostics screen's capability readout still only
+reports the *output* stream's `sharingMode`/`performanceMode`/
+`framesPerBurst`/`isMMapUsed` — it has no visibility into the input
+stream's now-independently-variable path. Worth adding equivalent
+input-side capability getters before this becomes confusing to debug later.
+
 ## What's left for Phase 3 (not started)
 
 Roughly in the order the plan's architecture section implies:
 
-- **AEC/NS/AGC disabling** via `SessionId::Allocate` and Java's
-  `AcousticEchoCanceler`/`NoiseSuppressor`/`AutomaticGainControl` — this is
-  Java-side API surface (`android.media.audiofx.*`), not something Oboe or
-  this C++ code touches directly; needs the stream's session ID threaded up
-  to Kotlin.
 - **AEC-defeat detection by convergence signature** (PNR high on rep 1,
   collapsed by rep 5 — the plan's specific heuristic for "adaptive AEC ate
   our sweep").

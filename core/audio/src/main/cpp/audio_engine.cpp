@@ -82,6 +82,27 @@ bool NativeAudioEngine::openStreamsLocked() {
         ->setChannelCount(oboe::ChannelCount::Mono)
         ->setSampleRate(mOutputStream->getSampleRate())
         ->setInputPreset(oboe::InputPreset::Unprocessed)
+        // Phase 3: a real allocated session ID is required to attach the
+        // Java-side AcousticEchoCanceler/NoiseSuppressor/AutomaticGainControl
+        // APIs (android.media.audiofx.*) for calibration — Oboe's default
+        // (SessionId::None) means "effects cannot be used with this
+        // stream." NOT free, and NOT calibration-only despite that: Oboe's
+        // own doc comment on this flag warns it "may result in higher
+        // latency," and on-device this is exactly what happens — measured
+        // on a real Android 15 phone, requesting a session dropped the
+        // INPUT stream from Exclusive/MMap (96 frames/burst) to Shared (882
+        // frames/burst); output was unaffected (only input needs the
+        // effects chain). Left permanently on for every input stream, not
+        // toggled per-mode: calibration exists to measure this exact
+        // stream's round-trip latency for later correction, so if plain
+        // Phase 1/2 recording ever used a *different* input configuration,
+        // calibration would be correcting for the wrong path. The ~5x
+        // latency difference this costs Phase 1/2 recording doesn't affect
+        // recorded audio quality (no live monitoring happens against it) —
+        // only the input stream's own internal round-trip latency, which
+        // nothing currently depends on being small. See docs/handoff/
+        // PHASE-03.md for the actual before/after numbers.
+        ->setSessionId(oboe::SessionId::Allocate)
         ->setErrorCallback(this);
 
     oboe::Result inResult = inBuilder.openStream(mInputStream);
@@ -168,6 +189,8 @@ bool NativeAudioEngine::ensureOutputStarted() {
 int32_t NativeAudioEngine::sampleRateLocked() {
     return mOutputStream ? mOutputStream->getSampleRate() : 48000;
 }
+
+bool NativeAudioEngine::ensureReady() { return ensureStreamsOpen(); }
 
 bool NativeAudioEngine::startTestTone() {
     if (!ensureStreamsOpen()) return false;
@@ -718,6 +741,12 @@ int32_t NativeAudioEngine::xRunCount() {
 std::string NativeAudioEngine::lastError() {
     std::lock_guard<std::mutex> lock(mErrorMutex);
     return mLastError;
+}
+
+int32_t NativeAudioEngine::inputSessionId() {
+    std::lock_guard<std::mutex> lock(mRebuildMutex);
+    return mInputStream ? static_cast<int32_t>(mInputStream->getSessionId())
+                         : static_cast<int32_t>(oboe::SessionId::None);
 }
 
 } // namespace songnotes

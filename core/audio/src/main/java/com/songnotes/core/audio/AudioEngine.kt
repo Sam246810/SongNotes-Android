@@ -35,6 +35,20 @@ class AudioEngine {
         return handle != 0L
     }
 
+    /**
+     * Opens the duplex streams without starting any particular mode. Call
+     * before [inputSessionId] when the caller needs a real session ID —
+     * e.g. to set up [CalibrationAudioEffects] — before the capture that
+     * will use it actually starts.
+     */
+    fun ensureReady(): Boolean = ensureCreated() && nativeEnsureReady(handle)
+
+    /** The input stream's allocated session ID, for [CalibrationAudioEffects]. Call [ensureReady] first. */
+    fun inputSessionId(): Int {
+        val h = handle
+        return if (h == 0L) -1 else nativeGetInputSessionId(h)
+    }
+
     fun startTestTone(): Boolean = ensureCreated() && nativeStartTestTone(handle)
 
     fun stopTestTone() {
@@ -142,6 +156,8 @@ class AudioEngine {
 
     private external fun nativeCreate(): Long
     private external fun nativeDestroy(handle: Long)
+    private external fun nativeEnsureReady(handle: Long): Boolean
+    private external fun nativeGetInputSessionId(handle: Long): Int
     private external fun nativeStartTestTone(handle: Long): Boolean
     private external fun nativeStopTestTone(handle: Long)
     private external fun nativeArmRecording(
