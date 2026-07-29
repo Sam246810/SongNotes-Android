@@ -25,6 +25,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
+find_package(Threads REQUIRED) # test_spsc_ring_buffer.cpp / test_scene.cpp use std::thread
+
 # The same DSP sources that ship in the Android .so, compiled here
 # unmodified — no Android/Oboe/JNI headers anywhere in their include chain.
 add_library(songnotes_dsp STATIC
@@ -47,8 +49,14 @@ add_executable(dsp_tests
     test_matched_filter.cpp
     test_calibration_stats.cpp
     test_calibration_roundtrip.cpp
+    test_spsc_ring_buffer.cpp
+    test_scene.cpp
 )
-target_link_libraries(dsp_tests PRIVATE songnotes_dsp GTest::gtest_main)
+# test_spsc_ring_buffer.cpp / test_scene.cpp include spsc_ring_buffer.h and
+# scene.h directly from `..` — already on the include path via
+# songnotes_dsp's PUBLIC target_include_directories above, so no separate
+# target_include_directories call is needed for them here.
+target_link_libraries(dsp_tests PRIVATE songnotes_dsp GTest::gtest_main Threads::Threads)
 
 include(GoogleTest)
 gtest_discover_tests(dsp_tests)

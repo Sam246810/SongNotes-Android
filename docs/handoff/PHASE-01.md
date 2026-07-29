@@ -136,12 +136,39 @@ criteria from the plan:
    Growth here likely means a `std::thread` isn't being joined somewhere, or a
    `Scene` generation isn't being retired — both `writerThreadLoop`/
    `loaderThreadLoop` and `ScenePublisher`'s retention count are the first
-   places to check.
+   places to check. **Verified (2026-07-29), approximated without Android
+   Studio**: no GUI Memory Profiler available in this environment, so this
+   was approximated by sampling `VmRSS` from `/proc/<pid>/status` after each
+   of 60 real Arm-record→Stop cycles on the physical device. Pattern: RSS
+   climbs for 20-24 cycles, plateaus, then drops sharply (a ~10-22MB drop) —
+   classic GC-reclaim sawtooth, not monotonic growth. The ending RSS after
+   60 cycles (~170.8MB) was *lower* than the starting RSS (~178MB). This
+   matters specifically for the concern named above: ART's garbage collector
+   cannot reclaim native (C++) heap — only the managed Kotlin/JVM heap — so
+   a full, repeated recovery like this is evidence against exactly the
+   thread-join/Scene-retention leak this check exists to catch. Not a full
+   replacement for a real Memory Profiler session (no native heap dump was
+   taken), but a meaningfully strong signal in the meantime.
 5. **TSan over the ring buffer specifically.** Building the whole app under
    TSan is heavyweight; the more targeted option is running the *host* test
    target (once it has ring-buffer tests — Phase 1 didn't add any, see "what
    Phase 2 assumes" below) with `-fsanitize=thread` added to the host
-   CMakeLists.txt. Worth doing before trusting this under real recording load.
+   CMakeLists.txt. **Attempted (2026-07-29)**: no desktop compiler exists in
+   this environment either, so `host/test_spsc_ring_buffer.cpp` and
+   `host/test_scene.cpp` were instead cross-compiled directly with the NDK's
+   `aarch64-linux-android30-clang++` and run as standalone console binaries
+   on the physical device via `adb shell` — real concurrent execution, not
+   just single-threaded reasoning. A `-fsanitize=thread` build was also
+   attempted the same way but TSan's own runtime segfaults on this device
+   during its ASLR-disabling re-exec (`ThreadSanitizer: CHECK failed:
+   tsan_rtl.cpp:1036`) — a TSan/Android-runtime compatibility issue, not a
+   bug in this project's code; confirmed via `TSAN_OPTIONS=verbosity=2`
+   before giving up on it. The non-sanitized concurrent run is still real
+   signal: 2,000,000 ring-buffer elements and 200,000 Scene publishes against
+   a busy reader, both with zero drops/corruption/crashes. TSan itself
+   remains a genuine gap — worth revisiting with a different device/API
+   level or a proper desktop build if the ring buffer's memory-ordering
+   correctness is ever in doubt.
 6. **Background the app mid-recording** (home button, lock screen) — the
    notification should stay visible, recording should continue, "Frames
    recorded" should keep climbing when you return. Then **force-stop the app
@@ -163,14 +190,17 @@ criteria from the plan:
   `TestTone`). Phase 2 will likely add at least `Metronome`/`Armed` — extend the
   enum and the `onAudioReady` mode switch rather than bolting a parallel state
   machine on top.
-- No host-side GoogleTest coverage was added for the ring buffer, `Scene`, or
-  duplex logic this phase — Phase 0's `dsp/sine_wave` tests are still the only
-  host tests. Given this phase is a **hard gate** per the plan and TSan
-  correctness matters a lot here, adding ring-buffer tests (single-thread
-  functional tests at minimum; TSan-driven concurrent stress tests ideally) to
-  the host CMake target is worth doing either at the tail end of this phase's
-  verification pass or right at the start of Phase 2 — don't let it slide
-  indefinitely.
+- **Closed (2026-07-29)**: `host/test_spsc_ring_buffer.cpp` and
+  `host/test_scene.cpp` now exist, covering both single-thread functional
+  behavior (wraparound, overflow, underflow, clear, and — for `Scene` — the
+  generation-retention eviction policy itself) and real two-thread
+  concurrent stress runs, added to `host/CMakeLists.txt`'s `dsp_tests`
+  target for whenever a desktop compiler is available. TSan-driven
+  concurrent testing was attempted but blocked by a TSan/Android-runtime
+  compatibility bug on-device (see the "First build + test — checklist"
+  section above) — the concurrent tests still ran and passed without the
+  sanitizer, cross-compiled via NDK clang and executed directly on the
+  physical device.
 ## Verified on device (2026-07-29)
 
 Same physical Android 15 device as PHASE-00.md, driven via `adb`
