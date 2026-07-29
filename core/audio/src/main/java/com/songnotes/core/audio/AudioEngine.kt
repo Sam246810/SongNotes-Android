@@ -41,8 +41,14 @@ class AudioEngine {
         if (handle != 0L) nativeStopTestTone(handle)
     }
 
-    /** [filePath] should live under the app's own storage (e.g. `context.filesDir`) — no permission-scoped storage handling here yet. */
-    fun startRecording(filePath: String): Boolean = ensureCreated() && nativeStartRecording(handle, filePath)
+    /**
+     * Begins count-in (countInBeats beats at bpm/beatsPerBar), then starts
+     * actually recording at the downbeat. [filePath] should live under the
+     * app's own storage (e.g. `context.filesDir`) — no permission-scoped
+     * storage handling here yet.
+     */
+    fun armRecording(filePath: String, bpm: Double, beatsPerBar: Int, countInBeats: Int): Boolean =
+        ensureCreated() && nativeArmRecording(handle, filePath, bpm, beatsPerBar, countInBeats)
 
     fun stopRecording() {
         if (handle != 0L) nativeStopRecording(handle)
@@ -89,6 +95,8 @@ class AudioEngine {
             playbackTotalFrames = buf.getInt(EngineState.OFFSET_PLAYBACK_TOTAL_FRAMES),
             xRunCount = buf.getInt(EngineState.OFFSET_XRUN_COUNT),
             framesDropped = buf.getInt(EngineState.OFFSET_FRAMES_DROPPED),
+            isArmed = buf.getInt(EngineState.OFFSET_IS_ARMED) != 0,
+            countInBeatsRemaining = buf.getInt(EngineState.OFFSET_COUNT_IN_BEATS_REMAINING),
         )
     }
 
@@ -106,7 +114,13 @@ class AudioEngine {
     private external fun nativeDestroy(handle: Long)
     private external fun nativeStartTestTone(handle: Long): Boolean
     private external fun nativeStopTestTone(handle: Long)
-    private external fun nativeStartRecording(handle: Long, filePath: String): Boolean
+    private external fun nativeArmRecording(
+        handle: Long,
+        filePath: String,
+        bpm: Double,
+        beatsPerBar: Int,
+        countInBeats: Int,
+    ): Boolean
     private external fun nativeStopRecording(handle: Long)
     private external fun nativeStartPlayback(handle: Long, filePath: String): Boolean
     private external fun nativeStopPlayback(handle: Long)

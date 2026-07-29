@@ -13,6 +13,8 @@ data class EngineState(
     val playbackTotalFrames: Int,
     val xRunCount: Int,
     val framesDropped: Int,
+    val isArmed: Boolean,
+    val countInBeatsRemaining: Int,
 ) {
     companion object {
         const val OFFSET_IS_RECORDING = 0
@@ -22,7 +24,9 @@ data class EngineState(
         const val OFFSET_PLAYBACK_TOTAL_FRAMES = 16
         const val OFFSET_XRUN_COUNT = 20
         const val OFFSET_FRAMES_DROPPED = 24
-        const val SIZE_BYTES = 28
+        const val OFFSET_IS_ARMED = 28
+        const val OFFSET_COUNT_IN_BEATS_REMAINING = 32
+        const val SIZE_BYTES = 36
 
         fun idle() = EngineState(
             isRecording = false,
@@ -32,6 +36,8 @@ data class EngineState(
             playbackTotalFrames = 0,
             xRunCount = 0,
             framesDropped = 0,
+            isArmed = false,
+            countInBeatsRemaining = 0,
         )
     }
 }

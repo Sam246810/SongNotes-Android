@@ -14,11 +14,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -26,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -117,22 +120,30 @@ private fun RecordPlaybackSection(engine: AudioEngine) {
     var isPolling by remember { mutableStateOf(false) }
     var engineState by remember { mutableStateOf(EngineState.idle()) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
+    var bpmText by remember { mutableStateOf("80") }
 
     val takeFile = remember {
-        File(context.filesDir, "takes/phase1_test.f32").also { it.parentFile?.mkdirs() }
+        File(context.filesDir, "takes/phase2_test.f32").also { it.parentFile?.mkdirs() }
     }
     // Recomputed each recomposition on purpose — cheap, and file existence
     // can change from a button click above without a full screen rebuild.
     val takeFileExists = takeFile.exists()
 
     fun beginRecording() {
+        val bpm = bpmText.toDoubleOrNull()
+        if (bpm == null || bpm <= 0.0) {
+            statusMessage = "Enter a valid BPM before recording."
+            return
+        }
         context.startForegroundService(Intent(context, RecordingForegroundService::class.java))
-        if (engine.startRecording(takeFile.absolutePath)) {
+        // 4 beats of count-in, 4/4 time — fixed for this diagnostic screen;
+        // a real UI for these lands with Phase 8/10.
+        if (engine.armRecording(takeFile.absolutePath, bpm, beatsPerBar = 4, countInBeats = 4)) {
             engineState = engine.state()
             isPolling = true
             statusMessage = null
         } else {
-            statusMessage = "Failed to start recording — see Last error above."
+            statusMessage = "Failed to arm recording — see Last error above."
             context.stopService(Intent(context, RecordingForegroundService::class.java))
         }
     }
@@ -151,27 +162,37 @@ private fun RecordPlaybackSection(engine: AudioEngine) {
     LaunchedEffect(isPolling) {
         while (isPolling) {
             engineState = engine.state()
-            if (!engineState.isRecording && !engineState.isPlaying) {
+            if (!engineState.isArmed && !engineState.isRecording && !engineState.isPlaying) {
                 isPolling = false
             }
-            delay(200)
+            delay(100)
         }
     }
 
     Spacer(Modifier.height(32.dp))
     HorizontalDivider()
     Spacer(Modifier.height(16.dp))
-    Text("Record & Playback (Phase 1)", style = MaterialTheme.typography.titleMedium)
+    Text("Record & Playback (Phase 2)", style = MaterialTheme.typography.titleMedium)
     Spacer(Modifier.height(8.dp))
     Text(
-        "Records real mic input to ${takeFile.name}, then plays it back through the same duplex engine.",
+        "4-beat count-in against a metronome, then records real mic input to ${takeFile.name}. " +
+            "Plays back through the same duplex engine, with the pre-roll already trimmed off.",
         style = MaterialTheme.typography.bodySmall,
     )
     Spacer(Modifier.height(16.dp))
 
+    OutlinedTextField(
+        value = bpmText,
+        onValueChange = { bpmText = it },
+        label = { Text("BPM") },
+        enabled = !engineState.isArmed && !engineState.isRecording,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+    )
+    Spacer(Modifier.height(12.dp))
+
     Row {
         Button(
-            enabled = !engineState.isRecording && !engineState.isPlaying,
+            enabled = !engineState.isArmed && !engineState.isRecording && !engineState.isPlaying,
             onClick = {
                 if (!hasRecordPermission) {
                     permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -180,13 +201,13 @@ private fun RecordPlaybackSection(engine: AudioEngine) {
                 }
             },
         ) {
-            Text("Record")
+            Text("Arm & record")
         }
 
         Spacer(Modifier.width(12.dp))
 
         Button(
-            enabled = engineState.isRecording,
+            enabled = engineState.isArmed || engineState.isRecording,
             onClick = {
                 engine.stopRecording()
                 context.stopService(Intent(context, RecordingForegroundService::class.java))
@@ -196,6 +217,14 @@ private fun RecordPlaybackSection(engine: AudioEngine) {
         ) {
             Text("Stop recording")
         }
+    }
+
+    if (engineState.isArmed) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Counting in: ${engineState.countInBeatsRemaining}",
+            style = MaterialTheme.typography.titleMedium,
+        )
     }
 
     Spacer(Modifier.height(8.dp))
@@ -231,6 +260,7 @@ private fun RecordPlaybackSection(engine: AudioEngine) {
     }
 
     Spacer(Modifier.height(16.dp))
+    CapabilityRow("Armed (counting in)", if (engineState.isArmed) "yes" else "no")
     CapabilityRow("Recording", if (engineState.isRecording) "yes" else "no")
     CapabilityRow("Playing", if (engineState.isPlaying) "yes" else "no")
     CapabilityRow("Frames recorded", "${engineState.framesRecorded}")

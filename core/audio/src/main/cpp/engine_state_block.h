@@ -26,9 +26,11 @@ struct EngineStateBlock {
     std::atomic<int32_t> playbackTotalFrames{0};
     std::atomic<int32_t> xRunCount{0};
     std::atomic<int32_t> framesDropped{0};
+    std::atomic<int32_t> isArmed{0};              // true during count-in, false once past the downbeat
+    std::atomic<int32_t> countInBeatsRemaining{0}; // for the UI's "3, 2, 1..." display
 };
 
-static_assert(sizeof(EngineStateBlock) == 28,
+static_assert(sizeof(EngineStateBlock) == 36,
               "EngineStateBlock layout changed — update EngineState.kt's offsets to match");
 
 } // namespace songnotes

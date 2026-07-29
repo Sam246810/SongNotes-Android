@@ -25,10 +25,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
-# The same sine_wave.cpp that ships in the Android .so, compiled here
-# unmodified — no Android/Oboe/JNI headers anywhere in its include chain.
+# The same DSP sources that ship in the Android .so, compiled here
+# unmodified — no Android/Oboe/JNI headers anywhere in their include chain.
 add_library(songnotes_dsp STATIC
     ../dsp/sine_wave.cpp
+    ../dsp/click.cpp
 )
 target_include_directories(songnotes_dsp PUBLIC ..)
 
@@ -36,6 +37,7 @@ enable_testing()
 
 add_executable(dsp_tests
     test_sine_wave.cpp
+    test_click.cpp
 )
 target_link_libraries(dsp_tests PRIVATE songnotes_dsp GTest::gtest_main)
 

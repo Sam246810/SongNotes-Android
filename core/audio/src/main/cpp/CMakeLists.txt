@@ -11,6 +11,7 @@ add_library(songnotes_audio SHARED
     audio_engine.cpp
     jni_bridge.cpp
     dsp/sine_wave.cpp
+    dsp/click.cpp
 )
 
 target_include_directories(songnotes_audio PRIVATE .)

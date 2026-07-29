@@ -54,6 +54,16 @@ public:
                mReadIndex.load(std::memory_order_relaxed);
     }
 
+    // Discards any buffered content between uses of a long-lived buffer.
+    // Only safe to call when NEITHER the producer nor the consumer is
+    // currently active — e.g. after the writer thread has been joined and
+    // before a new take is armed. Never call this while recording is live;
+    // it is not itself synchronized against concurrent write()/read().
+    void clear() {
+        mWriteIndex.store(0, std::memory_order_relaxed);
+        mReadIndex.store(0, std::memory_order_relaxed);
+    }
+
 private:
     const size_t mMask;
     std::vector<T> mBuffer;
