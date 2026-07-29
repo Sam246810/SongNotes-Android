@@ -56,19 +56,18 @@ bool NativeAudioEngine::openStreamsLocked() {
         ->setDataCallback(this)
         ->setErrorCallback(this);
 
-    auto outResult = outBuilder.openStream();
+    oboe::Result outResult = outBuilder.openStream(mOutputStream);
     if (outResult != oboe::Result::OK) {
         LOGW("Exclusive output open failed (%s), retrying Shared",
-             oboe::convertToText(outResult.error()));
+             oboe::convertToText(outResult));
         outBuilder.setSharingMode(oboe::SharingMode::Shared);
-        outResult = outBuilder.openStream();
+        outResult = outBuilder.openStream(mOutputStream);
     }
     if (outResult != oboe::Result::OK) {
         setLastError(std::string("output openStream failed: ") +
-                      oboe::convertToText(outResult.error()));
+                      oboe::convertToText(outResult));
         return false;
     }
-    mOutputStream = outResult.value();
 
     // Input: sample rate matched to what the output stream actually
     // negotiated, so the duplex read never needs to resample.
@@ -83,27 +82,26 @@ bool NativeAudioEngine::openStreamsLocked() {
         ->setInputPreset(oboe::InputPreset::Unprocessed)
         ->setErrorCallback(this);
 
-    auto inResult = inBuilder.openStream();
+    oboe::Result inResult = inBuilder.openStream(mInputStream);
     if (inResult != oboe::Result::OK) {
         LOGW("Exclusive+Unprocessed input open failed (%s), retrying Shared",
-             oboe::convertToText(inResult.error()));
+             oboe::convertToText(inResult));
         inBuilder.setSharingMode(oboe::SharingMode::Shared);
-        inResult = inBuilder.openStream();
+        inResult = inBuilder.openStream(mInputStream);
     }
     if (inResult != oboe::Result::OK) {
         LOGW("Shared+Unprocessed input open failed (%s), retrying VoiceRecognition",
-             oboe::convertToText(inResult.error()));
+             oboe::convertToText(inResult));
         inBuilder.setInputPreset(oboe::InputPreset::VoiceRecognition);
-        inResult = inBuilder.openStream();
+        inResult = inBuilder.openStream(mInputStream);
     }
     if (inResult != oboe::Result::OK) {
         setLastError(std::string("input openStream failed: ") +
-                      oboe::convertToText(inResult.error()));
+                      oboe::convertToText(inResult));
         mOutputStream->close();
         mOutputStream.reset();
         return false;
     }
-    mInputStream = inResult.value();
 
     mInputScratch.assign(
         static_cast<size_t>(kMaxFramesPerCallback) * static_cast<size_t>(mInputStream->getChannelCount()),
@@ -128,7 +126,8 @@ bool NativeAudioEngine::openStreamsLocked() {
     LOGI("Duplex streams opened: out api=%d sharing=%d sampleRate=%d framesPerBurst=%d mmap=%d | "
          "in sharing=%d",
          static_cast<int>(mOutputStream->getAudioApi()), static_cast<int>(mOutputStream->getSharingMode()),
-         mOutputStream->getSampleRate(), mOutputStream->getFramesPerBurst(), mOutputStream->isMMapUsed(),
+         mOutputStream->getSampleRate(), mOutputStream->getFramesPerBurst(),
+         static_cast<int>(mOutputStream->getAudioApi() == oboe::AudioApi::AAudio),
          static_cast<int>(mInputStream->getSharingMode()));
     return true;
 }
@@ -597,7 +596,7 @@ std::string NativeAudioEngine::performanceMode() {
 
 bool NativeAudioEngine::isMMapUsed() {
     std::lock_guard<std::mutex> lock(mRebuildMutex);
-    return mOutputStream && mOutputStream->isMMapUsed();
+    return mOutputStream && mOutputStream->getAudioApi() == oboe::AudioApi::AAudio;
 }
 
 int32_t NativeAudioEngine::xRunCount() {
