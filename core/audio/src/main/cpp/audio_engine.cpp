@@ -1,6 +1,7 @@
 #include "audio_engine.h"
 
 #include <android/log.h>
+#include <oboe/OboeExtensions.h>
 
 #include <algorithm>
 #include <chrono>
@@ -127,7 +128,7 @@ bool NativeAudioEngine::openStreamsLocked() {
          "in sharing=%d",
          static_cast<int>(mOutputStream->getAudioApi()), static_cast<int>(mOutputStream->getSharingMode()),
          mOutputStream->getSampleRate(), mOutputStream->getFramesPerBurst(),
-         static_cast<int>(mOutputStream->getAudioApi() == oboe::AudioApi::AAudio),
+         static_cast<int>(oboe::OboeExtensions::isMMapUsed(mOutputStream.get())),
          static_cast<int>(mInputStream->getSharingMode()));
     return true;
 }
@@ -596,7 +597,7 @@ std::string NativeAudioEngine::performanceMode() {
 
 bool NativeAudioEngine::isMMapUsed() {
     std::lock_guard<std::mutex> lock(mRebuildMutex);
-    return mOutputStream && mOutputStream->getAudioApi() == oboe::AudioApi::AAudio;
+    return mOutputStream && oboe::OboeExtensions::isMMapUsed(mOutputStream.get());
 }
 
 int32_t NativeAudioEngine::xRunCount() {

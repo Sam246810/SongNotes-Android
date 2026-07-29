@@ -50,6 +50,26 @@ fun DiagnosticsScreen(engine: AudioEngine) {
     var isTonePlaying by remember { mutableStateOf(false) }
     var caps by remember { mutableStateOf(EngineCapabilities.unavailable()) }
 
+    val context = LocalContext.current
+    var hasRecordPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    // The engine always opens a duplex pair (output-master pattern), even
+    // for tone-only mode, so starting the tone needs RECORD_AUDIO too —
+    // without it, input requestStart() fails and startTestTone() no-ops.
+    val tonePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        hasRecordPermission = granted
+        if (granted) {
+            isTonePlaying = engine.startTestTone()
+            caps = engine.capabilities()
+        }
+    }
+
     LaunchedEffect(isTonePlaying) {
         while (isTonePlaying) {
             caps = engine.capabilities()
@@ -77,6 +97,8 @@ fun DiagnosticsScreen(engine: AudioEngine) {
                 engine.stopTestTone()
                 isTonePlaying = false
                 caps = engine.capabilities()
+            } else if (!hasRecordPermission) {
+                tonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             } else {
                 isTonePlaying = engine.startTestTone()
                 caps = engine.capabilities()
