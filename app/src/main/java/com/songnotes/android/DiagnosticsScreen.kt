@@ -134,6 +134,109 @@ fun DiagnosticsScreen(engine: AudioEngine) {
 
         RecordPlaybackSection(engine)
         CalibrationDspSmokeTestSection()
+        EngineCalibrationCaptureSection(engine)
+    }
+}
+
+/**
+ * Phase 3 engine integration: plays a real sweep through the duplex
+ * engine's output stream and captures the actual acoustic loopback via the
+ * mic — unlike [CalibrationDspSmokeTestSection] above, which only proves
+ * the JNI boundary using a synthesized-in-Kotlin recording. This is the
+ * real thing: [AudioEngine.startCalibrationCapture] plays [Calibration]'s
+ * sweep out, [AudioEngine.takeCalibrationCapture] retrieves what the mic
+ * actually heard, then the same [Calibration.measureRoundTripDelay] used by
+ * the smoke test recovers the real round-trip latency of this phone's
+ * speaker→air→mic path.
+ */
+@Composable
+private fun EngineCalibrationCaptureSection(engine: AudioEngine) {
+    val context = LocalContext.current
+    var hasRecordPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    var isCapturing by remember { mutableStateOf(false) }
+    var resultText by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun beginCapture() {
+        resultText = null
+        val sampleRate = 48000.0
+        val sweepData = Calibration.generateSweepAndInverse(
+            sampleRate = sampleRate, f1Hz = 200.0, f2Hz = 8000.0, lengthSeconds = 0.5, amplitude = 0.7f,
+        )
+        // 0.5s of room for the real acoustic round trip + reverb tail to
+        // actually land in the capture, past where the sweep's dry image ends.
+        val tailPaddingFrames = 24000
+        if (!engine.startCalibrationCapture(sweepData.sweep, tailPaddingFrames)) {
+            resultText = "Failed to start calibration capture — see Last error above."
+            return
+        }
+        isCapturing = true
+        scope.launch {
+            while (engine.state().isCalibrating) {
+                delay(100)
+            }
+            val recording = engine.takeCalibrationCapture()
+            isCapturing = false
+            resultText = withContext(Dispatchers.Default) {
+                if (recording.isEmpty()) {
+                    "No capture retrieved — aborted, or see Last error above."
+                } else {
+                    val measurement = Calibration.measureRoundTripDelay(
+                        recording = recording,
+                        inverseFilter = sweepData.inverseFilter,
+                        sweepLength = sweepData.sweep.size,
+                    )
+                    val delayMs = measurement.frames / sampleRate * 1000.0
+                    "Captured ${recording.size} frames (expected ${sweepData.sweep.size + tailPaddingFrames}).\n" +
+                        "Recovered round-trip delay: %.2f frames (%.2f ms)\nPNR: %.1f dB".format(
+                            measurement.frames, delayMs, measurement.pnrDb,
+                        )
+                }
+            }
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        hasRecordPermission = granted
+        if (granted) beginCapture() else resultText = "Microphone permission is required."
+    }
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Engine calibration capture (Phase 3 integration)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Plays a real sweep through the duplex engine and captures the actual acoustic " +
+            "loopback via the mic, then measures it with the same code the smoke test above " +
+            "already proved works — this is the real device round trip, not synthesized data.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isCapturing,
+        onClick = {
+            if (!hasRecordPermission) {
+                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            } else {
+                beginCapture()
+            }
+        },
+    ) {
+        Text(if (isCapturing) "Capturing..." else "Run calibration capture")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
     }
 }
 

@@ -60,11 +60,39 @@ class AudioEngine {
         if (handle != 0L) nativeStopPlayback(handle)
     }
 
+    /**
+     * Phase 3 calibration: plays [sweep] out through the same duplex engine
+     * used for everything else, capturing the acoustic/electrical loopback
+     * for `sweep.size + tailPaddingFrames` frames total. Poll [state] for
+     * [EngineState.isCalibrating] to drop back to false, then call
+     * [takeCalibrationCapture] to retrieve the recording and feed it to
+     * [Calibration.measureRoundTripDelay].
+     */
+    fun startCalibrationCapture(sweep: FloatArray, tailPaddingFrames: Int): Boolean =
+        ensureCreated() && nativeStartCalibrationCapture(handle, sweep, tailPaddingFrames)
+
+    /** Aborts an in-flight calibration capture — discards it, not a stop-early-but-keep-what-you-have. */
+    fun stopCalibration() {
+        if (handle != 0L) nativeStopCalibration(handle)
+    }
+
+    /**
+     * Retrieves the captured loopback recording after a calibration capture
+     * completes naturally (i.e. [EngineState.isCalibrating] observed
+     * dropping to false on its own, not via [stopCalibration]). Returns an
+     * empty array if called before completion or after an abort.
+     */
+    fun takeCalibrationCapture(): FloatArray {
+        val h = handle
+        return if (h == 0L) FloatArray(0) else nativeTakeCalibrationCapture(h)
+    }
+
     /** Stops everything except an in-progress recording — call when the app backgrounds. The mic foreground service is what keeps a recording alive past that point. */
     fun pauseForBackground() {
         if (handle == 0L) return
         nativeStopTestTone(handle)
         nativeStopPlayback(handle)
+        nativeStopCalibration(handle)
     }
 
     fun capabilities(): EngineCapabilities {
@@ -97,6 +125,8 @@ class AudioEngine {
             framesDropped = buf.getInt(EngineState.OFFSET_FRAMES_DROPPED),
             isArmed = buf.getInt(EngineState.OFFSET_IS_ARMED) != 0,
             countInBeatsRemaining = buf.getInt(EngineState.OFFSET_COUNT_IN_BEATS_REMAINING),
+            isCalibrating = buf.getInt(EngineState.OFFSET_IS_CALIBRATING) != 0,
+            calibrationFramesCaptured = buf.getInt(EngineState.OFFSET_CALIBRATION_FRAMES_CAPTURED),
         )
     }
 
@@ -124,6 +154,13 @@ class AudioEngine {
     private external fun nativeStopRecording(handle: Long)
     private external fun nativeStartPlayback(handle: Long, filePath: String): Boolean
     private external fun nativeStopPlayback(handle: Long)
+    private external fun nativeStartCalibrationCapture(
+        handle: Long,
+        sweep: FloatArray,
+        tailPaddingFrames: Int,
+    ): Boolean
+    private external fun nativeStopCalibration(handle: Long)
+    private external fun nativeTakeCalibrationCapture(handle: Long): FloatArray
     private external fun nativeGetStateBuffer(handle: Long): ByteBuffer?
     private external fun nativeGetAudioApi(handle: Long): String
     private external fun nativeGetSampleRate(handle: Long): Int

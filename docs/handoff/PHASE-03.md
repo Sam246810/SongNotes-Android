@@ -105,15 +105,66 @@ backed by `core/audio/src/main/cpp/calibration_jni.cpp`):
   marshaling (`jfloatArray`/`jdoubleArray`, both directions) and the method
   linkage all work, not just the pure C++ underneath.
 
+## Engine integration, verified on device (2026-07-29)
+
+A new `EngineMode::Calibrating` plays a sweep through the *same* duplex
+engine record/playback path Phase 1 built, per the plan's "same engine path
+for calibration and real recording" principle — no new RT-thread machinery,
+just a new combination of two already-proven ones:
+
+- **Output** reuses the exact Scene/`ScenePublisher` mechanism Playing
+  already uses (`startCalibrationCapture` wraps the sweep in a `Scene` and
+  publishes it), except it does **not** auto-stop-to-Idle when the sweep
+  buffer runs out — capture keeps going into silence for a tail-padding
+  window, which is the entire point: that's where the real round-trip delay
+  and reverb tail actually show up in the recording.
+- **Input** reuses `mRecordRing`, the same ring buffer Recording already
+  fills, but with no pre-roll skip logic — capture starts the instant the
+  mode is observed and runs for exactly `sweep.size() + tailPaddingFrames`
+  frames, then the RT thread itself transitions back to Idle (mirroring how
+  Playing already auto-stops itself, just driven by frames-captured instead
+  of playback-cursor-position).
+- Deliberately **no new consumer thread**: since the capture duration is
+  short and known in advance, `takeCalibrationCapture()` does a single bulk
+  `mRecordRing.read()` directly from the calling (JNI/UI) thread after
+  polling confirms `isCalibrating` has dropped back to false — safe because
+  the RT-thread producer side is provably done by then, same precondition
+  `mRecordRing.clear()` already documented.
+- `EngineStateBlock` grew two fields (`isCalibrating`,
+  `calibrationFramesCaptured`), 36 → 44 bytes — `EngineState.kt`'s offsets
+  updated to match by hand, same as always.
+
+**Ran three real captures on the physical device** via a new "Engine
+calibration capture" section on `DiagnosticsScreen` (distinct from the
+earlier JNI smoke test — that one used a synthesized-in-Kotlin recording to
+prove only the JNI boundary; this one plays a real sweep out the speaker
+and captures the real acoustic loopback via the mic):
+
+```
+Run 1: Captured 48000/48000 frames — delay 937.17 frames (19.52 ms), PNR 62.7 dB
+Run 2: Captured 48000/48000 frames — delay 932.01 frames (19.42 ms), PNR 58.3 dB
+Run 3: Captured 48000/48000 frames — delay 932.01 frames (19.42 ms), PNR 56.7 dB
+```
+
+Zero frame loss across all three (exactly the expected frame count every
+time), spread of ~0.11ms across the three runs, PNR consistently well above
+any reasonable trust threshold. Also **cross-validates against Phase 2's
+independent measurement**: this matched-filter deconvolution's ~19.5ms
+figure and the RMS-peak-search click-alignment script's ~21.25ms figure
+(PHASE-02.md) are measuring the same physical speaker→air→mic path on the
+same device via two unrelated methods and land in the same ballpark — a
+meaningful cross-check that neither measurement is a fluke of its own
+method.
+
+**Not yet exercised**: repeating this automatically N times with MAD
+aggregation baked in (currently each tap is one manual repetition; the
+wizard's own repeat-and-aggregate loop is still ahead), and what happens
+under a genuinely noisy room rather than a quiet one.
+
 ## What's left for Phase 3 (not started)
 
 Roughly in the order the plan's architecture section implies:
 
-- **Engine integration**: running N sweep repetitions through the *same*
-  duplex engine record/playback path Phase 1 built (per the plan's "same
-  engine path for calibration and real recording" principle) — play the
-  sweep out, capture the loopback in, run it through this phase's math,
-  repeat, aggregate via MAD + PNR gating.
 - **AEC/NS/AGC disabling** via `SessionId::Allocate` and Java's
   `AcousticEchoCanceler`/`NoiseSuppressor`/`AutomaticGainControl` — this is
   Java-side API surface (`android.media.audiofx.*`), not something Oboe or

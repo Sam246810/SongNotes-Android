@@ -16,7 +16,14 @@
 
 namespace songnotes {
 
-enum class EngineMode : int32_t { Idle = 0, Armed = 1, Recording = 2, Playing = 3, TestTone = 4 };
+enum class EngineMode : int32_t {
+    Idle = 0,
+    Armed = 1,
+    Recording = 2,
+    Playing = 3,
+    TestTone = 4,
+    Calibrating = 5, // Phase 3: plays a sweep from mScenePublisher while capturing the loopback into mRecordRing
+};
 
 // Output-master duplex engine: one Oboe output stream owns the data
 // callback; a second input stream is opened alongside it with no callback
@@ -47,6 +54,25 @@ public:
 
     bool startPlayback(const std::string &filePath);
     void stopPlayback();
+
+    // Phase 3 calibration: plays `sweep` out through the same duplex engine
+    // used for everything else, capturing the acoustic/electrical loopback
+    // into mRecordRing for `sweep.size() + tailPaddingFrames` frames total
+    // (the tail beyond the sweep's own length is what leaves room to
+    // actually capture the round-trip delay + reverb tail, not just the
+    // sweep's dry image). Mirrors Playing's Scene-based output path and
+    // Recording's ring-buffer input path — no new RT-thread machinery, only
+    // a new combination of the two existing ones.
+    bool startCalibrationCapture(const std::vector<float> &sweep, int32_t tailPaddingFrames);
+    void stopCalibration();
+
+    // Call only after polling state() shows isCalibrating has dropped back
+    // to false following a natural completion (not an abort via
+    // stopCalibration(), which discards the in-flight capture instead) —
+    // mirrors mRecordRing.clear()'s own "producer and consumer both
+    // quiescent" precondition. One bulk read off mRecordRing, safe from any
+    // non-RT thread once the RT-thread producer side is confirmed done.
+    std::vector<float> takeCalibrationCapture();
 
     EngineStateBlock *stateBlock() { return &mState; }
 
@@ -86,6 +112,7 @@ private:
 
     void stopRecordingInternal();
     void stopPlaybackInternal();
+    void stopCalibrationInternal();
 
     std::mutex mRebuildMutex; // guards stream open/close/rebuild; never touched by the RT thread
     std::shared_ptr<oboe::AudioStream> mOutputStream;
@@ -137,6 +164,16 @@ private:
     int64_t mPlaybackCursor = 0; // written by the loader thread only before the mode
                                    // transition to Playing is published (release-ordered);
                                    // read/advanced by the RT thread only afterward.
+                                   // Reused as the sweep read cursor during Calibrating too
+                                   // — Playing and Calibrating are mutually exclusive modes,
+                                   // so this never needs to be two separate fields.
+
+    // Phase 3 calibration capture: both set by startCalibrationCapture()
+    // before the mode store (release-ordered, same handoff pattern as
+    // mPlaybackCursor above), then owned by the RT thread for the duration
+    // of the capture.
+    int64_t mCalibrationCaptureTargetFrames = 0;
+    int64_t mCalibrationFramesCaptured = 0;
 
     EngineStateBlock mState;
 

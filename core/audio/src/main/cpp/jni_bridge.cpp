@@ -73,6 +73,36 @@ Java_com_songnotes_core_audio_AudioEngine_nativeStopPlayback(JNIEnv *, jobject, 
     }
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeStartCalibrationCapture(JNIEnv *env, jobject,
+                                                                          jlong handle, jfloatArray sweep,
+                                                                          jint tailPaddingFrames) {
+    auto *engine = toEngine(handle);
+    if (!engine || !sweep) return JNI_FALSE;
+    const jsize len = env->GetArrayLength(sweep);
+    std::vector<float> sweepVec(static_cast<size_t>(len));
+    env->GetFloatArrayRegion(sweep, 0, len, sweepVec.data());
+    return engine->startCalibrationCapture(sweepVec, tailPaddingFrames) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeStopCalibration(JNIEnv *, jobject, jlong handle) {
+    if (auto *engine = toEngine(handle)) {
+        engine->stopCalibration();
+    }
+}
+
+JNIEXPORT jfloatArray JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeTakeCalibrationCapture(JNIEnv *env, jobject,
+                                                                          jlong handle) {
+    auto *engine = toEngine(handle);
+    if (!engine) return env->NewFloatArray(0);
+    const std::vector<float> captured = engine->takeCalibrationCapture();
+    auto *result = env->NewFloatArray(static_cast<jsize>(captured.size()));
+    env->SetFloatArrayRegion(result, 0, static_cast<jsize>(captured.size()), captured.data());
+    return result;
+}
+
 JNIEXPORT jobject JNICALL
 Java_com_songnotes_core_audio_AudioEngine_nativeGetStateBuffer(JNIEnv *env, jobject, jlong handle) {
     auto *engine = toEngine(handle);

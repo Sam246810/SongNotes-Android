@@ -31,6 +31,7 @@ constexpr int32_t kMaxFramesPerCallback = 8192;
 NativeAudioEngine::~NativeAudioEngine() {
     stopRecordingInternal();
     stopPlaybackInternal();
+    stopCalibrationInternal();
     if (mLoaderThread.joinable()) {
         mLoaderThread.join();
     }
@@ -247,6 +248,63 @@ void NativeAudioEngine::stopPlaybackInternal() {
     mState.isPlaying.store(0, std::memory_order_relaxed);
 }
 
+bool NativeAudioEngine::startCalibrationCapture(const std::vector<float> &sweep, int32_t tailPaddingFrames) {
+    if (!ensureStreamsOpen()) return false;
+    stopRecordingInternal();
+    stopPlaybackInternal();
+    stopCalibrationInternal();
+    // ScenePublisher::publish() may only be called from one thread at a
+    // time — startPlayback() joins any still-in-flight loader thread before
+    // publishing for the same reason; a Calibrating publish races it
+    // exactly the same way if skipped here.
+    if (mLoaderThread.joinable()) {
+        mLoaderThread.join();
+    }
+
+    mRecordRing.clear(); // safe: producer (RT) and consumer are both quiescent here
+
+    auto scene = std::make_shared<Scene>();
+    scene->playbackBuffer = std::make_shared<std::vector<float>>(sweep);
+
+    // All plain-member writes below happen-before the release store on
+    // mMode further down, so the RT thread's acquire-load of mode is
+    // guaranteed to observe every one of them — same handoff pattern
+    // loaderThreadLoop uses for mPlaybackCursor and the Scene publish.
+    mPlaybackCursor = 0;
+    mCalibrationCaptureTargetFrames =
+        static_cast<int64_t>(sweep.size()) + static_cast<int64_t>(std::max(0, tailPaddingFrames));
+    mCalibrationFramesCaptured = 0;
+    mState.isCalibrating.store(1, std::memory_order_relaxed);
+    mState.calibrationFramesCaptured.store(0, std::memory_order_relaxed);
+    mScenePublisher.publish(scene);
+    mMode.store(static_cast<int32_t>(EngineMode::Calibrating), std::memory_order_release);
+
+    return ensureOutputStarted();
+}
+
+void NativeAudioEngine::stopCalibration() { stopCalibrationInternal(); }
+
+void NativeAudioEngine::stopCalibrationInternal() {
+    auto expected = static_cast<int32_t>(EngineMode::Calibrating);
+    const bool wasCalibrating = mMode.compare_exchange_strong(expected, static_cast<int32_t>(EngineMode::Idle));
+    mState.isCalibrating.store(0, std::memory_order_relaxed);
+    if (wasCalibrating) {
+        // An explicit abort (or cleanup before a fresh capture starts) —
+        // whatever partial capture is sitting in the ring isn't a complete,
+        // trustworthy measurement, so discard it rather than risk a later
+        // takeCalibrationCapture() returning a short/misleading buffer.
+        mRecordRing.clear();
+    }
+}
+
+std::vector<float> NativeAudioEngine::takeCalibrationCapture() {
+    std::vector<float> result(static_cast<size_t>(mCalibrationCaptureTargetFrames));
+    const size_t got = mRecordRing.read(result.data(), result.size());
+    result.resize(got);
+    mRecordRing.clear();
+    return result;
+}
+
 void NativeAudioEngine::writerThreadLoop(std::string filePath, int64_t headSkipFrames) {
     std::ofstream file(filePath, std::ios::binary | std::ios::trunc);
     if (!file) {
@@ -401,6 +459,34 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
                 mState.framesRecorded.fetch_add(framesToWrite, std::memory_order_relaxed);
             }
         }
+    } else if (mode == EngineMode::Calibrating) {
+        // No pre-roll here — capture starts the instant the mode is
+        // observed, since there's no count-in/downbeat concept for a
+        // calibration sweep. Clamped to the remaining target so exactly
+        // mCalibrationCaptureTargetFrames frames end up in the ring, no
+        // more — takeCalibrationCapture() reads exactly that many back out.
+        const int64_t remaining = mCalibrationCaptureTargetFrames - mCalibrationFramesCaptured;
+        const auto framesToWrite = static_cast<int32_t>(std::min<int64_t>(remaining, framesWanted));
+        if (framesToWrite > 0) {
+            const size_t written = mRecordRing.write(mInputScratch.data(), static_cast<size_t>(framesToWrite));
+            if (written < static_cast<size_t>(framesToWrite)) {
+                mState.framesDropped.fetch_add(static_cast<int32_t>(framesToWrite - written),
+                                                std::memory_order_relaxed);
+            }
+            mCalibrationFramesCaptured += static_cast<int64_t>(written);
+            mState.calibrationFramesCaptured.store(static_cast<int32_t>(mCalibrationFramesCaptured),
+                                                    std::memory_order_relaxed);
+        }
+        if (mCalibrationFramesCaptured >= mCalibrationCaptureTargetFrames) {
+            // `mode` (this callback's local) is deliberately left alone —
+            // step 3 below still dispatches on it, so any last sliver of
+            // sweep still due this same callback still renders normally,
+            // same as how Playing's own auto-stop (see step 3) stores Idle
+            // mid-branch without truncating that callback's already-decided
+            // output. The atomic controls only the *next* callback onward.
+            mMode.store(static_cast<int32_t>(EngineMode::Idle), std::memory_order_release);
+            mState.isCalibrating.store(0, std::memory_order_relaxed);
+        }
     }
 
     // 3. Fill the output buffer.
@@ -426,6 +512,27 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
                 mMode.store(static_cast<int32_t>(EngineMode::Idle), std::memory_order_release);
                 mState.isPlaying.store(0, std::memory_order_relaxed);
             }
+        }
+    } else if (mode == EngineMode::Calibrating) {
+        // Same read-from-Scene-and-advance-cursor logic as Playing above,
+        // deliberately NOT factored into a shared helper (this is the only
+        // duplication) — but no auto-stop when the sweep buffer runs out:
+        // capture keeps going in silence for the tail padding, which is the
+        // entire point (that's where the round-trip delay + reverb tail
+        // actually shows up). Completion is driven by mCalibrationFramesCaptured
+        // in step 2 above, not by output buffer exhaustion.
+        const Scene *scene = mScenePublisher.current();
+        const auto &buffer = scene->playbackBuffer;
+        if (buffer && mPlaybackCursor < static_cast<int64_t>(buffer->size())) {
+            const int64_t remaining = static_cast<int64_t>(buffer->size()) - mPlaybackCursor;
+            const auto toCopy = static_cast<int32_t>(remaining < numFrames ? remaining : numFrames);
+            for (int32_t frame = 0; frame < toCopy; frame++) {
+                const float sample = (*buffer)[static_cast<size_t>(mPlaybackCursor + frame)];
+                for (int32_t ch = 0; ch < outChannels; ch++) {
+                    out[frame * outChannels + ch] = sample;
+                }
+            }
+            mPlaybackCursor += toCopy;
         }
     } else if (mode == EngineMode::Armed || mode == EngineMode::Recording) {
         // Metronome: finish any click already in progress, then start any
@@ -506,11 +613,12 @@ void NativeAudioEngine::onErrorAfterClose(oboe::AudioStream *stream, oboe::Resul
     if (!openStreamsLocked()) {
         LOGW("Stream rebuild failed after disconnect — stopping any active take.");
         mMode.store(static_cast<int32_t>(EngineMode::Idle), std::memory_order_release);
-        // Neither of these touches mRebuildMutex, so calling them while we
-        // still hold it here is safe (no re-entrant lock). Skipping this on
+        // None of these touch mRebuildMutex, so calling them while we still
+        // hold it here is safe (no re-entrant lock). Skipping the first on
         // a failed rebuild would otherwise leak the writer thread forever.
         stopRecordingInternal();
         stopPlaybackInternal();
+        stopCalibrationInternal();
         return;
     }
 
