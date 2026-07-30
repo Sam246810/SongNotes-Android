@@ -259,14 +259,54 @@ wouldn't be necessary at all. Worth keeping in mind once the real wizard
 exists: a "measure again" affordance is probably worth having, not just a
 one-shot measurement trusted forever.
 
+## Per-route storage + Bluetooth handling, verified on device (2026-07-29)
+
+`AudioRoute`/`AudioRouteDetector` (new, `:core:audio`) queries
+`AudioManager.getDevices(GET_DEVICES_INPUTS)` and picks a best-guess active
+route by OS precedence (wired > Bluetooth > built-in — a heuristic, Android
+doesn't expose "the device a not-yet-open stream will actually route to"
+directly pre-API 31), producing a `routeKey` from device type + a hash of
+`productName`, matching the plan's own "device type + product hash"
+phrasing exactly. `CalibrationStore` (new, `SharedPreferences`-backed, not
+a real database — no broader data layer exists yet to justify one for a
+handful of key-value pairs) persists a measured offset per `routeKey`.
+Bluetooth handling lives in `DiagnosticsScreen`'s calibration-session flow
+for now (the real wizard doesn't exist yet): a detected Bluetooth route
+refuses the first tap with a plain-language explanation and requires a
+second explicit tap ("Measure anyway") to proceed, per the plan.
+
+**Verified for real** (no Bluetooth device connected during this pass —
+see caveat below): route detection correctly identified the built-in mic
+(`SM-F956W_...`, `bluetooth=false`) with nothing stored initially; a real
+5-repetition session ran against genuinely noisy conditions this time —
+reps 0-1 clustered around 975-984 frames while reps 2-4 clustered tightly
+around 1079.95, and MAD rejection correctly kept the majority 3/5 cluster
+rather than blending all five into a meaningless average — then persisted
+`1079.95 frames` for that route. **Force-stopped the app completely**
+(confirmed via `pidof` returning empty, not just backgrounded) and
+relaunched fresh: "Check stored calibration" (a separate path that does
+*not* run a new capture or call `save()` first) returned the exact same
+value and timestamp — genuine cross-process-restart persistence, not just
+a same-run save-then-load echoing itself back.
+
+**Not verified**: the Bluetooth-refusal path specifically needs a real
+Bluetooth device connected to exercise `isBluetooth=true`, which wasn't
+done this pass. The logic is simple (one boolean check gating a
+confirmation state) and structurally exercises the same code paths already
+verified for the non-Bluetooth case, but "structurally sound" isn't the
+same bar the rest of this doc holds everything else to — worth an explicit
+live check with a real Bluetooth device before trusting it fully.
+
 ## What's left for Phase 3 (not started)
 
 Roughly in the order the plan's architecture section implies:
 
-- **Per-route calibration storage** (`route_key` = device type + product
-  hash), swapped on `AudioDeviceCallback` route changes.
-- **Bluetooth handling**: refuse to auto-calibrate by default with a
-  plain-language explanation, offer "measure anyway."
+- **AudioDeviceCallback-driven route swapping** — `AudioRouteDetector`
+  above is a point-in-time query called right before a capture starts, not
+  a live listener. Fine for "what route is this capture about to
+  measure/apply to," not yet sufficient for e.g. invalidating a displayed
+  calibration value if the route changes while a result is still on
+  screen.
 - **The wizard UI itself**, built to obey Rules A–I from the plan (no
   count-in on verification playback, pre-mixed single-buffer playback, fixed
   layout from mount so nothing pops in mid-flow, a `CalibrationAudio`

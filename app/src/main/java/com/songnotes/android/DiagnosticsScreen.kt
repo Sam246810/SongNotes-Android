@@ -36,9 +36,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.songnotes.core.audio.AudioEngine
+import com.songnotes.core.audio.AudioRouteDetector
 import com.songnotes.core.audio.Calibration
 import com.songnotes.core.audio.CalibrationAudioEffects
 import com.songnotes.core.audio.CalibrationSession
+import com.songnotes.core.audio.CalibrationStore
 import com.songnotes.core.audio.EngineCapabilities
 import com.songnotes.core.audio.EngineState
 import kotlin.math.abs
@@ -158,15 +160,31 @@ private fun CalibrationSessionSection(engine: AudioEngine) {
     }
     var isRunning by remember { mutableStateOf(false) }
     var resultText by remember { mutableStateOf<String?>(null) }
+    // Non-null while a Bluetooth route has been detected and we're waiting
+    // for an explicit second tap — the plan's "refuse to auto-calibrate by
+    // default... offer measure anyway" for exactly this route, not a
+    // generic confirmation dialog.
+    var bluetoothWarningRoute by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
     fun beginSession() {
         resultText = null
         isRunning = true
         scope.launch {
+            val route = AudioRouteDetector(context).currentInputRoute()
             val result = CalibrationSession(engine).run(repetitionCount = 5)
             isRunning = false
+
+            val store = CalibrationStore(context)
+            if (result.acceptedDelayFrames.isNotEmpty() && !result.aecDefeatSuspected) {
+                store.save(route.routeKey, result.meanAcceptedDelayFrames)
+            }
+            val stored = store.load(route.routeKey)
+
             resultText = buildString {
+                appendLine(
+                    "Route: ${route.label} (key=${route.routeKey}, bluetooth=${route.isBluetooth})",
+                )
                 appendLine("${result.repetitions.size} repetitions:")
                 result.repetitions.forEachIndexed { i, rep ->
                     appendLine("  rep $i: %.2f frames, PNR %.1f dB".format(rep.delayFrames, rep.pnrDb))
@@ -181,32 +199,58 @@ private fun CalibrationSessionSection(engine: AudioEngine) {
                         result.spreadFrames,
                     ),
                 )
-                append(
+                appendLine(
                     if (result.aecDefeatSuspected) {
-                        "AEC-DEFEAT SUSPECTED — PNR collapsed across repetitions"
+                        "AEC-DEFEAT SUSPECTED — PNR collapsed across repetitions (not saved)"
                     } else {
                         "No AEC-defeat signature detected"
+                    },
+                )
+                append(
+                    if (stored != null) {
+                        "Stored for this route: %.2f frames, measured at epoch %d".format(
+                            stored.offsetFrames, stored.measuredAtEpochMs,
+                        )
+                    } else {
+                        "Nothing stored for this route."
                     },
                 )
             }
         }
     }
 
+    fun beginSessionCheckingRoute() {
+        val route = AudioRouteDetector(context).currentInputRoute()
+        if (route.isBluetooth && bluetoothWarningRoute != route.routeKey) {
+            // First tap on a Bluetooth route: refuse and explain, per the
+            // plan, rather than silently calibrating against a route whose
+            // latency is both usually much higher and often less stable.
+            bluetoothWarningRoute = route.routeKey
+            resultText = "Detected route \"${route.label}\" is Bluetooth. Bluetooth audio latency " +
+                "is typically higher and less consistent than wired or built-in — calibrating " +
+                "against it may not hold up from one session to the next. Tap again to measure anyway."
+            return
+        }
+        bluetoothWarningRoute = null
+        beginSession()
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         hasRecordPermission = granted
-        if (granted) beginSession() else resultText = "Microphone permission is required."
+        if (granted) beginSessionCheckingRoute() else resultText = "Microphone permission is required."
     }
 
     Spacer(Modifier.height(32.dp))
     HorizontalDivider()
     Spacer(Modifier.height(16.dp))
-    Text("Calibration session — 5 reps + AEC-defeat check", style = MaterialTheme.typography.titleMedium)
+    Text("Calibration session — 5 reps + route storage + AEC-defeat check", style = MaterialTheme.typography.titleMedium)
     Spacer(Modifier.height(8.dp))
     Text(
-        "Runs CalibrationSession: 5 real captures back-to-back, MAD-rejects outliers, and " +
-            "flags the plan's AEC-defeat signature (PNR high on rep 1, collapsed by rep 5) if seen.",
+        "Detects the current input route (refusing Bluetooth by default, like the plan " +
+            "specifies — tap again to override), runs 5 real captures, MAD-rejects outliers, " +
+            "checks for the AEC-defeat signature, and persists the result keyed to that route.",
         style = MaterialTheme.typography.bodySmall,
     )
     Spacer(Modifier.height(12.dp))
@@ -217,11 +261,34 @@ private fun CalibrationSessionSection(engine: AudioEngine) {
             if (!hasRecordPermission) {
                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             } else {
-                beginSession()
+                beginSessionCheckingRoute()
             }
         },
     ) {
-        Text(if (isRunning) "Running session..." else "Run 5-rep calibration session")
+        Text(
+            when {
+                isRunning -> "Running session..."
+                bluetoothWarningRoute != null -> "Measure anyway"
+                else -> "Run 5-rep calibration session"
+            },
+        )
+    }
+
+    Spacer(Modifier.height(8.dp))
+    Button(onClick = {
+        // Deliberately does NOT run a new capture or call save() — this is
+        // the actual test of whether CalibrationStore persists across
+        // process restarts, not just within one run's save-then-load.
+        val route = AudioRouteDetector(context).currentInputRoute()
+        val stored = CalibrationStore(context).load(route.routeKey)
+        resultText = "Route: ${route.label} (key=${route.routeKey}, bluetooth=${route.isBluetooth})\n" +
+            if (stored != null) {
+                "Stored: %.2f frames, measured at epoch %d".format(stored.offsetFrames, stored.measuredAtEpochMs)
+            } else {
+                "Nothing stored for this route."
+            }
+    }) {
+        Text("Check stored calibration (no new capture)")
     }
 
     resultText?.let {
