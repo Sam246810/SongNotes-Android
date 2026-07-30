@@ -40,6 +40,7 @@ add_library(songnotes_dsp STATIC
     ../dsp/mix.cpp
     ../dsp/track_mixer.cpp
     ../dsp/wav_encoder.cpp
+    ../dsp/onset_detection.cpp
 )
 target_include_directories(songnotes_dsp PUBLIC ..)
 
@@ -59,6 +60,7 @@ add_executable(dsp_tests
     test_mix.cpp
     test_track_mixer.cpp
     test_wav_encoder.cpp
+    test_onset_detection.cpp
 )
 # test_spsc_ring_buffer.cpp / test_scene.cpp include spsc_ring_buffer.h and
 # scene.h directly from `..` — already on the include path via

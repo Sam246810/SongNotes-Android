@@ -595,20 +595,71 @@ rendering without inset-aware padding is presumably repeated on other
 bottom-pinned buttons across the app (`ManualCalibrationScreen`,
 `ScratchpadScreen`, etc.) too.
 
+## Tap-along onset detection: DSP core + JNI, verified on device (2026-07-30)
+
+`dsp/onset_detection.{h,cpp}` (new) — a faithful C++ port of the desktop
+web app's `detectOnsets`/`estimateLatencyFromOnsets` (`src/audio/
+latency.js`), **not** a reimplementation from a description: same
+short-window RMS energy envelope with a running-sum accumulator, same
+threshold-ratio/refractory-gap onset logic, same nearest-onset-after-
+each-scheduled-click median-matching estimator. This is the one case in
+Phase 3 where porting this specific algorithm verbatim is *correct*,
+not a shortcut — the plan explicitly rejects it for the automatic
+acoustic-loopback path (a phone speaker's faint, reverberant click bleed
+defeats a naive energy threshold, which is why the sweep+matched-filter
+approach exists instead) but calls out that "its assumptions hold" for
+the manual tap-along path specifically: a direct finger-tap on the
+device is a loud, sharp, high-SNR transient conducted mostly through the
+device's own body straight to the mic, not a faint room-reflected click.
+
+- **Host test file** `host/test_onset_detection.cpp` (new) ports the
+  intent of the JS test suite (`src/test/latency.test.js`'s
+  `detectOnsets`/`estimateLatencyFromOnsets` describes) as GoogleTest
+  cases — same scenarios (three transient bursts recovered within 6ms,
+  pure silence returns nothing, median-of-matched-deltas estimation,
+  spurious-onset rejection, too-few-matches returns nullopt). Registered
+  in both `CMakeLists.txt` (Android `.so` target) and `host/CMakeLists.txt`
+  (desktop GoogleTest target) — **not executed locally**, same caveat as
+  every other `host/test_*.cpp` in this repo: this working environment has
+  no desktop C++ compiler, so "host-testable" here has always meant
+  cross-compiling for ARM64 via Gradle/NDK and verifying through an
+  on-device JNI smoke test instead (see below), not literally running
+  `ctest` on this machine.
+- **JNI wrapping** added to `calibration_jni.cpp` (grouped with the other
+  pure calibration math, per that file's own header comment) —
+  `nativeDetectOnsets` and `nativeEstimateLatencyFromOnsets`. The latter
+  returns a length-0 `jdoubleArray` for "no estimate" and length-1 for a
+  real value, mirroring `std::optional<double>` without a separate
+  sentinel/boolean — same array-as-nullable-result convention already
+  used by this file's other functions.
+- **`Calibration.kt`** gained `detectOnsets()` and
+  `estimateLatencyFromOnsets()` (the latter returning `Double?`,
+  unpacking the length-0/length-1 array convention at the Kotlin
+  boundary so callers never see it).
+- **`OnsetDetectionSmokeTestSection`** added to `DiagnosticsScreen.kt`,
+  mirroring `CalibrationDspSmokeTestSection`'s exact pattern: synthesizes
+  a PCM buffer with 5 sharp transients at a known +42ms offset from 5
+  "scheduled tap" times (no microphone, no physical tapping — this only
+  proves the detection math + JNI marshaling work, same scope as the
+  sweep smoke test above it).
+
+**Ran on the physical device**: `PASS — JNI boundary verified`; detected
+5/5 onsets; estimated latency **42.35ms against an expected 42.0ms**;
+pure-silence and too-few-matches edge cases both correct. Confirms the
+port, the JNI method-name mangling, and the array marshaling all work —
+not just that the C++ compiles.
+
+**Not yet done**: the actual user-facing screen (record a real take with
+a metronome, have the user physically tap along, detect the real taps,
+show/save the measured offset) — the DSP core above is what that screen
+will call, but building and wiring it is the next step, and unlike this
+smoke test, verifying *that* end-to-end needs a person actually tapping
+the device in rhythm, not synthesized data.
+
 ## What's left for Phase 3 (not started)
 
-Roughly in the order the plan's architecture section implies:
-
-- **Porting the plan's other-described manual path** (tap-along +
-  onset-detection, reusing the intent — not the code — of the web app's
-  dead `detectOnsets`/`estimateLatencyFromOnsets` module) is still not
-  done; see "Manual slider fallback" below for what shipped instead and
-  why it's a different, simpler mechanism than that one. Real DSP work —
-  this environment's "host-testable C++" verification has always meant
-  cross-compiling for ARM64 and running on the physical device via adb
-  (no desktop C++ compiler here), so this specifically needs the device
-  connected to make any real progress on, unlike the route-monitoring
-  work above.
+- The tap-along screen's UI/engine-integration work described directly
+  above — the DSP core it depends on is done and verified.
 
 ## Manual slider fallback, verified on device (2026-07-30)
 

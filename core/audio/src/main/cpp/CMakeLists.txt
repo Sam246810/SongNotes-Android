@@ -21,6 +21,7 @@ add_library(songnotes_audio SHARED
     dsp/mix.cpp
     dsp/track_mixer.cpp
     dsp/wav_encoder.cpp
+    dsp/onset_detection.cpp
 )
 
 target_include_directories(songnotes_audio PRIVATE .)

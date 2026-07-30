@@ -14,6 +14,7 @@
 #include "dsp/click_track.h"
 #include "dsp/matched_filter.h"
 #include "dsp/mix.h"
+#include "dsp/onset_detection.h"
 #include "dsp/sweep.h"
 
 using namespace songnotes::dsp;
@@ -127,6 +128,33 @@ Java_com_songnotes_core_audio_Calibration_nativeBuildPreMixedVerificationBuffer(
                                               clickLengthSeconds, clickAmplitude);
     const auto mixed = mixAndNormalize(takeVec, clickTrack);
     return toJFloatArray(env, mixed);
+}
+
+// Manual tap-along path (dsp/onset_detection.h) — see that header's own
+// doc comment for why this specific detector is appropriate here despite
+// being unsuitable for the automatic sweep path.
+JNIEXPORT jdoubleArray JNICALL
+Java_com_songnotes_core_audio_Calibration_nativeDetectOnsets(JNIEnv *env, jobject, jfloatArray pcm,
+                                                                jdouble sampleRate, jdouble minGapSec,
+                                                                jdouble thresholdRatio, jdouble windowSec) {
+    const std::vector<float> pcmVec = toFloatVector(env, pcm);
+    const auto onsets = detectOnsets(pcmVec, sampleRate, minGapSec, thresholdRatio, windowSec);
+    return toJDoubleArray(env, onsets);
+}
+
+// Returns a length-0 array for "no estimate" (mirrors std::nullopt — no
+// separate boolean/sentinel needed) or a length-1 array holding the
+// estimate in seconds.
+JNIEXPORT jdoubleArray JNICALL
+Java_com_songnotes_core_audio_Calibration_nativeEstimateLatencyFromOnsets(JNIEnv *env, jobject,
+                                                                            jdoubleArray detectedTimes,
+                                                                            jdoubleArray scheduledTimes,
+                                                                            jdouble maxMatchSec) {
+    const auto detected = toDoubleVector(env, detectedTimes);
+    const auto scheduled = toDoubleVector(env, scheduledTimes);
+    const auto est = estimateLatencyFromOnsets(detected, scheduled, maxMatchSec);
+    if (!est.has_value()) return toJDoubleArray(env, {});
+    return toJDoubleArray(env, {*est});
 }
 
 } // extern "C"

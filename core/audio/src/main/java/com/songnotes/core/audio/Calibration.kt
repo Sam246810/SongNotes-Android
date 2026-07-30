@@ -100,6 +100,38 @@ object Calibration {
         take, sampleRate, bpm, beatsPerBar, downbeatHz, regularHz, clickLengthSeconds, clickAmplitude,
     )
 
+    /**
+     * Manual tap-along path: detects transient onset times (seconds) in a
+     * recorded mono take using a short-window RMS energy envelope — see
+     * `dsp/onset_detection.h`'s doc comment for why this detector (known
+     * unsuitable for the automatic sweep path) is the right tool here: a
+     * direct finger-tap on the device is a loud, structure-borne transient,
+     * not a faint room-reflected click.
+     */
+    fun detectOnsets(
+        pcm: FloatArray,
+        sampleRate: Double,
+        minGapSec: Double = 0.15,
+        thresholdRatio: Double = 0.35,
+        windowSec: Double = 0.003,
+    ): DoubleArray = nativeDetectOnsets(pcm, sampleRate, minGapSec, thresholdRatio, windowSec)
+
+    /**
+     * Median round-trip latency (seconds) between [scheduledTimes] (when
+     * each tap cue occurred, in the recording's own timebase) and
+     * [detectedTimes] (from [detectOnsets]). Returns null if fewer than
+     * `max(2, ceil(scheduledTimes.size / 2))` scheduled taps could be
+     * matched to a plausible onset — too few results to trust.
+     */
+    fun estimateLatencyFromOnsets(
+        detectedTimes: DoubleArray,
+        scheduledTimes: DoubleArray,
+        maxMatchSec: Double = 0.25,
+    ): Double? {
+        val result = nativeEstimateLatencyFromOnsets(detectedTimes, scheduledTimes, maxMatchSec)
+        return result.firstOrNull()
+    }
+
     private external fun nativeGenerateSweepAndInverse(
         sampleRate: Double,
         f1Hz: Double,
@@ -128,6 +160,20 @@ object Calibration {
         clickLengthSeconds: Double,
         clickAmplitude: Float,
     ): FloatArray
+
+    private external fun nativeDetectOnsets(
+        pcm: FloatArray,
+        sampleRate: Double,
+        minGapSec: Double,
+        thresholdRatio: Double,
+        windowSec: Double,
+    ): DoubleArray
+
+    private external fun nativeEstimateLatencyFromOnsets(
+        detectedTimes: DoubleArray,
+        scheduledTimes: DoubleArray,
+        maxMatchSec: Double,
+    ): DoubleArray
 
     init {
         System.loadLibrary("songnotes_audio")

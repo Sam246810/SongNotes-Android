@@ -143,6 +143,7 @@ fun DiagnosticsScreen(engine: AudioEngine) {
 
         RecordPlaybackSection(engine)
         CalibrationDspSmokeTestSection()
+        OnsetDetectionSmokeTestSection()
         EngineCalibrationCaptureSection(engine)
         CalibrationSessionSection(engine)
         VerificationPlaybackSmokeTestSection(engine)
@@ -1265,6 +1266,94 @@ private fun runCalibrationSmokeTest(): String {
         appendLine("pnr: %.1f dB (ok=%s)".format(measurement.pnrDb, pnrOk))
         appendLine("MAD outlier rejection kept ${statsSample.size}/4 values (ok=$statsOk)")
         append("peakToNoiseRatioDb(10,1)=%.2f dB, expected 20.00 (ok=%s)".format(pnrSample, pnrSampleOk))
+    }
+}
+
+/**
+ * Same reasoning as [CalibrationDspSmokeTestSection]: proves the JNI
+ * boundary for [Calibration.detectOnsets]/[Calibration.estimateLatencyFromOnsets]
+ * (the manual tap-along path's DSP) actually works at runtime, not just
+ * that the underlying C++ compiles — a method-name-mangling mismatch only
+ * surfaces as an `UnsatisfiedLinkError` on first call. Uses a
+ * synthesized-in-Kotlin PCM buffer with known tap positions, exactly like
+ * the sweep smoke test above uses a synthesized recording with a known
+ * delay — no microphone or physical tapping involved, so this only proves
+ * the detection math + JNI marshaling, not the real acoustic path (that
+ * needs an actual person tapping the device, which is what
+ * `TapAlongCalibrationScreen` is for).
+ */
+@Composable
+private fun OnsetDetectionSmokeTestSection() {
+    var resultText by remember { mutableStateOf<String?>(null) }
+    var isRunning by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Onset detection smoke test (Phase 3 tap-along JNI)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Synthesizes a PCM buffer with 5 sharp transients at a known " +
+            "+42ms offset from 5 'scheduled tap' times, and confirms " +
+            "detectOnsets + estimateLatencyFromOnsets recover 42ms.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isRunning,
+        onClick = {
+            isRunning = true
+            resultText = null
+            scope.launch {
+                val result = withContext(Dispatchers.Default) { runOnsetDetectionSmokeTest() }
+                resultText = result
+                isRunning = false
+            }
+        },
+    ) {
+        Text(if (isRunning) "Running..." else "Run smoke test")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+private fun runOnsetDetectionSmokeTest(): String {
+    val sampleRate = 48000.0
+    val knownLatencySec = 0.042
+    val scheduledTimes = doubleArrayOf(0.1, 0.4, 0.7, 1.0, 1.3)
+
+    val pcm = FloatArray((1.6 * sampleRate).toInt())
+    for (t in scheduledTimes) {
+        val start = ((t + knownLatencySec) * sampleRate).toInt()
+        for (i in 0 until 200) {
+            if (start + i < pcm.size) pcm[start + i] = (kotlin.math.sin(i * 0.5) * 0.9).toFloat()
+        }
+    }
+
+    val detected = Calibration.detectOnsets(pcm, sampleRate)
+    val estimate = Calibration.estimateLatencyFromOnsets(detected, scheduledTimes)
+
+    val detectedCountOk = detected.size == scheduledTimes.size
+    val estimateOk = estimate != null && abs(estimate - knownLatencySec) < 0.001
+    val silenceOk = Calibration.detectOnsets(FloatArray(1000), sampleRate).isEmpty()
+    val tooFewOk = Calibration.estimateLatencyFromOnsets(doubleArrayOf(0.11), doubleArrayOf(0.1, 0.4, 0.7, 1.0)) == null
+
+    val pass = detectedCountOk && estimateOk && silenceOk && tooFewOk
+    return buildString {
+        appendLine(if (pass) "PASS — JNI boundary verified" else "FAIL — see values below")
+        appendLine("detected ${detected.size}/${scheduledTimes.size} onsets (ok=$detectedCountOk)")
+        appendLine(
+            "estimated latency: %s (expected %.1fms, ok=%s)".format(
+                estimate?.let { "%.2fms".format(it * 1000) } ?: "null", knownLatencySec * 1000, estimateOk,
+            ),
+        )
+        appendLine("pure silence returns no onsets (ok=$silenceOk)")
+        append("too-few-matches returns null (ok=$tooFewOk)")
     }
 }
 
