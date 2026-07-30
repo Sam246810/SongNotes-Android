@@ -99,3 +99,65 @@ val CHORD_DB_KEYS: Set<String> = setOf(
     "Caug", "Cdim7",
     "A5", "E5", "G5", "D5",
 )
+
+/**
+ * One token of a chord-track line — ported from `tokenizeChordLine`'s
+ * per-token object shape in the JS source. [chordName] is null only for
+ * whitespace tokens (the JS version simply omits the key there); for
+ * every other token it's always set, falling back to [text] itself if
+ * [normalizeChordName] produced an empty string.
+ */
+data class ChordToken(
+    val text: String,
+    val isChord: Boolean,
+    val looksLikeChord: Boolean,
+    val isWhitespace: Boolean,
+    val chordName: String?,
+)
+
+/**
+ * Splits a chord-track string into whitespace-run and non-whitespace
+ * tokens, classifying each non-whitespace token against [CHORD_DB_KEYS]
+ * (plus [customChords], if given — a song's own user-entered voicings,
+ * keyed by normalized chord name, taking priority the same way
+ * [lookupChord]-equivalent logic would upstream; nothing calls this with
+ * a non-null value yet, ported for shape-fidelity ahead of the editor
+ * phase that will).
+ *
+ * Ported by hand-walking `\s+` matches rather than translating
+ * `text.split(/(\s+)/)` literally — Kotlin's `String.split` doesn't have
+ * an equivalent to JS's capturing-group split (which keeps the
+ * delimiters in the result array); this achieves the same effect
+ * (whitespace runs become their own tokens, interspersed with the
+ * non-whitespace parts between them) without ever producing the
+ * empty-string artifacts the JS version's `if (!part) continue` exists
+ * to skip.
+ */
+fun tokenizeChordLine(text: String?, customChords: Map<String, Any?>? = null): List<ChordToken> {
+    if (text.isNullOrEmpty()) return emptyList()
+    val tokens = mutableListOf<ChordToken>()
+    var lastEnd = 0
+    for (match in Regex("\\s+").findAll(text)) {
+        if (match.range.first > lastEnd) {
+            tokens.add(nonWhitespaceChordToken(text.substring(lastEnd, match.range.first), customChords))
+        }
+        tokens.add(ChordToken(text = match.value, isChord = false, looksLikeChord = false, isWhitespace = true, chordName = null))
+        lastEnd = match.range.last + 1
+    }
+    if (lastEnd < text.length) {
+        tokens.add(nonWhitespaceChordToken(text.substring(lastEnd), customChords))
+    }
+    return tokens
+}
+
+private fun nonWhitespaceChordToken(part: String, customChords: Map<String, Any?>?): ChordToken {
+    val chordName = normalizeChordName(part)
+    val inDb = chordName in CHORD_DB_KEYS || (customChords?.get(chordName) != null)
+    return ChordToken(
+        text = part,
+        isChord = inDb,
+        looksLikeChord = Regex("^[A-G][#b]?").containsMatchIn(part),
+        isWhitespace = false,
+        chordName = chordName.ifEmpty { part },
+    )
+}
