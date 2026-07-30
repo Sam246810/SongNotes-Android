@@ -1,14 +1,14 @@
 # Phase 3 — Automatic acoustic loopback calibration
 
-**Status (2026-07-29): DSP core, JNI wrapping, engine integration, AEC/NS/AGC
+**Status (2026-07-30): DSP core, JNI wrapping, engine integration, AEC/NS/AGC
 disabling, N-rep sessions with AEC-defeat detection, per-route storage,
-Bluetooth refusal, and the Rules A/B/C/I plumbing (click-track rendering,
-offline pre-mix, buffer-based playback, the `CalibrationAudio` interface)
-are all done and verified on a physical device.** Only the wizard UI itself,
-the manual slider fallback, and product-copy items remain — see "What's
-left" below. `docs/PLAN.md` now holds the full plan text verbatim (it had
-nearly been lost to context compaction — this doc's "Rules A–I" summary
-below is no longer the only surviving copy).
+Bluetooth refusal, the Rules A/B/C/I plumbing, the wizard's full
+auto-calibration flow, the manual slider fallback, and live route swapping
+are all done and verified on a physical device.** Only the recommended-specs
+notice/BT-warning copy and the tap-along+onset-detection manual path remain
+— see "What's left" below. `docs/PLAN.md` now holds the full plan text
+verbatim (it had nearly been lost to context compaction — this doc's
+"Rules A–I" summary below is no longer the only surviving copy).
 
 Phase 3 is the largest phase in the plan ("most of the pain in Phase 3,"
 per its own honest notes). The earliest pass through this phase matched the
@@ -499,7 +499,7 @@ played back via `CalibrationAudio.playPreMixed` → returned cleanly to
 Results. Logcat showed a single clean stream reuse for the whole sequence,
 zero warnings or errors.
 
-## Live route swapping, shipped but NOT verified on device (2026-07-30)
+## Live route swapping, verified on device (2026-07-30, confirmed 2026-07-30)
 
 **`AudioRouteMonitor`** (new, `:core:audio`) — the piece flagged below as
 "not started" as of the previous update, now implemented: live
@@ -521,31 +521,42 @@ a sensible default if none exists) and a status message tells the user
 what happened, rather than silently continuing to show a value that
 belonged to a different route.
 
-**Explicitly NOT verified on a physical device.** This was written and
-built (`./gradlew assembleDebug` succeeds, `./gradlew :core:audio:testDebugUnitTest`
-and `:core:domain:test` both still pass) during a session where the
-phone was intentionally disconnected — the user wanted to sleep without
-needing to babysit device testing, so this shipped as reasoned-through,
-carefully-written code with zero on-device confirmation, a deliberate
-and disclosed exception to this project's usual "verify on device before
-calling it done" bar. Specifically unconfirmed:
-- Whether `AudioDeviceCallback.onAudioDevicesAdded`/`onAudioDevicesRemoved`
-  actually fire promptly (or at all, on this specific device/Android
-  version) for a real route change — headphones plugged in, Bluetooth
-  connected.
-- Whether `AudioManager.getDevices()` reflects the new device set by the
-  time the callback fires, or whether there's a race where the callback
-  fires before the device list updates (the implementation assumes not).
-- Whether `registerAudioDeviceCallback`'s `Handler` parameter (main
-  thread `Looper` here) causes any issue given the callback triggers a
-  `StateFlow` update, which a Composable then collects.
-- The actual UX of the reload-on-change behavior in `ManualCalibrationScreen`
-  — does the status message appear at a sensible time relative to the
-  slider visibly jumping, is it confusing mid-`Test` recording, etc.
+**Shipped without on-device confirmation** during a session where the
+phone was intentionally disconnected (the user wanted to sleep without
+needing to babysit device testing) — a deliberate and disclosed exception
+to this project's usual "verify on device before calling it done" bar at
+the time. **Verified for real the next device session**, on the physical
+`SM-F956W`, with a real Bluetooth headset (Sony WF-1000XM5):
 
-**Next device session**: plug in wired headphones (or connect Bluetooth)
-while `ManualCalibrationScreen` is open and confirm the slider/status
-text actually update — that's the whole verification this needs.
+- Opened `ManualCalibrationScreen` — correctly loaded the stored 150ms
+  calibration for the built-in mic route on first composition (confirms
+  `AudioRouteMonitor`'s initial `detector.currentInputRoute()` call and
+  `DisposableEffect`-driven `start()` both work).
+- Connected the Bluetooth earbuds while the screen stayed open: the
+  screen updated **live**, with no re-navigation or manual refresh —
+  slider reset to 80ms (no stored calibration yet for that route) and
+  status text read `Route changed to "WF-1000XM5" — reloaded calibration
+  for this route.` Confirms `onAudioDevicesAdded` fires promptly on this
+  device/Android version, `AudioManager.getDevices()` already reflects
+  the new device by the time the callback runs (no race), and the
+  main-`Looper` `Handler` → `StateFlow` → Composable `collect` chain
+  works correctly.
+- Disconnected the earbuds: the screen swapped back live, slider
+  returned to **150ms** (the correct stored value for `SM-F956W`), status
+  text read `Route changed to "SM-F956W" — reloaded calibration for this
+  route.` Confirms the callback fires symmetrically on removal, not just
+  addition.
+- `adb logcat` showed zero crashes, fatal exceptions, or `AndroidRuntime`
+  errors across both transitions.
+
+All four previously-unconfirmed assumptions listed in the prior version
+of this section are now confirmed correct. The one item not exercised by
+this pass: the UX question of what happens if a route changes *mid-`Test`
+recording* (slider/status changing while `isBusy` is true) — not tested,
+since the earbuds were connected/disconnected between `Test` runs, not
+during one. Low risk (the slider and Save button are already disabled
+while `isBusy`), but worth a specific check before trusting that
+interaction.
 
 ## What's left for Phase 3 (not started)
 
@@ -623,14 +634,12 @@ same route) that exactly **7200.00 frames** was persisted — precisely
    validate input lengths once real engine integration exists, since a
    malformed recording would currently just produce a meaningless peak
    rather than an explicit error.
-4. **`AudioRouteMonitor` (live route swapping) is entirely unverified on
-   a physical device** — see its own section above for the full list of
-   specific unconfirmed assumptions (callback firing promptly and at all,
-   `getDevices()` freshness relative to the callback, main-`Looper`
-   interaction with the `StateFlow` it feeds). Written and built during a
-   deliberately phone-disconnected session; first thing to actually test
-   next time the device is in hand, before building anything else on top
-   of it.
+4. ~~`AudioRouteMonitor` (live route swapping) is entirely unverified on
+   a physical device~~ — **verified 2026-07-30** with a real Bluetooth
+   device, both directions (connect and disconnect), zero crashes. See its
+   own section above. The one remaining gap: behavior if a route changes
+   mid-`Test` recording specifically hasn't been exercised (low risk —
+   the relevant controls are already disabled while `isBusy`).
 
 ## What Phase 3's next slice assumes
 

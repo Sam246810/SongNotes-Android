@@ -25,15 +25,14 @@ import kotlinx.coroutines.flow.StateFlow
  * `collectAsState()`) sees every update automatically; nothing needs to
  * re-query on a timer or re-check on every screen visit.
  *
- * **Not verified on a physical device yet.** Registering/unregistering
- * `AudioDeviceCallback` compiles and type-checks against the SDK, but
- * whether it actually fires correctly on a real route change (plugging in
- * headphones, connecting Bluetooth) — and how quickly, and whether
- * `getDevices()` reflects the new state by the time the callback fires —
- * has not been exercised. See `docs/handoff/PHASE-03.md`'s "Known risks"
- * for this specific gap; the next device session should verify this
- * before trusting it in a real user-facing flow beyond the diagnostic use
- * this phase wires it into.
+ * **Verified on a physical device (2026-07-30)**: connecting and
+ * disconnecting a real Bluetooth headset while [ManualCalibrationScreen]
+ * was open updated the displayed route live in both directions, with no
+ * crash — confirming the callback fires promptly, `getDevices()` already
+ * reflects the new device by the time it does, and the main-`Looper`
+ * `Handler` → `StateFlow` → Composable `collect` chain works correctly.
+ * See `docs/handoff/PHASE-03.md`'s "Live route swapping" section for the
+ * full verification log.
  */
 class AudioRouteMonitor(context: Context) {
     private val audioManager = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager

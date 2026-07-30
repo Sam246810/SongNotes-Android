@@ -73,10 +73,9 @@ private const val kMaxOffsetMs = 300f
  * default if none exists yet) instead of silently continuing to show a
  * value that belonged to a different route. This is the plan's own
  * example of what live route-change notification was for — see
- * `docs/handoff/PHASE-03.md`. **Not verified on a physical device yet**
- * (see [AudioRouteMonitor]'s own doc comment) — compiles and type-checks,
- * but the actual on-device behavior of the underlying
- * `AudioDeviceCallback` hasn't been exercised.
+ * `docs/handoff/PHASE-03.md`. **Verified on a physical device (2026-07-30)**
+ * with a real Bluetooth headset, connecting and disconnecting while this
+ * screen stayed open — see [AudioRouteMonitor]'s own doc comment.
  */
 @Composable
 fun ManualCalibrationScreen(engine: AudioEngine, onDone: () -> Unit) {
