@@ -18,6 +18,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.songnotes.core.audio.AudioEngine
 
+private enum class Screen { Diagnostics, Wizard, Manual }
+
 class MainActivity : ComponentActivity() {
 
     private val audioEngine = AudioEngine()
@@ -25,21 +27,29 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            // No navigation library wired up yet — just two screens, so a
-            // plain toggle is the honest amount of infrastructure for now
-            // (see docs/handoff/PHASE-00.md's "don't front-load" note).
-            var showWizard by remember { mutableStateOf(false) }
+            // No navigation library wired up yet — just three screens, so a
+            // plain enum toggle is the honest amount of infrastructure for
+            // now (see docs/handoff/PHASE-00.md's "don't front-load" note).
+            var screen by remember { mutableStateOf(Screen.Diagnostics) }
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    if (showWizard) {
-                        CalibrationWizardScreen(engine = audioEngine, onDone = { showWizard = false })
-                    } else {
-                        Column(modifier = Modifier.fillMaxSize()) {
+                    when (screen) {
+                        Screen.Wizard ->
+                            CalibrationWizardScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
+                        Screen.Manual ->
+                            ManualCalibrationScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
+                        Screen.Diagnostics -> Column(modifier = Modifier.fillMaxSize()) {
                             Button(
-                                onClick = { showWizard = true },
+                                onClick = { screen = Screen.Wizard },
                                 modifier = Modifier.padding(24.dp),
                             ) {
                                 Text("Open calibration wizard")
+                            }
+                            Button(
+                                onClick = { screen = Screen.Manual },
+                                modifier = Modifier.padding(horizontal = 24.dp),
+                            ) {
+                                Text("Open manual calibration")
                             }
                             DiagnosticsScreen(engine = audioEngine)
                         }

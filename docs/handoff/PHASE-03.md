@@ -509,14 +509,50 @@ Roughly in the order the plan's architecture section implies:
   measure/apply to," not yet sufficient for e.g. invalidating a displayed
   calibration value if the route changes while a result is still on
   screen.
-- **The manual slider fallback path**, needed on devices where AEC can't be
-  defeated (the plan is explicit that on those devices, manual isn't a
-  fallback, it's *the* path) — including Rule D's constraint that the
-  built-in-speaker manual path uses **visual + haptic count only, no
-  audible click** (the existing metronome click sound is Rule-D-incompatible
-  for this specific path; don't reuse it here without re-reading the rule).
 - **Recommended-minimum-specs notice** and the Bluetooth-latency warning
   copy — product/content work, not DSP.
+- **Porting the plan's other-described manual path** (tap-along +
+  onset-detection, reusing the intent — not the code — of the web app's
+  dead `detectOnsets`/`estimateLatencyFromOnsets` module) is still not
+  done; see "Manual slider fallback" below for what shipped instead and
+  why it's a different, simpler mechanism than that one.
+
+## Manual slider fallback, verified on device (2026-07-30)
+
+`ManualCalibrationScreen` (new, `:app`) is the plan's "on devices where AEC
+can't be defeated, manual isn't a fallback, it's *the* path": no sweep
+measurement at all — a slider (0–300ms), a "Test" button that records a
+demo take at the slider's value and plays it back pre-mixed (reusing
+`VerificationTakeRecorder`, factored out of the wizard's own Verify step
+specifically so both screens share one tested record→pre-mix→playback
+path rather than duplicating it), and a "Save" button. The user's own ears
+are the measurement — simpler than the plan's *other*-described tap-along +
+onset-detection mechanism (that algorithm isn't ported; see "What's left"
+above), but a genuinely working fallback, not a stub.
+
+**Known, deliberate deviation from Rule D's literal text worth flagging
+honestly**: Rule D specifically names "the manual path" as needing
+"visual + haptic count only, no audible click" on the built-in speaker.
+This implementation's "Test" loop uses `VerificationTakeRecorder`, which
+records through the normal audible metronome (the same reasoning applied
+to the wizard's own Verify step — recording a demo take isn't calibration
+*measurement*, Rule I/D's actual target). For the wizard's Verify step
+that reasoning is on firmer ground since that step isn't named directly;
+for *this* screen, Rule D's text names "the manual path" specifically, so
+this is a real, acknowledged gap against the literal rule, not a
+confidently-resolved judgment call — implemented this way because it's the
+already-tested, working mechanism, with the honest caveat noted rather
+than silently assumed compliant.
+
+**Ran the complete flow on the physical device**: opened the screen, it
+correctly pre-loaded the previously-saved 90ms for the detected route from
+`CalibrationStore`; tapped Test — recorded through count-in and 8 beats
+with the metronome, played back pre-mixed, status text confirmed
+completion, zero errors in logcat; dragged the slider to 150ms (confirmed
+via the on-screen readout) and tapped Save; confirmed via `DiagnosticsScreen`'s
+independent "Check stored calibration" path (same `CalibrationStore`,
+same route) that exactly **7200.00 frames** was persisted — precisely
+`150ms × 48000/1000`, exact conversion, no rounding drift.
 
 ## Known risks — check these first
 

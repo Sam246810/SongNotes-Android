@@ -42,15 +42,12 @@ import androidx.core.content.ContextCompat
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.audio.AudioRoute
 import com.songnotes.core.audio.AudioRouteDetector
-import com.songnotes.core.audio.Calibration
 import com.songnotes.core.audio.CalibrationAudio
 import com.songnotes.core.audio.CalibrationSession
 import com.songnotes.core.audio.CalibrationStore
 import com.songnotes.core.audio.RealCalibrationAudio
+import com.songnotes.core.audio.VerificationTakeRecorder
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private const val kRepetitionCount = 5
@@ -155,40 +152,22 @@ fun CalibrationWizardScreen(engine: AudioEngine, onDone: () -> Unit) {
         scope.launch {
             val verifyFile = File(context.filesDir, "takes/calibration_verify.f32").also { it.parentFile?.mkdirs() }
             context.startForegroundService(Intent(context, RecordingForegroundService::class.java))
-            val armed = engine.armRecording(
-                verifyFile.absolutePath, kVerifyBpm, kVerifyBeatsPerBar, kVerifyCountInBeats,
+            // Return value ignored — whether or not a usable take was
+            // captured, Results is the right place to land either way.
+            VerificationTakeRecorder.recordAndPlayVerification(
+                engine = engine,
+                calibrationAudio = calibrationAudio,
+                takeFile = verifyFile,
                 calibrationOffsetFrames = result.meanAcceptedDelayFrames,
+                bpm = kVerifyBpm,
+                beatsPerBar = kVerifyBeatsPerBar,
+                countInBeats = kVerifyCountInBeats,
+                recordBeats = kVerifyRecordBeats,
+                sampleRate = kSampleRateHz,
+                onProgress = { elapsed, total -> step = WizardStep.Verifying(elapsed, total) },
+                onPlaybackStart = { step = WizardStep.VerifyPlayback },
             )
-            if (!armed) {
-                context.stopService(Intent(context, RecordingForegroundService::class.java))
-                step = WizardStep.Results(result, route)
-                return@launch
-            }
-
-            val startTimeMs = System.currentTimeMillis()
-            while (true) {
-                val elapsedSeconds = (System.currentTimeMillis() - startTimeMs) / 1000.0
-                step = WizardStep.Verifying(elapsedSeconds.toInt(), totalSeconds.toInt())
-                if (elapsedSeconds >= totalSeconds) break
-                delay(150)
-            }
-            engine.stopRecording()
             context.stopService(Intent(context, RecordingForegroundService::class.java))
-
-            val takeBytes = verifyFile.readBytes()
-            val take = FloatArray(takeBytes.size / 4)
-            ByteBuffer.wrap(takeBytes).order(ByteOrder.nativeOrder()).asFloatBuffer().get(take)
-
-            if (take.isEmpty()) {
-                step = WizardStep.Results(result, route)
-                return@launch
-            }
-
-            val mixed = Calibration.buildPreMixedVerificationBuffer(
-                take = take, sampleRate = kSampleRateHz, bpm = kVerifyBpm, beatsPerBar = kVerifyBeatsPerBar,
-            )
-            step = WizardStep.VerifyPlayback
-            calibrationAudio.playPreMixed(mixed) // Rule I boundary: playback goes only through here
             step = WizardStep.Results(result, route)
         }
     }
