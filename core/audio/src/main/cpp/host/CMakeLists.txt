@@ -38,6 +38,7 @@ add_library(songnotes_dsp STATIC
     ../dsp/calibration_stats.cpp
     ../dsp/click_track.cpp
     ../dsp/mix.cpp
+    ../dsp/track_mixer.cpp
 )
 target_include_directories(songnotes_dsp PUBLIC ..)
 
@@ -55,6 +56,7 @@ add_executable(dsp_tests
     test_scene.cpp
     test_click_track.cpp
     test_mix.cpp
+    test_track_mixer.cpp
 )
 # test_spsc_ring_buffer.cpp / test_scene.cpp include spsc_ring_buffer.h and
 # scene.h directly from `..` — already on the include path via
