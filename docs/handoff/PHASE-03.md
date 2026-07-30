@@ -3,9 +3,9 @@
 **Status (2026-07-30): DSP core, JNI wrapping, engine integration, AEC/NS/AGC
 disabling, N-rep sessions with AEC-defeat detection, per-route storage,
 Bluetooth refusal, the Rules A/B/C/I plumbing, the wizard's full
-auto-calibration flow, the manual slider fallback, and live route swapping
-are all done and verified on a physical device.** Only the recommended-specs
-notice/BT-warning copy and the tap-along+onset-detection manual path remain
+auto-calibration flow, the manual slider fallback, live route swapping,
+and the recommended-conditions notice are all done and verified on a
+physical device.** Only the tap-along+onset-detection manual path remains
 — see "What's left" below. `docs/PLAN.md` now holds the full plan text
 verbatim (it had nearly been lost to context compaction — this doc's
 "Rules A–I" summary below is no longer the only surviving copy).
@@ -558,12 +558,47 @@ during one. Low risk (the slider and Save button are already disabled
 while `isBusy`), but worth a specific check before trusting that
 interaction.
 
+## Recommended-conditions notice, verified on device (2026-07-30)
+
+The wizard's `IntroStep` gained a short second paragraph: "For the most
+reliable result: find a quiet room, use your device's built-in speaker
+and microphone (or wired headphones) rather than Bluetooth, and leave the
+device still on a flat surface while it measures." The Bluetooth-latency
+warning itself already existed (`BluetoothWarningStep`, shipped as part
+of "The wizard's auto-calibration flow" above) — this closes the other
+half of the "What's left" bullet that was open, a plain-language
+heads-up before the user starts, not a hard device-capability gate (no
+"minimum spec" data model exists to gate against, and the plan's own
+"any constant offset gets measured and cancelled" premise means a slower
+device still calibrates correctly, just less consistently session to
+session).
+
+**Ran on the physical device**: confirmed the new paragraph renders
+without layout issues, and ran the flow past it (Start calibration →
+correctly detected the still-connected Bluetooth route and showed the
+existing Bluetooth warning, "Cancel" returned cleanly to Intro) with zero
+crashes in logcat.
+
+**One real, pre-existing UX issue surfaced while testing this, worth
+flagging**: on this device, buttons pinned to the bottom of a full-screen
+Column (`Start calibration`, likely others across the app) render partly
+underneath the 3-button navigation bar's tappable region — the button's
+own bounds extend to y=2303 out of a 2376px-tall screen, but the nav
+bar's reserved inset starts at y≈2250, so taps in roughly the bottom 50px
+of the button get swallowed by system navigation instead of reaching the
+app. Not a regression from this change (the button was already
+bottom-pinned via `Spacer(Modifier.weight(1f))`) and not usually a
+practical problem for a real finger tapping center-mass, but worth a
+real fix — likely `Modifier.navigationBarsPadding()` or equivalent — on
+whichever screen picks up general polish later, since edge-to-edge
+rendering without inset-aware padding is presumably repeated on other
+bottom-pinned buttons across the app (`ManualCalibrationScreen`,
+`ScratchpadScreen`, etc.) too.
+
 ## What's left for Phase 3 (not started)
 
 Roughly in the order the plan's architecture section implies:
 
-- **Recommended-minimum-specs notice** and the Bluetooth-latency warning
-  copy — product/content work, not DSP.
 - **Porting the plan's other-described manual path** (tap-along +
   onset-detection, reusing the intent — not the code — of the web app's
   dead `detectOnsets`/`estimateLatencyFromOnsets` module) is still not

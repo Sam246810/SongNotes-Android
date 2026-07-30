@@ -239,6 +239,13 @@ private fun ColumnScope.IntroStep(onStart: () -> Unit) {
             "and makes your recordings line up perfectly with the beat.",
         style = MaterialTheme.typography.bodyMedium,
     )
+    Spacer(Modifier.height(16.dp))
+    Text(
+        "For the most reliable result: find a quiet room, use your device's built-in speaker and " +
+            "microphone (or wired headphones) rather than Bluetooth, and leave the device still on a " +
+            "flat surface while it measures.",
+        style = MaterialTheme.typography.bodySmall,
+    )
     Spacer(Modifier.weight(1f))
     Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) {
         Text("Start calibration")
