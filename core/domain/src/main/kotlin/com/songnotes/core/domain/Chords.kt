@@ -161,3 +161,71 @@ private fun nonWhitespaceChordToken(part: String, customChords: Map<String, Any?
         chordName = chordName.ifEmpty { part },
     )
 }
+
+/**
+ * Formats a frets array (as stored on a chord voicing) into the compact
+ * space-separated text a user can edit, e.g. `[-1,3,2,0,1,0]` -> `"x 3 2 0 1 0"`.
+ */
+fun formatFretsForInput(frets: List<Int>): String = frets.joinToString(" ") { if (it == -1) "x" else it.toString() }
+
+/** Parsed result of [parseFretsInput] — mirrors the JS version's `{frets, baseFret}` shape. */
+data class FretsInput(val frets: List<Int>, val baseFret: Int)
+
+/**
+ * Parses a user-typed "x 3 2 0 1 0"-style string (low-E to high-E, 'x' for
+ * muted) into a voicing, or null if it isn't exactly 6 valid values.
+ * `baseFret` is derived automatically: 1 if the whole shape fits in the
+ * first 4 frets (the common case), otherwise the lowest fretted position —
+ * same convention every hand-written `CHORD_DB` entry in the JS source
+ * follows.
+ *
+ * One deliberate divergence from a strict byte-for-byte port:
+ * `p.toIntOrNull() ?: return null` instead of a direct `p.toInt()` — JS's
+ * `Number(p)` never throws (an absurdly long digit string just becomes a
+ * huge-but-valid number, which the following `n > 24` check then rejects
+ * anyway), but Kotlin's `String.toInt()` throws `NumberFormatException` on
+ * overflow. Both end up returning null for that input either way, so this
+ * doesn't change behavior — it just reaches the same "reject" outcome
+ * without a crash risk Kotlin's typed parsing would otherwise introduce
+ * that the JS source never had.
+ */
+fun parseFretsInput(raw: String?): FretsInput? {
+    if (raw.isNullOrEmpty()) return null
+    val parts = raw.trim().split(Regex("\\s+"))
+    if (parts.size != 6) return null
+    val frets = mutableListOf<Int>()
+    for (p in parts) {
+        if (Regex("^x$", RegexOption.IGNORE_CASE).matches(p)) {
+            frets.add(-1)
+            continue
+        }
+        if (!Regex("^\\d+$").matches(p)) return null
+        val n = p.toIntOrNull() ?: return null
+        if (n > 24) return null
+        frets.add(n)
+    }
+    val played = frets.filter { it > 0 }
+    val baseFret = if (played.isEmpty() || played.max() <= 4) 1 else played.min()
+    return FretsInput(frets = frets, baseFret = baseFret)
+}
+
+/**
+ * Ensures a chords line aligns in length with a lyrics line: pads with
+ * trailing spaces if chords are shorter, trims trailing spaces if chords
+ * are longer (but only if the extra characters are all whitespace — real
+ * chord symbols past the lyrics' length are never silently dropped).
+ */
+fun alignChordsWithLyrics(chords: String?, lyrics: String?): String {
+    val chordsStr = chords ?: ""
+    val lyricsStr = lyrics ?: ""
+    if (chordsStr.length < lyricsStr.length) {
+        return chordsStr + " ".repeat(lyricsStr.length - chordsStr.length)
+    }
+    if (chordsStr.length > lyricsStr.length) {
+        val extra = chordsStr.substring(lyricsStr.length)
+        if (extra.isBlank()) {
+            return chordsStr.substring(0, lyricsStr.length)
+        }
+    }
+    return chordsStr
+}

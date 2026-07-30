@@ -1,7 +1,8 @@
 # Phase 5 — Domain logic port + JVM behavioural spec
 
 **Status (2026-07-30): Done criterion met and verified, then extended to
-`lyricsImport.js`.** The plan's own stated Done criterion — "golden
+`lyricsImport.js`, then extended again to the rest of `chords.js`'s
+portable surface.** The plan's own stated Done criterion — "golden
 cross-check: ~2000 chord strings through both JS and Kotlin
 `normalizeChordName`, byte-identical" — is satisfied: 1,319
 `normalizeChordName` fixtures (plus 1,915 `transposeChordToken` and 49
@@ -10,9 +11,13 @@ tightly coupled `transpose.js` is to `chords.js` in the source) all pass,
 byte-identical, cross-checked against the *real* JS implementation's
 actual output rather than a hand-predicted expectation. A second pass the
 same night extended this to `tokenizeChordLine`, `looksLikeChordLine`, and
-`parseLyricsText` — the rest of `chords.js` plus all of `lyricsImport.js`
-— closing two of the three gaps this doc originally listed under "What's
-left."
+`parseLyricsText` — the rest of `chords.js` plus all of `lyricsImport.js`.
+A third pass the same night ported `formatFretsForInput`,
+`parseFretsInput`, and `alignChordsWithLyrics` — closing out every gap
+this doc originally listed under "What's left" except the two that are
+genuinely out of Phase 5's scope (`lookupChord`'s voicing-data dependency,
+deferred to Phase 8; `dragMath`, which doesn't exist yet in the desktop
+repo).
 
 ## What shipped
 
@@ -109,10 +114,48 @@ in the other codebase, since that's where the JS source of truth lives):
 - **`TokenizeChordLineGoldenFixtureTest.kt`**, **`LyricsImportGoldenFixtureTest.kt`**
   (new): same exact-match-every-case approach as the first pass.
 
+**Third pass, same night — `formatFretsForInput`/`parseFretsInput`/`alignChordsWithLyrics`**:
+
+- **Fixture generation** extended again in the desktop repo's
+  `generate-golden-fixtures.test.js`: `formatFretsForInput` fixtures cover
+  every voicing already in `CHORD_DB` plus explicit all-muted/all-open/all-24th-fret
+  edge cases; `parseFretsInput` fixtures cover the hand-crafted cases from
+  the desktop repo's own `src/test/chords.test.js` (valid shapes, mixed
+  case `X`/`x`, irregular whitespace, too-few/too-many values, non-digit
+  garbage, empty string, `null`, out-of-range fret 25, whitespace-only
+  input) plus a round-trip through `formatFretsForInput`;
+  `alignChordsWithLyrics` fixtures cover shorter/longer/equal-length
+  chords-vs-lyrics pairs, `null` chords/lyrics in both positions, and the
+  "extra trailing content is non-blank so don't trim it" case.
+- **`Chords.kt`** gained `formatFretsForInput()`, the `FretsInput` data
+  class, `parseFretsInput()`, and `alignChordsWithLyrics()` — same
+  faithful-port approach. One deliberate, documented divergence:
+  `parseFretsInput` uses `p.toIntOrNull() ?: return null` rather than a
+  direct `.toInt()`, because JS's `Number(p)` never throws (an absurdly
+  long digit string just becomes a huge-but-valid number that the
+  following `n > 24` check rejects anyway) while Kotlin's `String.toInt()`
+  throws `NumberFormatException` on overflow — both paths converge on the
+  same "reject" outcome, so this avoids a crash risk without changing
+  observable behavior.
+- **`ChordInputGoldenFixtureTest.kt`** (new): same exact-match-every-case
+  approach, three test methods.
+- **Deliberately NOT ported this pass**: `lookupChord` — it needs the
+  full `CHORD_DB` voicing/fret data (`frets`/`baseFret`/`barre`), which
+  Phase 5 never ported (only `CHORD_DB_KEYS`, a `Set<String>`, per the
+  scope note in `Chords.kt`'s own doc comment); porting `lookupChord`
+  without the real voicing data would return something other than what
+  the JS function actually returns, so it stays deferred to Phase 8
+  (chord-diagram rendering) rather than shipping a misleadingly-named
+  partial port. Also checked the desktop repo for a `dragMath.js` (listed
+  in `docs/PLAN.md`'s `:core:domain` file inventory) — it does not exist
+  yet, so there's nothing to port; presumably belongs to Phase 10's
+  still-unstarted clip drag/trim timeline UI, worth checking again when
+  that work starts.
+
 ## Verified
 
 `./gradlew :core:domain:test` — **all passing, zero failures**, across
-five test classes:
+six test classes, 21 tests total:
 - `ChordsGoldenFixtureTest`: 1 test, 1,319 `normalizeChordName` cases.
 - `TransposeGoldenFixtureTest`: 2 tests — 1,915 `transposeChordToken`
   cases and 49 `transposeChordsLine` cases.
@@ -121,8 +164,14 @@ five test classes:
   cases) and `parseLyricsText` (27 cases, including a `Map<String,String>`/
   nested-`List<LyricsLine>` structural comparison, not just a flat string
   match).
+- `ChordInputGoldenFixtureTest`: 3 tests — `formatFretsForInput`,
+  `parseFretsInput` (structural `FretsInput` comparison, including
+  null-vs-null and null-vs-non-null mismatches), and `alignChordsWithLyrics`.
 - `ClipMixerTest` (from the earlier JVM reference mixer work): 12 tests,
   unaffected.
+
+`./gradlew assembleDebug` also verified BUILD SUCCESSFUL after this pass
+— the full app still assembles cleanly with the new module content.
 
 All byte-identical to the JS fixtures on the first real attempt after
 fixing the one Kotlin-comment mistake below — including a genuinely
@@ -164,22 +213,12 @@ to mention a glob pattern like `*.json` or a path containing `/*`.
   phase's own Done criterion needs them (matching the "front-load only
   when a phase's own criterion genuinely needs it" judgment call already
   applied to `:core:domain` and `MultitrackProject` earlier). `dragMath`
-  in particular is presumably for Phase 10's still-not-started clip
-  drag/trim timeline UI — worth checking the desktop repo for a
-  `dragMath.js`-equivalent when that work starts.
+  doesn't exist yet in the desktop repo either (checked this pass) — worth
+  checking again once Phase 10's clip drag/trim timeline UI actually
+  starts.
 - **Chord voicing/fret data (`CHORD_DB`'s actual shapes) is not ported.**
   Only the key set is. A chord-diagram feature (Phase 8) will need the
   real `frets`/`baseFret`/`barre` data ported too, not just names.
-- **`lookupChord` (JS-side, `chords.js`) is not ported.** The one
-  remaining function in `chords.js` — `tokenizeChordLine` (which
-  `lookupChord` itself doesn't call, they're siblings) is done.
-  `lookupChord` is a thin wrapper (`normalizeChordName` + `customChords`
-  override + `CHORD_DB` fallback) that wasn't needed by anything ported so
-  far; trivial to add whenever a caller needs it.
-- **`formatFretsForInput`/`parseFretsInput`/`alignChordsWithLyrics`
-  (JS-side, `chords.js`) are not ported** — all three are pure and
-  self-contained, but nothing in `:core:domain` calls them yet.
-  `alignChordsWithLyrics` in particular will matter once `transposeChordsLine`
-  is actually wired into an editor (its own doc comment notes callers
-  should re-run alignment afterward, since a chord token changing width
-  shifts everything after it on the line).
+- **`lookupChord` (JS-side, `chords.js`) is not ported** — see the third
+  pass's "Deliberately NOT ported" note above. Everything else in
+  `chords.js` and `lyricsImport.js` is now ported.
