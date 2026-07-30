@@ -308,6 +308,35 @@ Java_com_songnotes_core_audio_AudioEngine_nativeExportMixdownToWav(
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
+// Phase 4: returns the raw mixed samples (no WAV encoding) — exists
+// specifically for cross-validating dsp::mixTracks against the
+// independent JVM reference mixer in :core:domain (com.songnotes.core.
+// domain.mixTracks), isolating "do the two mixing implementations agree"
+// from "is the WAV encoding correct" (already covered by
+// nativeExportMixdownToWav's own smoke test). Stateless, same reasoning
+// as nativePunchIn/nativeExportMixdownToWav.
+JNIEXPORT jfloatArray JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeMixTracks(
+    JNIEnv *env, jobject, jobjectArray clipBuffers, jlongArray clipStartFrames,
+    jlongArray clipBufferOffsetFrames, jlongArray clipLengthFrames, jintArray trackClipCounts,
+    jfloatArray trackGains, jbooleanArray trackMuted, jbooleanArray trackSoloed) {
+    const auto tracks =
+        parseFlatTracks(env, clipBuffers, clipStartFrames, clipBufferOffsetFrames, clipLengthFrames,
+                         trackClipCounts, trackGains, trackMuted, trackSoloed);
+
+    int64_t totalFrames = 0;
+    for (const auto &track : tracks) {
+        for (const auto &clip : track.clips) {
+            totalFrames = std::max(totalFrames, clip.startFrame + clip.lengthFrames);
+        }
+    }
+    const std::vector<float> mixed = songnotes::dsp::mixTracks(tracks, 0, totalFrames);
+
+    auto *result = env->NewFloatArray(static_cast<jsize>(mixed.size()));
+    env->SetFloatArrayRegion(result, 0, static_cast<jsize>(mixed.size()), mixed.data());
+    return result;
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_songnotes_core_audio_AudioEngine_nativeStartCalibrationCapture(JNIEnv *env, jobject,
                                                                           jlong handle, jfloatArray sweep,

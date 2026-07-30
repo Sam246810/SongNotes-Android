@@ -149,6 +149,145 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         PunchInSmokeTestSection(engine)
         OverdubPunchInEndToEndSection(engine)
         WavExportSmokeTestSection(engine)
+        JvmReferenceMixerCrossValidationSection(engine)
+    }
+}
+
+/**
+ * Phase 4's actual Done criterion: "exported WAV is sample-identical to a
+ * JVM reference mixer given the same clip list." [engine.mixTracksNative]
+ * calls the real `dsp::mixTracks` (C++); `com.songnotes.core.domain.mixTracks`
+ * is a genuinely independent implementation in the new `:core:domain`
+ * module — written from the algorithm description, not translated from
+ * the C++, and already exhaustively tested on its own via
+ * `:core:domain`'s JVM unit tests (12/12 passing, no device needed — the
+ * first code in this project verifiable without a phone or NDK
+ * cross-compile). This section is what only an on-device run can prove:
+ * that the two independent implementations agree, given the exact same
+ * numbers, on THIS device's floating-point arithmetic.
+ *
+ * Uses a hand-computed multi-track scenario (overlapping clips, per-track
+ * gain, a clip with a gap on one track) rather than mute/solo — those
+ * booleans are simple conditionals already covered identically by both
+ * implementations' own test suites; what floating-point summation order
+ * actually risks disagreeing on is the arithmetic itself, which this
+ * scenario exercises directly.
+ */
+@Composable
+private fun JvmReferenceMixerCrossValidationSection(engine: AudioEngine) {
+    var resultText by remember { mutableStateOf<String?>(null) }
+    var isRunning by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    fun runTest(): String {
+        // track1: clips [1,1,1]@0 and [3,3]@5 (a gap from frame 3-5), gain 0.5.
+        // track2: clip [2,2,2,2,2]@1, gain 1.0.
+        // track3: clip [0.25,0.25,0.25]@2, gain 2.0.
+        // Hand-computed expected mix over frames [0,7):
+        val expected = floatArrayOf(0.5f, 2.5f, 3.0f, 2.5f, 2.5f, 3.5f, 1.5f)
+
+        val nativeTracks = listOf(
+            com.songnotes.core.audio.MultitrackTrackSpec(
+                clips = listOf(
+                    com.songnotes.core.audio.MultitrackClipSpec(buffer = floatArrayOf(1f, 1f, 1f), startFrame = 0L),
+                    com.songnotes.core.audio.MultitrackClipSpec(buffer = floatArrayOf(3f, 3f), startFrame = 5L),
+                ),
+                gain = 0.5f,
+            ),
+            com.songnotes.core.audio.MultitrackTrackSpec(
+                clips = listOf(
+                    com.songnotes.core.audio.MultitrackClipSpec(
+                        buffer = floatArrayOf(2f, 2f, 2f, 2f, 2f), startFrame = 1L,
+                    ),
+                ),
+            ),
+            com.songnotes.core.audio.MultitrackTrackSpec(
+                clips = listOf(
+                    com.songnotes.core.audio.MultitrackClipSpec(
+                        buffer = floatArrayOf(0.25f, 0.25f, 0.25f), startFrame = 2L,
+                    ),
+                ),
+                gain = 2.0f,
+            ),
+        )
+        val domainTracks = listOf(
+            com.songnotes.core.domain.Track(
+                clips = listOf(
+                    com.songnotes.core.domain.Clip(buffer = floatArrayOf(1f, 1f, 1f), startFrame = 0L),
+                    com.songnotes.core.domain.Clip(buffer = floatArrayOf(3f, 3f), startFrame = 5L),
+                ),
+                gain = 0.5f,
+            ),
+            com.songnotes.core.domain.Track(
+                clips = listOf(
+                    com.songnotes.core.domain.Clip(buffer = floatArrayOf(2f, 2f, 2f, 2f, 2f), startFrame = 1L),
+                ),
+            ),
+            com.songnotes.core.domain.Track(
+                clips = listOf(
+                    com.songnotes.core.domain.Clip(buffer = floatArrayOf(0.25f, 0.25f, 0.25f), startFrame = 2L),
+                ),
+                gain = 2.0f,
+            ),
+        )
+
+        val nativeMixed = engine.mixTracksNative(nativeTracks)
+        val jvmMixed = com.songnotes.core.domain.mixTracks(domainTracks, 0L, 7L)
+
+        val nativeMatchesExpected = nativeMixed.size == expected.size &&
+            nativeMixed.indices.all { abs(nativeMixed[it] - expected[it]) < 0.0001f }
+        val jvmMatchesExpected = jvmMixed.size == expected.size &&
+            jvmMixed.indices.all { abs(jvmMixed[it] - expected[it]) < 0.0001f }
+        // The actual Done criterion: native vs JVM, bit-for-bit (both
+        // implementations deliberately use the same iteration order — see
+        // ClipMixer.kt's doc comment — so this checks EXACT equality, not
+        // an epsilon tolerance).
+        val nativeMatchesJvm = nativeMixed.size == jvmMixed.size &&
+            nativeMixed.indices.all { nativeMixed[it] == jvmMixed[it] }
+
+        val pass = nativeMatchesExpected && jvmMatchesExpected && nativeMatchesJvm
+        return buildString {
+            appendLine(if (pass) "PASS" else "FAIL — see values below")
+            appendLine("Native (C++) mix:  ${nativeMixed.toList()}")
+            appendLine("JVM (Kotlin) mix:  ${jvmMixed.toList()}")
+            appendLine("Hand-computed:     ${expected.toList()}")
+            appendLine("Native matches hand-computed expectation: $nativeMatchesExpected")
+            appendLine("JVM matches hand-computed expectation: $jvmMatchesExpected")
+            append("Native and JVM match EXACTLY (bit-for-bit): $nativeMatchesJvm")
+        }
+    }
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("JVM reference mixer cross-validation (Phase 4 Done criterion)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Mixes the same 3-track, overlapping-clips-with-gain scenario through both the real C++ " +
+            "mixer (AudioEngine.mixTracksNative) and the independent JVM reference mixer " +
+            "(:core:domain's com.songnotes.core.domain.mixTracks), and checks they agree exactly.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isRunning,
+        onClick = {
+            isRunning = true
+            resultText = null
+            scope.launch {
+                val result = withContext(Dispatchers.Default) { runTest() }
+                resultText = result
+                isRunning = false
+            }
+        },
+    ) {
+        Text(if (isRunning) "Running..." else "Run cross-validation")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
     }
 }
 

@@ -1,20 +1,20 @@
 # Phase 4 — Multitrack scratchpad engine (real overdubbing)
 
-**Status (2026-07-30): the full punch-in loop works end to end on a real
-device, and mixes now export to real WAV files.** Five slices got here,
-each verified on device before the next started: (1) the pure
-`Track`/`Clip` data model and mixing/punch-in logic; (2) real-time engine
-integration (`EngineMode::MultitrackPlaying`); (3) widening the JNI bridge
-to N clips per track and exposing `dsp::punchIn` over JNI; (4) **real
-overdub recording** — `armRecording()` now optionally mixes existing
-tracks into the output during Recording, so a user can actually hear the
-song while recording a new part onto it; (5) **offline mixdown to a real
-32-bit float WAV file** — `dsp::mixTracks` piped through a new,
-independently host-tested `dsp::encodeWavFloat32`/`writeWavFile`. **Still
-not started: the JVM reference mixer (Phase 4's actual cross-validation
-Done criterion), product UI, and a real "current project" state to replace
-every call site's throwaway in-memory track lists.** See "What's left"
-below.
+**Status (2026-07-30): Phase 4's own stated Done criterion is met and
+verified on a real device** — "exported WAV is sample-identical to a JVM
+reference mixer given the same clip list." Six slices got here, each
+verified before the next started: (1) the pure `Track`/`Clip` data model
+and mixing/punch-in logic; (2) real-time engine integration
+(`EngineMode::MultitrackPlaying`); (3) widening the JNI bridge to N clips
+per track and exposing `dsp::punchIn` over JNI; (4) **real overdub
+recording** — `armRecording()` now optionally mixes existing tracks into
+the output during Recording, so a user can actually hear the song while
+recording a new part onto it; (5) **offline mixdown to a real 32-bit float
+WAV file**; (6) **a new `:core:domain` Gradle module holding a genuinely
+independent JVM reference mixer**, cross-validated against the C++ engine
+on-device — the two agree bit-for-bit. **Still not started: product UI and
+a real "current project" state to replace every call site's throwaway
+in-memory track lists.** See "What's left" below.
 
 ## What shipped
 
@@ -225,17 +225,58 @@ pass.
   real 56-byte file (44-byte header + 12 bytes of data) with every header
   field correct and sample values matching exactly.
 
+**JVM reference mixer shipped (2026-07-30) — Phase 4's Done criterion is
+now actually met, not just possible**:
+
+- **New Gradle module `:core:domain`** (`kotlin("jvm")`, no Android
+  dependency) — created now rather than waiting for Phase 5 (the plan's
+  own nominal origin phase for this module), since Phase 4 genuinely
+  needed it for cross-validation and front-loading it a phase early cost
+  nothing. Configured with `sourceCompatibility`/`jvmTarget` (not
+  `kotlin { jvmToolchain(17) }` — that API triggers Gradle's toolchain
+  auto-detection, which doesn't recognize this environment's `JAVA_HOME`
+  as a usable JDK 17 candidate; matches the style the other modules
+  already use). This is the **first code in the entire project runnable
+  and testable without a physical device or an NDK cross-compile** —
+  `./gradlew :core:domain:test` runs in seconds, no adb, no phone.
+- **`ClipMixer.kt`**: `Clip`/`Track` data classes and a `mixTracks()`
+  function — a genuinely independent implementation of the same algorithm
+  `dsp::mixTracksInto` implements, written from the algorithm description
+  (overlapping clips sum, gain scales, solo-overrides-mute) rather than
+  translated line-by-line from the C++. One deliberate exception to
+  "independent": it follows the **same iteration order** (tracks outer,
+  clips inner, frame-by-frame accumulation) as the C++ version — not
+  because that's the only valid order, but because IEEE 754 addition isn't
+  associative, and matching order is what makes *exact* equality a
+  meaningful comparison instead of one that needs an epsilon tolerance to
+  paper over summation-order differences that have nothing to do with
+  either implementation being wrong.
+- **`ClipMixerTest.kt`**: 12 JUnit cases mirroring `test_track_mixer.cpp`'s
+  coverage (independently written assertions, not ported) — single/multi
+  track sums, overlap, gain, mute, solo (including solo-overrides-mute),
+  windowed ranges, chunked-vs-whole-buffer identity, an already-spliced
+  quiet/loud/quiet clip list, empty input, and a clip whose `lengthFrames`
+  exceeds its buffer. **12/12 passing.**
+- **`nativeMixTracks`** (new stateless JNI function, same pattern as
+  `nativePunchIn`/`nativeExportMixdownToWav`) and
+  `AudioEngine.mixTracksNative()`: returns the raw mixed samples with no
+  WAV encoding involved, specifically so cross-validation can isolate "do
+  the two mixing implementations agree" from "is the WAV encoding correct"
+  (the latter already covered by the WAV export smoke test above).
+- **Verified on device**: a new "JVM reference mixer cross-validation"
+  diagnostics section mixes an identical 3-track scenario (overlapping
+  clips, per-track gain, a clip with a gap on one track — deliberately
+  exercising the arithmetic itself rather than mute/solo, whose simple
+  conditionals are already covered identically by both implementations'
+  own test suites) through both `AudioEngine.mixTracksNative` and
+  `com.songnotes.core.domain.mixTracks`, and checks all three agree: each
+  against a hand-computed expectation, AND the two implementations against
+  each other, exactly (not an epsilon check). **PASS** on the physical
+  device: `[0.5, 2.5, 3.0, 2.5, 2.5, 3.5, 1.5]` from all three sources,
+  bit-for-bit identical between native and JVM.
+
 ## What's left for Phase 4 (not started)
 
-- **JVM reference mixer**: a second, independently-written implementation
-  of the same mixing logic in Kotlin, for the phase's actual Done
-  criterion ("exported WAV is sample-identical to a JVM reference mixer
-  given the same clip list"). Given the module layout's `:core:domain` is
-  described as pure-JVM logic including "clipEngine," and this phase
-  genuinely needs it now (not front-loaded speculatively), creating
-  `:core:domain` now — rather than waiting for Phase 5, which the plan
-  names as the module's origin phase — is likely the right call, but
-  hasn't been done yet.
 - **UI**: gain/mute/solo controls, punch-in triggering, track list — Phase
   10 territory per the plan's own phase table ("Scratchpad product UI"),
   though a diagnostics-screen-style verification harness (matching every
@@ -243,12 +284,18 @@ pass.
 
 ## Known risks — check these first
 
-1. **Solo semantics are a judgment call, not verified against any
-   reference.** If the eventual JVM reference mixer encodes different
-   solo/mute interaction (e.g. mute always wins even under solo), the
-   cross-validation Done criterion will fail loudly and specifically on
-   solo+mute test cases — that's the first thing to check, not a sign the
-   core summing logic is broken.
+1. **Solo semantics are a judgment call — now implemented identically in
+   both mixers, but not cross-validated against each other for solo+mute
+   specifically at the app level.** `ClipMixer.kt`'s `mixTracks()` encodes
+   the same "solo overrides mute" convention as `dsp::mixTracksInto`, and
+   both sides' own independent unit test suites (`test_track_mixer.cpp`,
+   `ClipMixerTest.kt`) each directly assert it — but the on-device
+   cross-validation section deliberately used a scenario with no solo/mute
+   at all (see its own doc comment for why: isolating the arithmetic).
+   If the two implementations' solo/mute conditionals were ever to drift
+   apart, nothing currently would catch that specific case on-device — only
+   each side's own tests, which by construction can't detect the other
+   side disagreeing with them.
 2. **No output clipping/limiting in `mixTracks()`.** Deliberate — a
    reference mixer almost certainly wouldn't add one either, and adding
    one here would need to be replicated exactly in the JVM reference to

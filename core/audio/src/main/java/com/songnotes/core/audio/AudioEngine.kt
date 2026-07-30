@@ -228,6 +228,22 @@ class AudioEngine {
     }
 
     /**
+     * Returns the raw mixed samples for [tracks] — no WAV encoding, no
+     * live engine involvement. Exists specifically so a caller can compare
+     * this (the real `dsp::mixTracks`) against the independent JVM
+     * reference mixer in `:core:domain` (`com.songnotes.core.domain.mixTracks`)
+     * for Phase 4's cross-validation Done criterion. Stateless, same as
+     * [exportMixdownToWav].
+     */
+    fun mixTracksNative(tracks: List<MultitrackTrackSpec>): FloatArray {
+        val f = flattenTracks(tracks)
+        return nativeMixTracks(
+            f.clipBuffers, f.clipStartFrames, f.clipBufferOffsetFrames, f.clipLengthFrames,
+            f.trackClipCounts, f.trackGains, f.trackMuted, f.trackSoloed,
+        )
+    }
+
+    /**
      * Phase 3 calibration: plays [sweep] out through the same duplex engine
      * used for everything else, capturing the acoustic/electrical loopback
      * for `sweep.size + tailPaddingFrames` frames total. Poll [state] for
@@ -371,6 +387,16 @@ class AudioEngine {
         trackMuted: BooleanArray,
         trackSoloed: BooleanArray,
     ): Boolean
+    private external fun nativeMixTracks(
+        clipBuffers: Array<FloatArray>,
+        clipStartFrames: LongArray,
+        clipBufferOffsetFrames: LongArray,
+        clipLengthFrames: LongArray,
+        trackClipCounts: IntArray,
+        trackGains: FloatArray,
+        trackMuted: BooleanArray,
+        trackSoloed: BooleanArray,
+    ): FloatArray
     private external fun nativeStartCalibrationCapture(
         handle: Long,
         sweep: FloatArray,
