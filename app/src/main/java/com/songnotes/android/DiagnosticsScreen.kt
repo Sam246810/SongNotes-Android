@@ -51,6 +51,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * Phase 0's "hello Oboe" tone test, plus Phase 1's real duplex record/
@@ -145,6 +147,180 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         VerificationPlaybackSmokeTestSection(engine)
         MultitrackPlaybackSmokeTestSection(engine)
         PunchInSmokeTestSection(engine)
+        OverdubPunchInEndToEndSection(engine)
+    }
+}
+
+/**
+ * The full Phase 4 punch-in loop, end to end: arm a real recording WITH
+ * backing tracks audible ([AudioEngine.armRecording]'s `backingTracks`
+ * param — real overdubbing, not just click-only recording), record ~2s of
+ * actual mic input, read the resulting take back, splice it onto an
+ * initially-empty third track via [AudioEngine.punchIn], then play all
+ * three tracks back together via [AudioEngine.startMultitrackPlayback].
+ * Splicing correctness itself is already proven by [PunchInSmokeTestSection]
+ * (exact clip shape + sample values); this section instead proves the
+ * pieces connect — a real recorded take can actually be punched in and
+ * played back — which unit-testing punchIn() alone can't show.
+ */
+@Composable
+private fun OverdubPunchInEndToEndSection(engine: AudioEngine) {
+    val context = LocalContext.current
+    var hasRecordPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    var statusText by remember { mutableStateOf<String?>(null) }
+    var isRunning by remember { mutableStateOf(false) }
+    var resultText by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    val takeFile = remember {
+        File(context.filesDir, "takes/phase4_overdub_test.f32").also { it.parentFile?.mkdirs() }
+    }
+
+    fun sine(freqHz: Double, lengthSeconds: Double, sampleRate: Double, amplitude: Float): FloatArray {
+        val frameCount = (sampleRate * lengthSeconds).toInt()
+        return FloatArray(frameCount) { i ->
+            (kotlin.math.sin(2.0 * Math.PI * freqHz * i / sampleRate) * amplitude).toFloat()
+        }
+    }
+
+    fun runTest() {
+        isRunning = true
+        resultText = null
+        val sampleRate = 48000.0
+        val bpm = 80.0
+        val beatsPerBar = 4
+        val countInBeats = 4
+        val recordSeconds = 2.0
+        val backingTracks = listOf(
+            com.songnotes.core.audio.MultitrackTrackSpec(
+                clips = listOf(
+                    com.songnotes.core.audio.MultitrackClipSpec(
+                        buffer = sine(440.0, 2.0, sampleRate, 0.3f), startFrame = 0L,
+                    ),
+                ),
+            ),
+            com.songnotes.core.audio.MultitrackTrackSpec(
+                clips = listOf(
+                    com.songnotes.core.audio.MultitrackClipSpec(
+                        buffer = sine(660.0, 1.5, sampleRate, 0.3f), startFrame = 24_000L,
+                    ),
+                ),
+            ),
+        )
+        val backingTracksStartFrame = 0L
+
+        context.startForegroundService(Intent(context, RecordingForegroundService::class.java))
+        scope.launch {
+            statusText = "Recording (count-in, then ~${recordSeconds.toInt()}s) — backing tracks should be audible..."
+            val armed = engine.armRecording(
+                takeFile.absolutePath, bpm, beatsPerBar, countInBeats, calibrationOffsetFrames = 0.0,
+                backingTracks = backingTracks, backingTracksStartFrame = backingTracksStartFrame,
+            )
+            if (!armed) {
+                context.stopService(Intent(context, RecordingForegroundService::class.java))
+                statusText = null
+                resultText = "armRecording (with backing tracks) returned false — see Last error above."
+                isRunning = false
+                return@launch
+            }
+
+            val countInSeconds = countInBeats * 60.0 / bpm
+            val totalSeconds = countInSeconds + recordSeconds
+            val startTimeMs = System.currentTimeMillis()
+            while ((System.currentTimeMillis() - startTimeMs) / 1000.0 < totalSeconds) {
+                delay(100)
+            }
+            engine.stopRecording()
+            context.stopService(Intent(context, RecordingForegroundService::class.java))
+            delay(100) // let the writer thread flush its last buffered frames to disk
+
+            val takeBytes = takeFile.readBytes()
+            if (takeBytes.isEmpty()) {
+                statusText = null
+                resultText = "Recorded take file is empty — recording likely failed; see Last error above."
+                isRunning = false
+                return@launch
+            }
+            val takeSamples = FloatArray(takeBytes.size / 4)
+            ByteBuffer.wrap(takeBytes).order(ByteOrder.nativeOrder()).asFloatBuffer().get(takeSamples)
+
+            val newClip = com.songnotes.core.audio.MultitrackClipSpec(
+                buffer = takeSamples, startFrame = backingTracksStartFrame,
+            )
+            val splicedClips = engine.punchIn(existingClips = emptyList(), insertClip = newClip)
+
+            statusText = "Playing back backing tracks + the take just recorded..."
+            val allTracks = backingTracks + com.songnotes.core.audio.MultitrackTrackSpec(clips = splicedClips)
+            val playbackOk = engine.startMultitrackPlayback(allTracks)
+            var xrunAfterPlayback = engine.capabilities().xRunCount
+            if (playbackOk) {
+                while (engine.state().isPlaying) delay(50)
+                xrunAfterPlayback = engine.capabilities().xRunCount
+            }
+
+            statusText = null
+            isRunning = false
+            val recordedSeconds = takeSamples.size / sampleRate
+            resultText = buildString {
+                appendLine(
+                    "Recorded ${takeSamples.size} frames (%.2fs of real mic audio, target ~%.1fs)".format(
+                        recordedSeconds, recordSeconds,
+                    ),
+                )
+                appendLine("punchIn onto an empty track produced ${splicedClips.size} clip(s) (expected 1)")
+                appendLine("Combined multitrack playback (2 backing tracks + the overdub) started: $playbackOk")
+                appendLine("xRun count after combined playback: $xrunAfterPlayback")
+                append(
+                    "Manual check: during recording you should have heard a 440Hz tone from the " +
+                        "downbeat and a 660Hz tone join 0.5s later, on top of the count-in click. " +
+                        "During the final playback (no click this time) you should hear those same " +
+                        "two tones again, plus whatever the mic actually picked up during recording.",
+                )
+            }
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        hasRecordPermission = granted
+        if (granted) runTest() else resultText = "Microphone permission is required to record."
+    }
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Overdub + punch-in, end to end (Phase 4)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Records a real ~2s take while 2 backing tracks play audibly, splices the take onto a " +
+            "third track via AudioEngine.punchIn, then plays all 3 tracks back together — the full " +
+            "record-while-listening-then-splice loop, not just its individual pieces.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isRunning,
+        onClick = {
+            if (!hasRecordPermission) {
+                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            } else {
+                runTest()
+            }
+        },
+    ) {
+        Text(statusText ?: if (isRunning) "Running..." else "Run overdub + punch-in test")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
     }
 }
 

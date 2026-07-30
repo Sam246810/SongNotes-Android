@@ -17,6 +17,63 @@ jstring toJString(JNIEnv *env, const std::string &s) {
     return env->NewStringUTF(s.c_str());
 }
 
+// Shared by nativeStartMultitrackPlayback and nativeArmRecording (backing
+// tracks) — both take the same flat, track-major clip marshaling (see the
+// doc comment on nativeStartMultitrackPlayback below for the shape).
+// Returns an empty vector if trackClipCounts has zero length, which is
+// exactly what "no tracks" (no backing tracks for a plain recording, or a
+// theoretical empty-playlist call) marshals to from Kotlin.
+std::vector<songnotes::dsp::Track> parseFlatTracks(JNIEnv *env, jobjectArray clipBuffers,
+                                                     jlongArray clipStartFrames,
+                                                     jlongArray clipBufferOffsetFrames,
+                                                     jlongArray clipLengthFrames,
+                                                     jintArray trackClipCounts, jfloatArray trackGains,
+                                                     jbooleanArray trackMuted, jbooleanArray trackSoloed) {
+    const jsize totalClips = env->GetArrayLength(clipBuffers);
+    std::vector<jlong> startFrames(static_cast<size_t>(totalClips));
+    env->GetLongArrayRegion(clipStartFrames, 0, totalClips, startFrames.data());
+    std::vector<jlong> bufferOffsets(static_cast<size_t>(totalClips));
+    env->GetLongArrayRegion(clipBufferOffsetFrames, 0, totalClips, bufferOffsets.data());
+    std::vector<jlong> lengths(static_cast<size_t>(totalClips));
+    env->GetLongArrayRegion(clipLengthFrames, 0, totalClips, lengths.data());
+
+    const jsize trackCount = env->GetArrayLength(trackClipCounts);
+    std::vector<jint> clipCounts(static_cast<size_t>(trackCount));
+    env->GetIntArrayRegion(trackClipCounts, 0, trackCount, clipCounts.data());
+    std::vector<jfloat> gains(static_cast<size_t>(trackCount));
+    env->GetFloatArrayRegion(trackGains, 0, trackCount, gains.data());
+    std::vector<jboolean> muted(static_cast<size_t>(trackCount));
+    env->GetBooleanArrayRegion(trackMuted, 0, trackCount, muted.data());
+    std::vector<jboolean> soloed(static_cast<size_t>(trackCount));
+    env->GetBooleanArrayRegion(trackSoloed, 0, trackCount, soloed.data());
+
+    std::vector<songnotes::dsp::Track> tracks(static_cast<size_t>(trackCount));
+    jsize flatIndex = 0;
+    for (jsize t = 0; t < trackCount; t++) {
+        auto &track = tracks[static_cast<size_t>(t)];
+        track.gain = gains[static_cast<size_t>(t)];
+        track.muted = muted[static_cast<size_t>(t)] != JNI_FALSE;
+        track.soloed = soloed[static_cast<size_t>(t)] != JNI_FALSE;
+
+        const jint clipCount = clipCounts[static_cast<size_t>(t)];
+        for (jint c = 0; c < clipCount && flatIndex < totalClips; c++, flatIndex++) {
+            auto *bufferArr = static_cast<jfloatArray>(env->GetObjectArrayElement(clipBuffers, flatIndex));
+            const jsize len = env->GetArrayLength(bufferArr);
+            auto buffer = std::make_shared<std::vector<float>>(static_cast<size_t>(len));
+            env->GetFloatArrayRegion(bufferArr, 0, len, buffer->data());
+            env->DeleteLocalRef(bufferArr);
+
+            songnotes::dsp::Clip clip;
+            clip.buffer = buffer;
+            clip.startFrame = startFrames[static_cast<size_t>(flatIndex)];
+            clip.bufferOffsetFrames = bufferOffsets[static_cast<size_t>(flatIndex)];
+            clip.lengthFrames = lengths[static_cast<size_t>(flatIndex)];
+            track.clips.push_back(clip);
+        }
+    }
+    return tracks;
+}
+
 } // namespace
 
 extern "C" {
@@ -45,16 +102,26 @@ Java_com_songnotes_core_audio_AudioEngine_nativeStopTestTone(JNIEnv *, jobject, 
     }
 }
 
+// backingTracks* use the same flat, track-major marshaling as
+// nativeStartMultitrackPlayback (see parseFlatTracks/its doc comment) — an
+// empty trackClipCounts (length 0) means "no backing tracks," reproducing
+// plain click-only recording exactly.
 JNIEXPORT jboolean JNICALL
-Java_com_songnotes_core_audio_AudioEngine_nativeArmRecording(JNIEnv *env, jobject, jlong handle,
-                                                              jstring filePath, jdouble bpm,
-                                                              jint beatsPerBar, jint countInBeats,
-                                                              jdouble calibrationOffsetFrames) {
+Java_com_songnotes_core_audio_AudioEngine_nativeArmRecording(
+    JNIEnv *env, jobject, jlong handle, jstring filePath, jdouble bpm, jint beatsPerBar,
+    jint countInBeats, jdouble calibrationOffsetFrames, jobjectArray backingClipBuffers,
+    jlongArray backingClipStartFrames, jlongArray backingClipBufferOffsetFrames,
+    jlongArray backingClipLengthFrames, jintArray backingTrackClipCounts, jfloatArray backingTrackGains,
+    jbooleanArray backingTrackMuted, jbooleanArray backingTrackSoloed, jlong backingTracksStartFrame) {
     auto *engine = toEngine(handle);
     if (!engine || !filePath) return JNI_FALSE;
+    const auto backingTracks = parseFlatTracks(
+        env, backingClipBuffers, backingClipStartFrames, backingClipBufferOffsetFrames,
+        backingClipLengthFrames, backingTrackClipCounts, backingTrackGains, backingTrackMuted,
+        backingTrackSoloed);
     const char *path = env->GetStringUTFChars(filePath, nullptr);
-    const bool ok =
-        engine->armRecording(std::string(path), bpm, beatsPerBar, countInBeats, calibrationOffsetFrames);
+    const bool ok = engine->armRecording(std::string(path), bpm, beatsPerBar, countInBeats,
+                                          calibrationOffsetFrames, backingTracks, backingTracksStartFrame);
     env->ReleaseStringUTFChars(filePath, path);
     return ok ? JNI_TRUE : JNI_FALSE;
 }
@@ -111,50 +178,9 @@ Java_com_songnotes_core_audio_AudioEngine_nativeStartMultitrackPlayback(
     jfloatArray trackGains, jbooleanArray trackMuted, jbooleanArray trackSoloed) {
     auto *engine = toEngine(handle);
     if (!engine || !clipBuffers || !trackClipCounts) return JNI_FALSE;
-
-    const jsize totalClips = env->GetArrayLength(clipBuffers);
-    std::vector<jlong> startFrames(static_cast<size_t>(totalClips));
-    env->GetLongArrayRegion(clipStartFrames, 0, totalClips, startFrames.data());
-    std::vector<jlong> bufferOffsets(static_cast<size_t>(totalClips));
-    env->GetLongArrayRegion(clipBufferOffsetFrames, 0, totalClips, bufferOffsets.data());
-    std::vector<jlong> lengths(static_cast<size_t>(totalClips));
-    env->GetLongArrayRegion(clipLengthFrames, 0, totalClips, lengths.data());
-
-    const jsize trackCount = env->GetArrayLength(trackClipCounts);
-    std::vector<jint> clipCounts(static_cast<size_t>(trackCount));
-    env->GetIntArrayRegion(trackClipCounts, 0, trackCount, clipCounts.data());
-    std::vector<jfloat> gains(static_cast<size_t>(trackCount));
-    env->GetFloatArrayRegion(trackGains, 0, trackCount, gains.data());
-    std::vector<jboolean> muted(static_cast<size_t>(trackCount));
-    env->GetBooleanArrayRegion(trackMuted, 0, trackCount, muted.data());
-    std::vector<jboolean> soloed(static_cast<size_t>(trackCount));
-    env->GetBooleanArrayRegion(trackSoloed, 0, trackCount, soloed.data());
-
-    std::vector<songnotes::dsp::Track> tracks(static_cast<size_t>(trackCount));
-    jsize flatIndex = 0;
-    for (jsize t = 0; t < trackCount; t++) {
-        auto &track = tracks[static_cast<size_t>(t)];
-        track.gain = gains[static_cast<size_t>(t)];
-        track.muted = muted[static_cast<size_t>(t)] != JNI_FALSE;
-        track.soloed = soloed[static_cast<size_t>(t)] != JNI_FALSE;
-
-        const jint clipCount = clipCounts[static_cast<size_t>(t)];
-        for (jint c = 0; c < clipCount && flatIndex < totalClips; c++, flatIndex++) {
-            auto *bufferArr = static_cast<jfloatArray>(env->GetObjectArrayElement(clipBuffers, flatIndex));
-            const jsize len = env->GetArrayLength(bufferArr);
-            auto buffer = std::make_shared<std::vector<float>>(static_cast<size_t>(len));
-            env->GetFloatArrayRegion(bufferArr, 0, len, buffer->data());
-            env->DeleteLocalRef(bufferArr);
-
-            songnotes::dsp::Clip clip;
-            clip.buffer = buffer;
-            clip.startFrame = startFrames[static_cast<size_t>(flatIndex)];
-            clip.bufferOffsetFrames = bufferOffsets[static_cast<size_t>(flatIndex)];
-            clip.lengthFrames = lengths[static_cast<size_t>(flatIndex)];
-            track.clips.push_back(clip);
-        }
-    }
-
+    const auto tracks =
+        parseFlatTracks(env, clipBuffers, clipStartFrames, clipBufferOffsetFrames, clipLengthFrames,
+                         trackClipCounts, trackGains, trackMuted, trackSoloed);
     return engine->startMultitrackPlayback(tracks) ? JNI_TRUE : JNI_FALSE;
 }
 

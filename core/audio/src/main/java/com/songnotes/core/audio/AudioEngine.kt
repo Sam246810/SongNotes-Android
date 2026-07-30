@@ -36,6 +36,43 @@ class AudioEngine {
     }
 
     /**
+     * Flattens [tracks] into the track-major flat arrays both
+     * `nativeStartMultitrackPlayback` and `nativeArmRecording` (backing
+     * tracks) expect — see the doc comment on `parseFlatTracks` in
+     * `jni_bridge.cpp` for the shape. An empty [tracks] list produces
+     * all-empty arrays, which both native functions treat as "no tracks."
+     */
+    private fun flattenTracks(tracks: List<MultitrackTrackSpec>): FlattenedTracks {
+        val totalClips = tracks.sumOf { it.clips.size }
+        val clipBuffers: Array<FloatArray> = Array(totalClips) { FloatArray(0) }
+        val clipStartFrames = LongArray(totalClips)
+        val clipBufferOffsetFrames = LongArray(totalClips)
+        val clipLengthFrames = LongArray(totalClips)
+        val trackClipCounts = IntArray(tracks.size)
+        val trackGains = FloatArray(tracks.size)
+        val trackMuted = BooleanArray(tracks.size)
+        val trackSoloed = BooleanArray(tracks.size)
+        var flatIndex = 0
+        tracks.forEachIndexed { trackIndex, track ->
+            trackClipCounts[trackIndex] = track.clips.size
+            trackGains[trackIndex] = track.gain
+            trackMuted[trackIndex] = track.muted
+            trackSoloed[trackIndex] = track.soloed
+            for (clip in track.clips) {
+                clipBuffers[flatIndex] = clip.buffer
+                clipStartFrames[flatIndex] = clip.startFrame
+                clipBufferOffsetFrames[flatIndex] = clip.bufferOffsetFrames
+                clipLengthFrames[flatIndex] = clip.lengthFrames
+                flatIndex++
+            }
+        }
+        return FlattenedTracks(
+            clipBuffers, clipStartFrames, clipBufferOffsetFrames, clipLengthFrames, trackClipCounts,
+            trackGains, trackMuted, trackSoloed,
+        )
+    }
+
+    /**
      * Opens the duplex streams without starting any particular mode. Call
      * before [inputSessionId] when the caller needs a real session ID —
      * e.g. to set up [CalibrationAudioEffects] — before the capture that
@@ -66,6 +103,16 @@ class AudioEngine {
      * route this recording will use — 0.0 (the default) if nothing's been
      * measured for that route, which reproduces the pre-calibration
      * pre-roll-only trim exactly.
+     *
+     * [backingTracks] (Phase 4 punch-in): if non-empty, mixed into the
+     * output alongside the count-in/metronome click — real overdubbing,
+     * hearing the existing song while recording a new take onto it.
+     * [backingTracksStartFrame] is where, on the backing tracks' own
+     * project timeline, this take's downbeat lands — once the take is
+     * stopped and read back, its file frame 0 corresponds to exactly that
+     * project frame, which is the `startFrame` to use when building the
+     * `Clip` to [punchIn]. Leaving [backingTracks] empty (the default)
+     * reproduces plain click-only recording exactly.
      */
     fun armRecording(
         filePath: String,
@@ -73,9 +120,17 @@ class AudioEngine {
         beatsPerBar: Int,
         countInBeats: Int,
         calibrationOffsetFrames: Double = 0.0,
-    ): Boolean =
-        ensureCreated() &&
-            nativeArmRecording(handle, filePath, bpm, beatsPerBar, countInBeats, calibrationOffsetFrames)
+        backingTracks: List<MultitrackTrackSpec> = emptyList(),
+        backingTracksStartFrame: Long = 0L,
+    ): Boolean {
+        if (!ensureCreated()) return false
+        val f = flattenTracks(backingTracks)
+        return nativeArmRecording(
+            handle, filePath, bpm, beatsPerBar, countInBeats, calibrationOffsetFrames, f.clipBuffers,
+            f.clipStartFrames, f.clipBufferOffsetFrames, f.clipLengthFrames, f.trackClipCounts, f.trackGains,
+            f.trackMuted, f.trackSoloed, backingTracksStartFrame,
+        )
+    }
 
     fun stopRecording() {
         if (handle != 0L) nativeStopRecording(handle)
@@ -102,32 +157,10 @@ class AudioEngine {
      */
     fun startMultitrackPlayback(tracks: List<MultitrackTrackSpec>): Boolean {
         if (!ensureCreated()) return false
-        val totalClips = tracks.sumOf { it.clips.size }
-        val clipBuffers: Array<FloatArray> = Array(totalClips) { FloatArray(0) }
-        val clipStartFrames = LongArray(totalClips)
-        val clipBufferOffsetFrames = LongArray(totalClips)
-        val clipLengthFrames = LongArray(totalClips)
-        val trackClipCounts = IntArray(tracks.size)
-        val trackGains = FloatArray(tracks.size)
-        val trackMuted = BooleanArray(tracks.size)
-        val trackSoloed = BooleanArray(tracks.size)
-        var flatIndex = 0
-        tracks.forEachIndexed { trackIndex, track ->
-            trackClipCounts[trackIndex] = track.clips.size
-            trackGains[trackIndex] = track.gain
-            trackMuted[trackIndex] = track.muted
-            trackSoloed[trackIndex] = track.soloed
-            for (clip in track.clips) {
-                clipBuffers[flatIndex] = clip.buffer
-                clipStartFrames[flatIndex] = clip.startFrame
-                clipBufferOffsetFrames[flatIndex] = clip.bufferOffsetFrames
-                clipLengthFrames[flatIndex] = clip.lengthFrames
-                flatIndex++
-            }
-        }
+        val f = flattenTracks(tracks)
         return nativeStartMultitrackPlayback(
-            handle, clipBuffers, clipStartFrames, clipBufferOffsetFrames, clipLengthFrames,
-            trackClipCounts, trackGains, trackMuted, trackSoloed,
+            handle, f.clipBuffers, f.clipStartFrames, f.clipBufferOffsetFrames, f.clipLengthFrames,
+            f.trackClipCounts, f.trackGains, f.trackMuted, f.trackSoloed,
         )
     }
 
@@ -268,6 +301,15 @@ class AudioEngine {
         beatsPerBar: Int,
         countInBeats: Int,
         calibrationOffsetFrames: Double,
+        backingClipBuffers: Array<FloatArray>,
+        backingClipStartFrames: LongArray,
+        backingClipBufferOffsetFrames: LongArray,
+        backingClipLengthFrames: LongArray,
+        backingTrackClipCounts: IntArray,
+        backingTrackGains: FloatArray,
+        backingTrackMuted: BooleanArray,
+        backingTrackSoloed: BooleanArray,
+        backingTracksStartFrame: Long,
     ): Boolean
     private external fun nativeStopRecording(handle: Long)
     private external fun nativeStartPlayback(handle: Long, filePath: String): Boolean
@@ -350,4 +392,16 @@ data class MultitrackTrackSpec(
     val gain: Float = 1.0f,
     val muted: Boolean = false,
     val soloed: Boolean = false,
+)
+
+/** JNI-shaped output of [AudioEngine.flattenTracks] — see its doc comment. */
+private class FlattenedTracks(
+    val clipBuffers: Array<FloatArray>,
+    val clipStartFrames: LongArray,
+    val clipBufferOffsetFrames: LongArray,
+    val clipLengthFrames: LongArray,
+    val trackClipCounts: IntArray,
+    val trackGains: FloatArray,
+    val trackMuted: BooleanArray,
+    val trackSoloed: BooleanArray,
 )

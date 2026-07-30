@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "command.h"
+#include "dsp/track_mixer.h"
 #include "engine_state_block.h"
 #include "scene.h"
 #include "spsc_ring_buffer.h"
@@ -62,8 +63,21 @@ public:
     // the writer thread trims so the stored take's frame 0 lands where the
     // user's performance actually happened, not where the downbeat was
     // nominally scheduled. See the .cpp for the direction/sign reasoning.
+    //
+    // backingTracks (Phase 4 punch-in): if non-empty, mixed into the
+    // output alongside the count-in/metronome click — real overdubbing,
+    // hearing the existing song while recording a new take onto it.
+    // backingTracksStartFrame is where, on the backing tracks' own project
+    // timeline, this take's downbeat lands — the new take's file frame 0
+    // (after headSkipFrames trimming) corresponds to exactly that project
+    // frame, which is what a caller needs to know to build the Clip it
+    // eventually punches into a track. Empty backingTracks (the default)
+    // reproduces plain click-only recording exactly, byte-for-byte — this
+    // is deliberately additive, not a new recording mode.
     bool armRecording(const std::string &filePath, double bpm, int32_t beatsPerBar,
-                       int32_t countInBeats, double calibrationOffsetFrames = 0.0);
+                       int32_t countInBeats, double calibrationOffsetFrames = 0.0,
+                       const std::vector<dsp::Track> &backingTracks = {},
+                       int64_t backingTracksStartFrame = 0);
     void stopRecording();
 
     bool startPlayback(const std::string &filePath);
@@ -225,6 +239,21 @@ private:
     // its own, keeping this RT-safe.
     int64_t mMultitrackTotalFrames = 0;
     std::vector<float> mMultitrackScratch;
+
+    // Phase 4 punch-in: backing tracks played during Armed/Recording,
+    // alongside the count-in/metronome click. Both set by armRecording()
+    // before mCommandQueue.write() — visible to the RT thread once it
+    // observes the Arm command via mCommandQueue.read(), same
+    // release-acquire handoff the Command payload itself already relies
+    // on (see SpscRingBuffer's own memory_order_release/acquire pair), not
+    // a new synchronization mechanism. mBackingTracksTotalFrames == 0 (the
+    // default, and what an empty backingTracks list produces) means "no
+    // backing tracks this take" — onAudioReady's Armed/Recording branch
+    // skips the mix entirely in that case, reproducing plain click-only
+    // recording exactly. Reuses mMultitrackScratch as its mix scratch
+    // buffer (mutually exclusive in time with MultitrackPlaying).
+    int64_t mBackingTracksStartFrame = 0;
+    int64_t mBackingTracksTotalFrames = 0;
 
     EngineStateBlock mState;
 

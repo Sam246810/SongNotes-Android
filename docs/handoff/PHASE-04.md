@@ -1,16 +1,20 @@
 # Phase 4 — Multitrack scratchpad engine (real overdubbing)
 
-**Status (2026-07-30): core mixing math + real-time engine integration +
-multi-clip/punch-in JNI, verified end-to-end on device.** Matching the
-plan's own instruction elsewhere ("host-testable C++ lib first, then
-JNI-wrapped") applied here too: the first slice delivered the pure
-`Track`/`Clip` data model and mixing/punch-in logic; the second wired it
-into the real-time engine (`EngineMode::MultitrackPlaying`); this third
-slice widens the JNI bridge to N clips per track (not just one) and
-exposes `dsp::punchIn` over JNI so Kotlin can actually splice a new take
-into a track. **Still not started: wiring `armRecording()` to produce a
-punch-in `Clip` and hear existing tracks while recording a new one, WAV
-export, JVM reference mixer, and product UI.** See "What's left" below.
+**Status (2026-07-30): the full punch-in loop works end to end on a real
+device** — record a real take while existing tracks play audibly, splice
+it in, play the combined result back. Four slices got here, each verified
+on device before the next started: (1) the pure `Track`/`Clip` data model
+and mixing/punch-in logic; (2) real-time engine integration
+(`EngineMode::MultitrackPlaying`); (3) widening the JNI bridge to N clips
+per track and exposing `dsp::punchIn` over JNI; (4) **real overdub
+recording** — `armRecording()` now optionally mixes existing tracks into
+the output during Recording, so a user can actually hear the song while
+recording a new part onto it, matching the plan's own "same engine path"
+principle (this reuses `dsp::mixTracksInto`, not a second mixing
+implementation). **Still not started: WAV export, JVM reference mixer,
+product UI, and a real "current project" state to replace the
+diagnostics screen's throwaway in-memory track lists.** See "What's left"
+below.
 
 ## What shipped
 
@@ -132,22 +136,60 @@ GoogleTest already proved `dsp::punchIn` itself) doesn't mean "the
 boundary around the math is right" — this was a marshaling bug, not a
 `dsp::punchIn` bug.
 
+**Overdub recording shipped (2026-07-30)**:
+
+- **`NativeAudioEngine::armRecording()`** gained two new (optional,
+  default-empty) params: `backingTracks` and `backingTracksStartFrame`.
+  Empty `backingTracks` reproduces plain click-only recording exactly —
+  this is additive, not a new recording mode. When non-empty, `armRecording`
+  publishes a `Scene` with `multitrack` set (same publish-before-mode-store
+  handoff pattern used everywhere else in this class) and stores
+  `mBackingTracksStartFrame`/`mBackingTracksTotalFrames` before enqueuing
+  the Arm command — visible to the RT thread via the same SPSC-queue
+  release/acquire pair the Command payload itself already relies on, not a
+  new synchronization mechanism.
+- **`onAudioReady`'s Armed/Recording output branch** now mixes backing
+  tracks in (additively, `+=`, same as the click) alongside the existing
+  metronome. The sync point: project-timeline frame
+  `mBackingTracksStartFrame` is defined to land exactly at this take's
+  downbeat (`mDownbeatFrame`) — the same anchor `headSkipFrames` already
+  trims the take's own file frame 0 to, so a caller's `backingTracksStartFrame`
+  argument is directly reusable as the resulting take's `Clip.startFrame`.
+  Silent before the downbeat and once the backing tracks run out; unlike
+  `MultitrackPlaying`, this never auto-stops the recording.
+- **JNI bridge**: `nativeArmRecording` widened to also carry the flat,
+  track-major backing-track marshaling (extracted into a shared
+  `parseFlatTracks` helper, reused by `nativeStartMultitrackPlayback` too
+  rather than duplicated).
+- **Kotlin facade**: `AudioEngine.armRecording()` gained matching
+  `backingTracks: List<MultitrackTrackSpec> = emptyList()` and
+  `backingTracksStartFrame: Long = 0L` params — existing call sites
+  (`VerificationTakeRecorder`, `DiagnosticsScreen`'s plain record/playback
+  section) needed no changes, since both new params default to "no backing
+  tracks." The flattening logic itself was extracted into a private
+  `flattenTracks()` helper shared with `startMultitrackPlayback()`.
+
+**Verified on device (2026-07-30, overdub recording end to end)**: added
+an "Overdub + punch-in, end to end" section to `DiagnosticsScreen.kt` —
+arms a real recording with 2 synthetic backing tracks (440Hz from frame 0,
+660Hz staggered in 0.5s) audible during capture, records ~2s of real mic
+input, reads the resulting take back from disk, splices it onto an
+initially-empty third track via `AudioEngine.punchIn`, then plays all 3
+tracks back together via `startMultitrackPlayback`. Ran on the physical
+device: recorded 98112 frames (2.04s — matches the ~2.0s target),
+`punchIn` onto an empty track correctly produced exactly 1 clip, combined
+3-track playback started successfully, **xRun count stayed at 0** through
+the whole recording + playback sequence, and a `logcat` check afterward
+showed no crash. This is the first test in Phase 4 that exercises the
+*entire* loop end to end (not one piece in isolation) — real mic capture,
+simultaneous backing-track playback, disk round-trip, splicing, and
+combined playback all in one pass. Audible correctness (right tones at
+the right times) is, as with the other multitrack tests, a manual-listening
+claim embedded in the result text, not separately confirmed by ear in this
+pass.
+
 ## What's left for Phase 4 (not started)
 
-- **Punch-in recording integration**: the JNI/Kotlin plumbing to splice a
-  clip into a track ([`AudioEngine.punchIn`](../../core/audio/src/main/java/com/songnotes/core/audio/AudioEngine.kt))
-  now exists and is verified, but nothing calls it from a real recording
-  yet. Still needed: (1) a way to hear the *other* tracks while recording a
-  new one — today's `armRecording()`/`onAudioReady`'s Recording-mode output
-  branch only ever renders the count-in/metronome click, never a
-  `Scene::multitrack`; real overdubbing needs the existing tracks mixed
-  into the output during Recording, time-aligned to the same downbeat the
-  new take's `headSkipFrames` trim already anchors to. (2) After a take
-  stops, reading it back from disk into memory, wrapping it as a `Clip` at
-  the right project-timeline `startFrame`, and calling `punchIn()` against
-  the target track. (3) Somewhere to hold the "current project" (the list
-  of `Track`s) between calls — nothing persists this yet; today's
-  diagnostics sections all construct throwaway track lists inline.
 - **Offline mixdown to WAV**: a function that calls `mixTracks(tracks, 0,
   totalFrames)` once and writes a standard WAV file — needs a WAV encoder
   (none exists in this codebase yet; likely small enough to hand-write
@@ -194,17 +236,41 @@ boundary around the math is right" — this was a marshaling bug, not a
    bug (e.g. a channel-interleaving mistake that garbles a tone without
    changing frame counts). Worth an actual listen next time the device is
    in hand.
-5. **No engine-level "current project" state exists yet.** Every
-   diagnostics section (multitrack playback, punch-in) constructs its own
-   throwaway `List<Track>` inline — there's no shared, mutable
-   representation of "the tracks in this song" that a real punch-in
-   recording flow could read from and write back to. This is explicitly
-   *not* a persistence gap (nothing needs to survive a process restart
-   yet) — it's that no single owner of "the current in-memory track list"
-   exists at all, on either side of the JNI boundary. Whoever builds punch-
-   in recording integration needs to decide where this lives (naturally
-   Kotlin-side, given `AudioEngine.startMultitrackPlayback`/`punchIn` are
-   both already stateless per-call from the engine's perspective).
+5. **Still no engine- or app-level "current project" state exists.** The
+   engine and JNI layers are now fully capable of overdub recording +
+   splicing (verified end to end), but every call site — including the new
+   "Overdub + punch-in" diagnostics section — still constructs its own
+   throwaway `List<Track>` inline rather than reading from/writing back to
+   any shared representation of "the tracks in this song." This is
+   explicitly *not* a persistence gap (nothing needs to survive a process
+   restart yet) — it's that no single owner of "the current in-memory track
+   list" exists at all. This is now the most load-bearing remaining gap for
+   turning the verified engine capability into an actual usable feature:
+   whoever builds the real punch-in UI needs a place to hold and mutate
+   that list (naturally Kotlin-side, given `AudioEngine`'s multitrack/punch-in
+   methods are all already stateless per-call from the engine's own
+   perspective).
+6. **The metronome click is not toggleable during an overdub take.**
+   `onAudioReady`'s Armed/Recording branch mixes the backing tracks in
+   *alongside* the existing count-in/metronome click, unconditionally —
+   there's no way for a caller to ask for backing-tracks-only (no click)
+   once past the count-in. Many real DAWs let a user disable the click once
+   they have a backing track to play along with; this wasn't in scope for
+   "prove overdub recording works" but will likely matter for the eventual
+   product UI.
+7. **`backingTracksStartFrame` sync is trusted, not independently
+   verified.** The alignment (`mStreamFrameCounter - mDownbeatFrame +
+   backingTracksStartFrame` landing backing-track frame 0 exactly at the
+   take's downbeat) is reasoned from the same frame-counter math Rule C's
+   calibration-offset trimming already relies on and elsewhere in this
+   codebase, but — unlike Rule C's offset, which was validated by measuring
+   actual round-trip latency before/after correction — nothing has measured
+   whether the backing tracks a user *hears* during a real take are
+   sample-accurately in sync with where the take actually gets punched in.
+   The end-to-end smoke test proves the pieces connect (recording runs,
+   splicing happens, playback works) but not frame-accurate sync; that
+   would need either a loopback-capture measurement (like calibration's
+   own sweep-based approach) or careful manual listening for drift.
 
 ## What Phase 4's next slice assumes
 

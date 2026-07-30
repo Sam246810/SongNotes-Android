@@ -206,9 +206,46 @@ void NativeAudioEngine::stopTestTone() {
 }
 
 bool NativeAudioEngine::armRecording(const std::string &filePath, double bpm, int32_t beatsPerBar,
-                                      int32_t countInBeats, double calibrationOffsetFrames) {
+                                      int32_t countInBeats, double calibrationOffsetFrames,
+                                      const std::vector<dsp::Track> &backingTracks,
+                                      int64_t backingTracksStartFrame) {
     if (!ensureStreamsOpen()) return false;
     stopRecordingInternal(); // in case one was already in flight
+    if (mLoaderThread.joinable()) {
+        mLoaderThread.join(); // same publish-race reasoning as startMultitrackPlayback()
+    }
+
+    // Sized unconditionally (cheap no-op after the first call) so it's
+    // always ready regardless of whether this particular take has backing
+    // tracks — mirrors mInputScratch's "sized once, RT thread only
+    // touches" contract.
+    if (mMultitrackScratch.size() < static_cast<size_t>(kMaxFramesPerCallback)) {
+        mMultitrackScratch.assign(static_cast<size_t>(kMaxFramesPerCallback), 0.0f);
+    }
+
+    // Always publish a fresh Scene here — even with no backing tracks —
+    // so a plain recording never accidentally reads a stale multitrack
+    // left over from a previous overdub take or MultitrackPlaying session.
+    auto scene = std::make_shared<Scene>();
+    int64_t backingTotalFrames = 0;
+    if (!backingTracks.empty()) {
+        scene->multitrack = std::make_shared<std::vector<dsp::Track>>(backingTracks);
+        for (const auto &track : backingTracks) {
+            for (const auto &clip : track.clips) {
+                backingTotalFrames = std::max(backingTotalFrames, clip.startFrame + clip.lengthFrames);
+            }
+        }
+    }
+    // Plain writes below happen-before mCommandQueue.write()'s internal
+    // release store further down, so the RT thread's acquire-load of it
+    // (in onAudioReady step 0, draining the Arm command) is guaranteed to
+    // see them too — same handoff pattern the rest of this class already
+    // uses for mPlaybackCursor/Scene publishes ahead of a release-ordered
+    // mMode.store(), just riding the command queue's own release/acquire
+    // pair instead of a direct mode store this time.
+    mBackingTracksStartFrame = backingTracksStartFrame;
+    mBackingTracksTotalFrames = backingTotalFrames;
+    mScenePublisher.publish(scene);
 
     int32_t sr;
     {
@@ -670,6 +707,43 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
             mPlaybackCursor += toCopy;
         }
     } else if (mode == EngineMode::Armed || mode == EngineMode::Recording) {
+        // Backing tracks (Phase 4 punch-in): mixed in on top of the click
+        // below, synced so project-timeline frame mBackingTracksStartFrame
+        // lands exactly at this take's downbeat (mDownbeatFrame) — the
+        // same anchor headSkipFrames trims this take's own file frame 0
+        // to, so a caller building a Clip from the finished take can use
+        // mBackingTracksStartFrame directly as that Clip's startFrame.
+        // Silent before the downbeat (during pre-roll/count-in) and once
+        // the backing tracks run out; unlike MultitrackPlaying, this never
+        // auto-stops the recording — the user controls take length via
+        // stopRecording(), independent of backing length.
+        // mBackingTracksTotalFrames == 0 (no backing tracks armed this
+        // take) skips this block entirely, reproducing plain click-only
+        // recording exactly.
+        if (mBackingTracksTotalFrames > 0) {
+            const Scene *scene = mScenePublisher.current();
+            if (scene->multitrack) {
+                const int64_t projectFrame =
+                    mStreamFrameCounter - mDownbeatFrame + mBackingTracksStartFrame;
+                const int64_t mixStart = std::max<int64_t>(0, projectFrame);
+                const int64_t mixEnd = std::min(projectFrame + numFrames, mBackingTracksTotalFrames);
+                const auto maxMixFrames = static_cast<int64_t>(mMultitrackScratch.size());
+                const auto toMix =
+                    static_cast<int32_t>(std::min({mixEnd - mixStart, maxMixFrames}));
+                if (toMix > 0) {
+                    dsp::mixTracksInto(*scene->multitrack, mixStart, mixStart + toMix,
+                                        mMultitrackScratch.data());
+                    const auto outFrameOffset = static_cast<int32_t>(mixStart - projectFrame);
+                    for (int32_t frame = 0; frame < toMix; frame++) {
+                        const float sample = mMultitrackScratch[static_cast<size_t>(frame)];
+                        for (int32_t ch = 0; ch < outChannels; ch++) {
+                            out[(outFrameOffset + frame) * outChannels + ch] += sample;
+                        }
+                    }
+                }
+            }
+        }
+
         // Metronome: finish any click already in progress, then start any
         // click(s) scheduled within the remainder of this callback. No live
         // input monitoring is mixed in here — see the plan's "don't build
