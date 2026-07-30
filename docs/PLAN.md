@@ -253,20 +253,20 @@ Every phase ends with **`docs/handoff/PHASE-NN.md`**: what shipped, what's
 known-broken, what the next phase assumes, and any device-specific numbers
 observed. This is a hard requirement, not a nicety.
 
-| # | Goal | Size | Device? | Status (2026-07-29) |
+| # | Goal | Size | Device? | Status (2026-07-30) |
 |---|---|---|---|---|
 | **0** | Repo skeleton + "hello Oboe" — installable app that opens a stream and reports what it got. Diagnostics screen with full `EngineCapabilities` incl. `isMMapUsed()`. **Done:** APK installs, sine is clean, zero xruns over 60 s. | S | ✅ | done |
 | **1** | Duplex engine core + record-to-file. SPSC ring, writer thread, command queue, Scene double-buffer, direct-ByteBuffer state, `onErrorAfterClose` rebuild, mic foreground service. **Done:** 60 s record→playback matches; unplugging headphones mid-take doesn't kill it; 50 cycles leak nothing; ring buffer clean under TSan over 10⁸ frames. | M | ✅ **hard gate** | done |
 | **2** | Transport clock, metronome, sample-accurate placement. C++-rendered metronome, count-in, 0.75 s pre-roll, input priming, overflow accounting. **Done:** across 5 takes, transients sit at a *constant* offset from gridlines with **spread < 3 ms**. Stability is the criterion here — absolute offset is Phase 3's job. | M | ✅ **hard gate** | done |
 | **3** | Automatic acoustic loopback calibration. ESS + inverse filter + FFT as a **host-testable C++ lib first**, then JNI-wrapped. MAD rejection, PNR gating, AEC disable, per-route table, BT warning, wizard obeying Rules A–I, manual slider. **Done:** 5 runs agree within ±3 ms; tap test lands within ±5 ms; noisy room **fails loudly**; *and* the manual-only path reaches a good result on a device where auto fails. | L | ✅ **hard gate, ideally 2 devices** | in progress — DSP/JNI/engine integration/AEC/per-route storage/Bluetooth handling/Rule A-C-I plumbing done; wizard UI, manual slider, specs notice still ahead |
-| **4** | Multitrack scratchpad engine — real overdubbing. 4 tracks, gain/mute/solo, punch-in insert, mixdown to WAV. **Done:** exported WAV is **sample-identical to a JVM reference mixer** given the same clip list. | M | ✅ listening test | not started |
-| **5** | Domain logic port + JVM behavioural spec. `:core:domain` in pure Kotlin. **Done:** golden cross-check — ~2000 chord strings through both JS and Kotlin `normalizeChordName`, byte-identical. | M | — | not started |
+| **4** | Multitrack scratchpad engine — real overdubbing. 4 tracks, gain/mute/solo, punch-in insert, mixdown to WAV. **Done:** exported WAV is **sample-identical to a JVM reference mixer** given the same clip list. | M | ✅ listening test | **done** — see `docs/handoff/PHASE-04.md` |
+| **5** | Domain logic port + JVM behavioural spec. `:core:domain` in pure Kotlin. **Done:** golden cross-check — ~2000 chord strings through both JS and Kotlin `normalizeChordName`, byte-identical. | M | — | **done** — see `docs/handoff/PHASE-05.md` |
 | **5.5** | **Minimum shippable lyrics+chords editor** — local only, no audio, no sync. **Done:** you can write a real song on it and prefer it to a notes app. | M | — | not started |
 | **6** | Data layer + crypto. Room + SQLCipher, Argon2id, envelope v2, Keystore device wrap + BiometricPrompt. **Done:** **cross-implementation test vectors** — a web-app envelope decrypts in Kotlin and vice versa, committed to *both* repos. | M | instrumented | not started |
 | **7** | Auth + Supabase sync. Credential Manager → `signInWithIdToken`, outbox + `SyncWorker`, schema v2, Tier-0 conflict copies, tombstones. **Done:** two clients edit offline, both reconnect, **nothing is lost**; delete on A removes on B. | M | — | not started |
 | **8** | Editor UI: lyrics + chords. Chord diagrams as Compose `Canvas`, custom voicings, transpose, metadata. **Budget real time for typography** — "calm and uncluttered" *is* the product. | L | — | not started |
 | **9** | Import / export / piano. PDF text extraction, share/export, 29 Salamander samples through the **same C++ mixer** so piano is recordable via the same path. | M | — | not started |
-| **10** | Scratchpad product UI. Timeline, touch clip drag/trim, waveform from a C++ peak pyramid. Minimized transport strip, DAW collapsible to tempo/BPM/start-stop, theme moved into settings. | L | — | not started |
+| **10** | Scratchpad product UI. Timeline, touch clip drag/trim, waveform from a C++ peak pyramid. Minimized transport strip, DAW collapsible to tempo/BPM/start-stop, theme moved into settings. | L | — | front-loaded early (see `docs/handoff/PHASE-10.md`) — a real Scratchpad screen with persistence exists; timeline/scrub, clip drag/trim, and waveform rendering are not started |
 | **11** | Hardening + Play release. R8, baseline profile, Data Safety form, privacy policy, internal testing track, manual device matrix. | M | ✅ | not started |
 
 **Deliberate slack:** phases 5, 5.5 and 6 have **no engine dependency**.
