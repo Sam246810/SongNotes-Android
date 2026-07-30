@@ -4,6 +4,10 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Normal permission, no runtime request needed — for Rule D's
+         haptic cueing during calibration (visual + haptic only, no
+         audible click competing with the sweep/mic). -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- No android:icon yet — Phase 0 has no app icon asset. Android falls back to a
          system default launcher icon until Phase 8 (or earlier, whenever branding lands). -->

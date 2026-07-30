@@ -23,13 +23,18 @@ class FakeCalibrationAudio : CalibrationAudio {
         queuedSweepResults.addLast(result)
     }
 
-    override suspend fun runSweeps(repetitionCount: Int): CalibrationSession.Result {
+    override suspend fun runSweeps(
+        repetitionCount: Int,
+        onRepetitionComplete: (index: Int, total: Int, repetition: CalibrationSession.Repetition) -> Unit,
+    ): CalibrationSession.Result {
         if (queuedSweepResults.isEmpty()) {
             throw IllegalStateException(
                 "FakeCalibrationAudio.runSweeps($repetitionCount) called with no expectSweepResult() queued",
             )
         }
-        return queuedSweepResults.removeFirst()
+        val result = queuedSweepResults.removeFirst()
+        result.repetitions.forEachIndexed { i, rep -> onRepetitionComplete(i, result.repetitions.size, rep) }
+        return result
     }
 
     override suspend fun playPreMixed(buffer: FloatArray) {

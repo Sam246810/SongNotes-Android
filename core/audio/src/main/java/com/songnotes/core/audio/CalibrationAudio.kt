@@ -13,8 +13,18 @@ import kotlinx.coroutines.delay
  * test double Rule I's "a fake throws on any unexpected call" refers to.
  */
 interface CalibrationAudio {
-    /** Runs [repetitionCount] real sweep captures through the duplex engine and returns the aggregated result. */
-    suspend fun runSweeps(repetitionCount: Int): CalibrationSession.Result
+    /**
+     * Runs [repetitionCount] real sweep captures through the duplex engine
+     * and returns the aggregated result. [onRepetitionComplete] fires after
+     * each repetition's capture genuinely completes — real-time signal for
+     * Rule D's visual/haptic cueing, not a fixed-interval UI timer. Carries
+     * no scheduling capability of its own, so it doesn't weaken Rule I's
+     * guarantee: it's an observation hook, not a way to trigger audio.
+     */
+    suspend fun runSweeps(
+        repetitionCount: Int,
+        onRepetitionComplete: (index: Int, total: Int, repetition: CalibrationSession.Repetition) -> Unit = { _, _, _ -> },
+    ): CalibrationSession.Result
 
     /**
      * Plays a single pre-mixed buffer (Rule A — see
@@ -27,8 +37,13 @@ interface CalibrationAudio {
 
 /** Production [CalibrationAudio], backed by the real duplex engine. */
 class RealCalibrationAudio(private val engine: AudioEngine) : CalibrationAudio {
-    override suspend fun runSweeps(repetitionCount: Int): CalibrationSession.Result =
-        CalibrationSession(engine).run(repetitionCount)
+    override suspend fun runSweeps(
+        repetitionCount: Int,
+        onRepetitionComplete: (index: Int, total: Int, repetition: CalibrationSession.Repetition) -> Unit,
+    ): CalibrationSession.Result = CalibrationSession(engine).run(
+        repetitionCount = repetitionCount,
+        onRepetitionComplete = onRepetitionComplete,
+    )
 
     override suspend fun playPreMixed(buffer: FloatArray) {
         if (!engine.startPlaybackFromBuffer(buffer)) return

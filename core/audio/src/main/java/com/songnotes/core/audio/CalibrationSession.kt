@@ -41,7 +41,11 @@ class CalibrationSession(private val engine: AudioEngine, private val sampleRate
      */
     private val aecDefeatPnrDropThresholdDb = 15.0
 
-    suspend fun run(repetitionCount: Int = 5, sweepLengthSeconds: Double = 0.5): Result {
+    suspend fun run(
+        repetitionCount: Int = 5,
+        sweepLengthSeconds: Double = 0.5,
+        onRepetitionComplete: (index: Int, total: Int, repetition: Repetition) -> Unit = { _, _, _ -> },
+    ): Result {
         require(repetitionCount >= 1) { "repetitionCount must be >= 1" }
 
         engine.ensureReady()
@@ -67,7 +71,13 @@ class CalibrationSession(private val engine: AudioEngine, private val sampleRate
                 val measurement = Calibration.measureRoundTripDelay(
                     recording = recording, inverseFilter = sweepData.inverseFilter, sweepLength = sweepData.sweep.size,
                 )
-                repetitions.add(Repetition(measurement.frames, measurement.pnrDb))
+                val repetition = Repetition(measurement.frames, measurement.pnrDb)
+                repetitions.add(repetition)
+                // Fired after this repetition's capture has genuinely
+                // completed (not a fixed-interval UI timer) — real-time
+                // feedback for Rule D's visual/haptic cueing during the
+                // wizard's running step.
+                onRepetitionComplete(i, repetitionCount, repetition)
             }
         } finally {
             effects.release()

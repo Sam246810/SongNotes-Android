@@ -359,6 +359,55 @@ take needs zero further offset math by the time it reaches
 `buildPreMixedVerificationBuffer`) doesn't exist yet. That's part of "the
 wizard UI itself" below, not a gap in what's built so far.
 
+## The wizard's auto-calibration flow, verified on device (2026-07-30)
+
+`CalibrationWizardScreen.kt` (new, `:app`) is a real, navigable screen —
+reachable via a plain "Open calibration wizard" button on `MainActivity`
+(no navigation library exists yet; a two-screen toggle is the honest amount
+of infrastructure for now) — implementing the plan's primary
+auto-calibration path end to end: **Intro → (permission request if
+needed) → Bluetooth check (refuses with a plain-language explanation,
+"Measure anyway" to override) → Running (5 real repetitions, haptic pulse
+per repetition via `Vibrator`, no audible click per Rule D) → Results
+(MAD-filtered mean delay, consistency count, AEC-defeat warning if
+detected) → Save (persists via `CalibrationStore`, keyed by the detected
+route) → Saved confirmation → Done.**
+
+Talks to audio exclusively through `CalibrationAudio` (Rule I) — the
+screen holds no reference to `AudioEngine`'s metronome/transport methods at
+all, only `runSweeps()`/`playPreMixed()`. `CalibrationSession.run()` grew
+an optional `onRepetitionComplete` callback so the Running step's haptic
+cueing is driven by genuine capture-completion events, not a fixed-interval
+UI timer pretending to track real progress.
+
+**Ran the complete flow on the physical device, start to finish**: tapped
+through Intro → Start (RECORD_AUDIO already granted, route not Bluetooth so
+no warning shown) → Running executed 5 real sweep captures → Results
+reported **21.3ms measured delay, 4/5 repetitions agreed** (MAD correctly
+rejected one outlier, consistent with the noisier real-world runs seen
+earlier in this doc) → Save → **Saved: "Calibration for 'SM-F956W' is
+saved. Recordings through this route will now line up automatically."** →
+Done returned cleanly to the main screen. Logcat showed a single clean
+stream-open for the whole session (`Exclusive`/`LowLatency`/`MMap` on
+output throughout), zero warnings or errors.
+
+Rules F/G ("fixed layout from mount, nothing pops mid-flow") are applied
+within the Running step specifically — its indicator + progress text
+occupy the same slot from the instant that step mounts, showing neutral
+placeholder content before the first repetition completes rather than
+having new elements appear once data exists — not by keeping all six
+screens' UI simultaneously mounted with visibility toggles across the
+entire wizard. The plan's own example for this rule (the manual path's tap
+pad) is about one persistent element through one flow, not literally every
+screen in the whole wizard; see the code comment in
+`CalibrationWizardScreen.kt` for the reasoning spelled out.
+
+**Not yet done**: no real recorded take exists yet for the Rule A/B/C
+verify-playback step to run against (the earlier DSP/JNI verification used
+a synthetic sine "take" — see "Rules A/B/C/I plumbing" above) — the wizard
+doesn't yet prompt the user to record a short verification take and play
+it back pre-mixed. That's part of a fuller wizard pass, not this one.
+
 ## What's left for Phase 3 (not started)
 
 Roughly in the order the plan's architecture section implies:
@@ -369,12 +418,11 @@ Roughly in the order the plan's architecture section implies:
   measure/apply to," not yet sufficient for e.g. invalidating a displayed
   calibration value if the route changes while a result is still on
   screen.
-- **The wizard UI itself** — see "Rules A/B/C/I plumbing, verified on
-  device" below for what's already built and ready for it to call. Still
-  needed: the actual screens (intro, running sweeps with visual/haptic
-  cueing per Rule D, results, the Rule A/B/C verify-playback step, save-
-  per-route), and Rules F/G's fixed-layout tap pad present from the instant
-  Record is pressed with the count-in number rendered inside it.
+- **The Rule A/B/C verify-playback step inside the wizard itself** —
+  recording a real short take, applying the calibration offset once at
+  commit (Rule C), and playing it back pre-mixed against a regenerated
+  click (Rule A/B) so the user can actually hear that calibration worked,
+  not just read a number.
 - **The manual slider fallback path**, needed on devices where AEC can't be
   defeated (the plan is explicit that on those devices, manual isn't a
   fallback, it's *the* path) — including Rule D's constraint that the
