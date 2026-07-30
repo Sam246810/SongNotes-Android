@@ -18,7 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.songnotes.core.audio.AudioEngine
 
-private enum class Screen { Diagnostics, Wizard, Manual, TapAlong, Scratchpad }
+private enum class Screen { Diagnostics, Wizard, Manual, TapAlong, Scratchpad, Songs, SongEditor }
 
 class MainActivity : ComponentActivity() {
 
@@ -31,9 +31,21 @@ class MainActivity : ComponentActivity() {
             // plain enum toggle is the honest amount of infrastructure for
             // now (see docs/handoff/PHASE-00.md's "don't front-load" note).
             var screen by remember { mutableStateOf(Screen.Diagnostics) }
+            var editingSongId by remember { mutableStateOf<String?>(null) }
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     when (screen) {
+                        Screen.Songs -> SongListScreen(
+                            onOpenSong = { id ->
+                                editingSongId = id
+                                screen = Screen.SongEditor
+                            },
+                            onDone = { screen = Screen.Diagnostics },
+                        )
+                        Screen.SongEditor -> SongEditorScreen(
+                            songId = editingSongId!!,
+                            onDone = { screen = Screen.Songs },
+                        )
                         Screen.Wizard ->
                             CalibrationWizardScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
                         Screen.Manual ->
@@ -44,8 +56,14 @@ class MainActivity : ComponentActivity() {
                             ScratchpadScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
                         Screen.Diagnostics -> Column(modifier = Modifier.fillMaxSize()) {
                             Button(
-                                onClick = { screen = Screen.Scratchpad },
+                                onClick = { screen = Screen.Songs },
                                 modifier = Modifier.padding(24.dp),
+                            ) {
+                                Text("Open songs")
+                            }
+                            Button(
+                                onClick = { screen = Screen.Scratchpad },
+                                modifier = Modifier.padding(horizontal = 24.dp),
                             ) {
                                 Text("Open scratchpad")
                             }
