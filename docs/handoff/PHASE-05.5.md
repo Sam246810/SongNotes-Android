@@ -204,6 +204,95 @@ Phase 9's plain-text/PDF import work applies to the desktop app, and
 Android's own Phase 9 scope should be revisited with this in mind when
 that phase starts).
 
+## Third pass, same day — editor rebuilt to match the desktop app (2026-07-30)
+
+Direct, blunt feedback on the second pass's chord UI: "still looks
+disgustingly bad... the chords look awful and block the lyrics... i dont
+think anchoring chords is going to work... i want it to actually feel
+like a notes app not whatever this is." Rather than iterate again on an
+Android-native design of my own invention, read the desktop web app's
+actual editor source (`src/components/SongLine/SongLine.jsx`,
+`ChordTokenDisplay.jsx`, their CSS) and ported its real behavior and
+visual language faithfully, instead of guessing at what "notes app"
+should mean.
+
+**What the desktop app actually does, that the first two Android passes
+didn't**: chords are a plain space-padded string typed directly into a
+row above the lyrics — not floating badges, not tap-to-place anchors.
+Blurred, that row renders as colored inline tokens
+(`tokenizeChordLine`-based) sitting flush with the lyrics, not
+overlapping them. A warm "paper notebook" visual language (parchment
+card, red margin rule, rust-brown monospace chords over dark-sepia serif
+lyrics) rather than generic Material widgets. Enter creates a new line;
+Backspace at the start of lyrics merges with the previous line;
+Backspace in an empty chord row on an empty line deletes it; **a line
+that runs past a fixed character count automatically splits at the last
+word boundary and moves focus to the new line** — this last one is
+exactly the "starting the user in another line when they run out of
+space" behavior that was flagged as conspicuously missing.
+
+**Architecture decision, addressing "I don't think anchoring chords is
+going to work" directly**: the wire-format anchor model
+(`docs/WIRE-FORMAT-v2.md` §4, [ChordAnchor]) is kept, but demoted to a
+pure storage/serialization detail the user never sees or interacts with.
+The editor's in-memory working state (`EditorLine`) is plain
+`chords: String, lyrics: String` — literally the padded-string model —
+converted to/from anchors only at the load/save boundary via
+`anchorsToChordsLine`/`chordsLineToAnchors` (already built in the second
+pass, now finally used for what they were actually for). This means
+Phase 6/7's sync work still gets the anchor benefits (position survives
+transposition, no column-shift bugs) without the user ever having to
+think in anchors while writing a song.
+
+**Ported directly from the desktop's own store logic** (`songsStore.js`):
+`splitLine`/`mergeLineWithPrevious`'s algorithms — slice both the chords
+and lyrics strings at the same character index, realign the shorter
+piece via `alignChordsWithLyrics` (already ported, Phase 5) — translated
+line-for-line into `splitLineAt`/`mergeWithPrevious`, using a JS-`slice`-style
+forgiving `sliceSafe` helper since Kotlin's `substring` throws on
+out-of-range indices where JS's `slice` doesn't.
+
+**Two real bugs found and fixed during on-device verification** (not
+speculative — both directly observed):
+
+1. **The decorative margin-line `Box` rendered as a giant solid block
+   covering most of the card**, not a thin hairline, because
+   `Modifier.fillMaxSize().padding(...).width(1.dp)` doesn't constrain
+   width the way `Modifier.fillMaxHeight().width(1.dp)` (without the
+   preceding `fillMaxSize()`) does. Purely visual, no functional impact,
+   but exactly the kind of thing that reads as "lazy" if shipped.
+2. **Tapping the chord token row to start editing silently did nothing**,
+   reproducible every time. Root cause: the newly-composed chord
+   `BasicTextField`'s `onFocusChanged` fires once with `isFocused = false`
+   on its very first composition — before the `LaunchedEffect`'s
+   `requestFocus()` has actually taken effect — and the naive
+   `if (!focusState.isFocused) chordEditMode = false` handler treated
+   that spurious initial callback as "the user tapped away," reverting
+   `chordEditMode` back to `false` in the same frame it was set `true`.
+   Fixed by only reacting to a **real** focus-loss transition (tracked via
+   a `chordFieldHasGainedFocus` flag), not the field's initial unfocused
+   state.
+
+**Verified on the physical device**, including catching both bugs above
+via actual on-screen behavior (not just code review this time — the
+first fix attempt for the second bug used unverified reasoning alone in
+the earlier session and was wrong until this pass actually clicked
+through it):
+
+- Chord row tap → field focuses correctly → typed "G" → IME "Next" →
+  focus moves to lyrics correctly.
+- Blurring the chord field renders "G" as a bold rust-colored token
+  directly above the lyrics, no overlap, no floating badge.
+- Force-stopped and relaunched the app: title, lyrics, and the chord
+  token all survived, confirming the padded-string ↔ anchor round-trip
+  at the storage boundary is correct.
+- Typing that pushed a line past the character limit mid-word correctly
+  auto-split at the last space boundary and carried the cursor into the
+  new line's lyrics field, matching the desktop's own caret-preservation
+  behavior — confirmed via an (accidental, mid-typing) real trigger, not
+  a synthetic test.
+- Zero crashes across this entire pass.
+
 ## What's left (deliberately deferred, not bugs)
 
 - **No chord-diagram rendering or `customChords` editing** — Phase 8's
@@ -211,10 +300,10 @@ that phase starts).
 - **No line reordering** — lines can be added (always at the end) and
   deleted, not moved. A real drag-to-reorder is more Phase 8 "budget
   real time for typography" territory than a Phase 5.5 MVP concern.
-- ~~Chord editing is remove-only~~ — superseded by the second pass:
-  tapping an existing chip re-opens it pre-filled for rename or removal.
-  Moving a chord to a *different* character still means remove + re-place,
-  not drag — a real drag-to-reposition is more Phase 8 territory.
+- ~~Chord editing is remove-only~~ / ~~tap-to-place chord chips~~ — both
+  fully superseded by the third pass's plain padded-string chord row
+  (type/edit the whole line's chords directly, same as the lyrics row).
+  No separate per-chord edit affordance needed anymore.
 - **No meta (Key/BPM/Capo/Tuning) UI fields** — the model and the import
   path both carry this data correctly (verified above), but there's no
   way to view or hand-edit it directly in the editor screen yet, only
@@ -228,3 +317,12 @@ that phase starts).
 - **No cloud sync, no encryption** — explicitly out of scope per the
   plan; Phase 6/7's job, and the `Song` model was shaped in anticipation
   of that migration (see "What shipped" above).
+- **Backspace-at-start-of-line (merge/delete) is best-effort**, via
+  `Modifier.onPreviewKeyEvent` catching `Key.Backspace` — this works on
+  the device tested (Gboard on the SM-F956W) but soft-keyboard backspace
+  interception is a known Android/Compose soft spot that doesn't behave
+  identically across every IME. Not verified on a second keyboard/device.
+- **`SongListScreen` still uses generic Material purple**, not the new
+  parchment/paper theme — only the editor was rebuilt this pass. Worth a
+  matching pass so the transition from list to editor doesn't feel like
+  two different apps.
