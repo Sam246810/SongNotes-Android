@@ -80,6 +80,18 @@ Java_com_songnotes_core_audio_AudioEngine_nativeStopPlayback(JNIEnv *, jobject, 
 }
 
 JNIEXPORT jboolean JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeStartPlaybackFromBuffer(JNIEnv *env, jobject,
+                                                                          jlong handle,
+                                                                          jfloatArray buffer) {
+    auto *engine = toEngine(handle);
+    if (!engine || !buffer) return JNI_FALSE;
+    const jsize len = env->GetArrayLength(buffer);
+    std::vector<float> bufferVec(static_cast<size_t>(len));
+    env->GetFloatArrayRegion(buffer, 0, len, bufferVec.data());
+    return engine->startPlaybackFromBuffer(bufferVec) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
 Java_com_songnotes_core_audio_AudioEngine_nativeStartCalibrationCapture(JNIEnv *env, jobject,
                                                                           jlong handle, jfloatArray sweep,
                                                                           jint tailPaddingFrames) {

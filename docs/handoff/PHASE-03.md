@@ -1,14 +1,22 @@
 # Phase 3 — Automatic acoustic loopback calibration
 
-**Status: DSP core only, this slice.** Phase 3 is the largest phase in the
-plan ("most of the pain in Phase 3," per its own honest notes), so — matching
-the plan's own instruction to build it "as a host-testable C++ lib first,
-then JNI-wrapped" — this pass delivers exactly that first part: the pure
-math, fully unit-tested on the host target, with **no JNI wrapping, no
-engine integration, no wizard UI, no AEC handling, no per-route storage, and
-no Bluetooth detection yet.** All of that is still ahead — see "What's left"
-below. Same environment constraint as every prior phase: no local
-toolchain, none of this has compiled.
+**Status (2026-07-29): DSP core, JNI wrapping, engine integration, AEC/NS/AGC
+disabling, N-rep sessions with AEC-defeat detection, per-route storage,
+Bluetooth refusal, and the Rules A/B/C/I plumbing (click-track rendering,
+offline pre-mix, buffer-based playback, the `CalibrationAudio` interface)
+are all done and verified on a physical device.** Only the wizard UI itself,
+the manual slider fallback, and product-copy items remain — see "What's
+left" below. `docs/PLAN.md` now holds the full plan text verbatim (it had
+nearly been lost to context compaction — this doc's "Rules A–I" summary
+below is no longer the only surviving copy).
+
+Phase 3 is the largest phase in the plan ("most of the pain in Phase 3,"
+per its own honest notes). The earliest pass through this phase matched the
+plan's own instruction to build it "as a host-testable C++ lib first, then
+JNI-wrapped" — delivering exactly that first part: pure math, fully
+unit-tested on the host target, no JNI wrapping, no engine integration, no
+wizard UI. Everything below this point in the doc reflects what's shipped
+since.
 
 ## What shipped
 
@@ -297,6 +305,60 @@ verified for the non-Bluetooth case, but "structurally sound" isn't the
 same bar the rest of this doc holds everything else to — worth an explicit
 live check with a real Bluetooth device before trusting it fully.
 
+## Rules A/B/C/I plumbing, verified on device (2026-07-29)
+
+The Rules A–I text quoted throughout this doc was, until this pass,
+reconstructed from a partial paraphrase — the actual plan (now
+`docs/PLAN.md`) had nearly been lost to context compaction. With the real
+text in hand, built the pieces the wizard needs but that don't depend on
+any UI existing yet:
+
+- **`dsp/click_track.{h,cpp}`** (new, host-tested) — `renderClickTrack()`,
+  the offline equivalent of the click-scheduling logic
+  `audio_engine.cpp`'s `onAudioReady` runs live during Armed/Recording.
+  Needed because Rule A's verification playback can't replay a *live*
+  click against a pre-recorded take (that's the two-independently-
+  scheduled-sources problem the rule exists to prevent) — it has to
+  regenerate the click track and mix it in *offline*, once, into one
+  buffer.
+- **`dsp/mix.{h,cpp}`** (new, host-tested) — `mixAndNormalize()`, a plain
+  sample-wise sum with clip-safe scale-down (never scales up a quiet mix).
+- **`Calibration.buildPreMixedVerificationBuffer()`** (new JNI wrapping,
+  `calibration_jni.cpp`) — pairs `renderClickTrack()` + `mixAndNormalize()`
+  in one native call, same reasoning as `measureRoundTripDelay()`'s
+  `convolve`+`findPeak` pairing: the intermediate click-track buffer (same
+  length as the take, potentially several seconds) never crosses the JNI
+  boundary on its own.
+- **`AudioEngine.startPlaybackFromBuffer()`** (new engine method) — plays
+  an in-memory buffer directly, skipping `loaderThreadLoop`'s file I/O
+  entirely. Notably required **zero new RT-thread code**: it just publishes
+  a `Scene` and stores `EngineMode::Playing`, exactly what
+  `loaderThreadLoop` already does once its file read finishes — Playing
+  mode's existing `onAudioReady` logic (auto-stop at buffer end,
+  `playbackFrame` tracking) was already exactly what Rule A/B needs.
+- **`CalibrationAudio`** (new interface, Rule I) — exactly `runSweeps()`
+  and `playPreMixed()`, no reference to `AudioEngine`'s metronome/transport
+  methods at all. `RealCalibrationAudio` wraps the real engine;
+  `FakeCalibrationAudio` is the test double Rule I's "a fake throws on any
+  unexpected call" refers to — written now, not yet exercised by an actual
+  `@Test` since no JVM test source set exists in this module yet.
+
+**Verified on device** via a new `DiagnosticsScreen` smoke test: a
+synthetic 3-second, 144000-frame fake take (standing in for a real
+already-aligned recorded take — Rule C means this step does no offset math
+of its own) mixed with a regenerated 80bpm click track produced exactly
+144000 mixed frames, played via `CalibrationAudio.playPreMixed` — the same
+narrow interface the eventual wizard uses, not `AudioEngine` directly —
+with no crash and clean logs (still `Exclusive`/`LowLatency`/`MMap` on
+output throughout).
+
+**Not yet exercised**: this used a synthetic sine "take," not a real
+recorded one — the wizard's actual take-alignment step (applying the
+calibration offset once at commit time, per Rule C, so a *real* recorded
+take needs zero further offset math by the time it reaches
+`buildPreMixedVerificationBuffer`) doesn't exist yet. That's part of "the
+wizard UI itself" below, not a gap in what's built so far.
+
 ## What's left for Phase 3 (not started)
 
 Roughly in the order the plan's architecture section implies:
@@ -307,14 +369,18 @@ Roughly in the order the plan's architecture section implies:
   measure/apply to," not yet sufficient for e.g. invalidating a displayed
   calibration value if the route changes while a result is still on
   screen.
-- **The wizard UI itself**, built to obey Rules A–I from the plan (no
-  count-in on verification playback, pre-mixed single-buffer playback, fixed
-  layout from mount so nothing pops in mid-flow, a `CalibrationAudio`
-  interface narrow enough that the wizard architecturally cannot schedule a
-  competing click) — none of this exists yet, this slice is pure DSP.
+- **The wizard UI itself** — see "Rules A/B/C/I plumbing, verified on
+  device" below for what's already built and ready for it to call. Still
+  needed: the actual screens (intro, running sweeps with visual/haptic
+  cueing per Rule D, results, the Rule A/B/C verify-playback step, save-
+  per-route), and Rules F/G's fixed-layout tap pad present from the instant
+  Record is pressed with the count-in number rendered inside it.
 - **The manual slider fallback path**, needed on devices where AEC can't be
   defeated (the plan is explicit that on those devices, manual isn't a
-  fallback, it's *the* path).
+  fallback, it's *the* path) — including Rule D's constraint that the
+  built-in-speaker manual path uses **visual + haptic count only, no
+  audible click** (the existing metronome click sound is Rule-D-incompatible
+  for this specific path; don't reuse it here without re-reading the rule).
 - **Recommended-minimum-specs notice** and the Bluetooth-latency warning
   copy — product/content work, not DSP.
 

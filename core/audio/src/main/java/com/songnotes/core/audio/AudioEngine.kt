@@ -70,6 +70,10 @@ class AudioEngine {
 
     fun startPlayback(filePath: String): Boolean = ensureCreated() && nativeStartPlayback(handle, filePath)
 
+    /** Plays an in-memory buffer directly — see [Calibration.buildPreMixedVerificationBuffer] (Rule A). */
+    fun startPlaybackFromBuffer(buffer: FloatArray): Boolean =
+        ensureCreated() && nativeStartPlaybackFromBuffer(handle, buffer)
+
     fun stopPlayback() {
         if (handle != 0L) nativeStopPlayback(handle)
     }
@@ -169,6 +173,7 @@ class AudioEngine {
     ): Boolean
     private external fun nativeStopRecording(handle: Long)
     private external fun nativeStartPlayback(handle: Long, filePath: String): Boolean
+    private external fun nativeStartPlaybackFromBuffer(handle: Long, buffer: FloatArray): Boolean
     private external fun nativeStopPlayback(handle: Long)
     private external fun nativeStartCalibrationCapture(
         handle: Long,

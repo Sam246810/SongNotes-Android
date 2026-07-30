@@ -11,7 +11,9 @@
 #include <vector>
 
 #include "dsp/calibration_stats.h"
+#include "dsp/click_track.h"
 #include "dsp/matched_filter.h"
+#include "dsp/mix.h"
 #include "dsp/sweep.h"
 
 using namespace songnotes::dsp;
@@ -105,6 +107,26 @@ Java_com_songnotes_core_audio_Calibration_nativePeakToNoiseRatioDb(JNIEnv *, job
                                                                      jfloat peakMagnitude,
                                                                      jfloat noiseFloor) {
     return peakToNoiseRatioDb(peakMagnitude, noiseFloor);
+}
+
+// Rule A ("verification playback renders one pre-mixed buffer... a flam is
+// arithmetically impossible"): regenerates a reference click track exactly
+// matching `take`'s own length and re-mixes it against `take` offline, into
+// a single buffer. renderClickTrack()+mixAndNormalize() are kept paired
+// here (mirrors nativeMeasureRoundTripDelay's convolve+findPeak pairing)
+// so the intermediate click-track buffer — the same length as `take`,
+// potentially several seconds — never crosses the JNI boundary on its own;
+// only the final mixed result does.
+JNIEXPORT jfloatArray JNICALL
+Java_com_songnotes_core_audio_Calibration_nativeBuildPreMixedVerificationBuffer(
+    JNIEnv *env, jobject, jfloatArray take, jdouble sampleRate, jdouble bpm, jint beatsPerBar,
+    jdouble downbeatHz, jdouble regularHz, jdouble clickLengthSeconds, jfloat clickAmplitude) {
+    const std::vector<float> takeVec = toFloatVector(env, take);
+    const auto clickTrack = renderClickTrack(sampleRate, bpm, beatsPerBar,
+                                              static_cast<int64_t>(takeVec.size()), downbeatHz, regularHz,
+                                              clickLengthSeconds, clickAmplitude);
+    const auto mixed = mixAndNormalize(takeVec, clickTrack);
+    return toJFloatArray(env, mixed);
 }
 
 } // extern "C"

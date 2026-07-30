@@ -77,6 +77,29 @@ object Calibration {
     fun peakToNoiseRatioDb(peakMagnitude: Float, noiseFloor: Float): Double =
         nativePeakToNoiseRatioDb(peakMagnitude, noiseFloor)
 
+    /**
+     * Rule A from the plan: "verification playback renders one pre-mixed
+     * buffer... a flam is arithmetically impossible." Regenerates a
+     * reference click track matching [take]'s own length and mixes it
+     * against [take] *offline*, into a single buffer — the returned array
+     * is what [AudioEngine.startPlaybackFromBuffer] should play, not two
+     * independently-scheduled sources. [take] must already be
+     * calibration-aligned (Rule C: takes are stored already-aligned, so
+     * this function does no offset math of its own).
+     */
+    fun buildPreMixedVerificationBuffer(
+        take: FloatArray,
+        sampleRate: Double,
+        bpm: Double,
+        beatsPerBar: Int,
+        downbeatHz: Double = 1800.0,
+        regularHz: Double = 1200.0,
+        clickLengthSeconds: Double = 0.01,
+        clickAmplitude: Float = 0.5f,
+    ): FloatArray = nativeBuildPreMixedVerificationBuffer(
+        take, sampleRate, bpm, beatsPerBar, downbeatHz, regularHz, clickLengthSeconds, clickAmplitude,
+    )
+
     private external fun nativeGenerateSweepAndInverse(
         sampleRate: Double,
         f1Hz: Double,
@@ -94,6 +117,17 @@ object Calibration {
     private external fun nativeRejectOutliersMad(values: DoubleArray, thresholdMads: Double): DoubleArray
 
     private external fun nativePeakToNoiseRatioDb(peakMagnitude: Float, noiseFloor: Float): Double
+
+    private external fun nativeBuildPreMixedVerificationBuffer(
+        take: FloatArray,
+        sampleRate: Double,
+        bpm: Double,
+        beatsPerBar: Int,
+        downbeatHz: Double,
+        regularHz: Double,
+        clickLengthSeconds: Double,
+        clickAmplitude: Float,
+    ): FloatArray
 
     init {
         System.loadLibrary("songnotes_audio")

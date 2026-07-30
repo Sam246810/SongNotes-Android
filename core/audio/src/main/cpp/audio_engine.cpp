@@ -263,6 +263,27 @@ bool NativeAudioEngine::startPlayback(const std::string &filePath) {
     return ensureOutputStarted();
 }
 
+bool NativeAudioEngine::startPlaybackFromBuffer(const std::vector<float> &buffer) {
+    if (!ensureStreamsOpen()) return false;
+    stopPlaybackInternal();
+    stopCalibrationInternal();
+    if (mLoaderThread.joinable()) {
+        mLoaderThread.join(); // in case a previous file-based load is still finishing up
+    }
+
+    auto scene = std::make_shared<Scene>();
+    scene->playbackBuffer = std::make_shared<std::vector<float>>(buffer);
+
+    mPlaybackCursor = 0;
+    mState.playbackTotalFrames.store(static_cast<int32_t>(buffer.size()), std::memory_order_relaxed);
+    mState.playbackFrame.store(0, std::memory_order_relaxed);
+    mState.isPlaying.store(1, std::memory_order_relaxed);
+    mScenePublisher.publish(scene);
+    mMode.store(static_cast<int32_t>(EngineMode::Playing), std::memory_order_release);
+
+    return ensureOutputStarted();
+}
+
 void NativeAudioEngine::stopPlayback() { stopPlaybackInternal(); }
 
 void NativeAudioEngine::stopPlaybackInternal() {

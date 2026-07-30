@@ -59,6 +59,17 @@ public:
     void stopRecording();
 
     bool startPlayback(const std::string &filePath);
+
+    // Plays an in-memory buffer directly — no file I/O, so unlike
+    // startPlayback() this runs synchronously on the calling thread rather
+    // than spawning a loader thread (there's nothing to wait on). Reuses
+    // Playing mode's existing onAudioReady logic entirely: publishing a
+    // Scene and storing EngineMode::Playing is all loaderThreadLoop does
+    // once its file read finishes anyway. Exists for Rule A's pre-mixed
+    // verification playback (Calibration.buildPreMixedVerificationBuffer)
+    // — no new RT-thread code needed for it.
+    bool startPlaybackFromBuffer(const std::vector<float> &buffer);
+
     void stopPlayback();
 
     // Phase 3 calibration: plays `sweep` out through the same duplex engine

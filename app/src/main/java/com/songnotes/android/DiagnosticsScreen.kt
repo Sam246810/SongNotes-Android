@@ -38,11 +38,13 @@ import androidx.core.content.ContextCompat
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.audio.AudioRouteDetector
 import com.songnotes.core.audio.Calibration
+import com.songnotes.core.audio.CalibrationAudio
 import com.songnotes.core.audio.CalibrationAudioEffects
 import com.songnotes.core.audio.CalibrationSession
 import com.songnotes.core.audio.CalibrationStore
 import com.songnotes.core.audio.EngineCapabilities
 import com.songnotes.core.audio.EngineState
+import com.songnotes.core.audio.RealCalibrationAudio
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -140,6 +142,91 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         CalibrationDspSmokeTestSection()
         EngineCalibrationCaptureSection(engine)
         CalibrationSessionSection(engine)
+        VerificationPlaybackSmokeTestSection(engine)
+    }
+}
+
+/**
+ * Proves Rules A/B/C end-to-end: a synthetic "already-aligned take" (a
+ * plain tone standing in for a real recorded take — Rule C says takes are
+ * stored already-aligned, so this deliberately does no offset math of its
+ * own) gets mixed with a regenerated click track into one buffer
+ * (Rule A), then played through [CalibrationAudio.playPreMixed] — the same
+ * narrow interface (Rule I) the eventual wizard will use, not
+ * [AudioEngine] directly. No count-in (Rule B) is structurally true here:
+ * [CalibrationAudio] has no method that could add one.
+ */
+@Composable
+private fun VerificationPlaybackSmokeTestSection(engine: AudioEngine) {
+    val context = LocalContext.current
+    var hasRecordPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    var isRunning by remember { mutableStateOf(false) }
+    var resultText by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun runTest() {
+        isRunning = true
+        resultText = null
+        scope.launch {
+            val sampleRate = 48000.0
+            val frameCount = (sampleRate * 3.0).toInt()
+            // Stands in for a real recorded, already-calibration-aligned take.
+            val fakeTake = FloatArray(frameCount) { i ->
+                (kotlin.math.sin(2.0 * Math.PI * 440.0 * i / sampleRate) * 0.3).toFloat()
+            }
+            val mixed = withContext(Dispatchers.Default) {
+                Calibration.buildPreMixedVerificationBuffer(
+                    take = fakeTake, sampleRate = sampleRate, bpm = 80.0, beatsPerBar = 4,
+                )
+            }
+            val audio: CalibrationAudio = RealCalibrationAudio(engine)
+            audio.playPreMixed(mixed)
+            isRunning = false
+            resultText = "Pre-mixed ${mixed.size} frames from a ${fakeTake.size}-frame fake take, " +
+                "played via CalibrationAudio.playPreMixed — completed with no crash, single source, no count-in."
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        hasRecordPermission = granted
+        if (granted) runTest() else resultText = "Microphone permission is required (duplex engine opens both streams)."
+    }
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Verification playback smoke test (Rules A/B/C/I)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Mixes a synthetic fake take with a regenerated click track into one buffer, then plays it " +
+            "through CalibrationAudio.playPreMixed — the same narrow interface the wizard will use.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isRunning,
+        onClick = {
+            if (!hasRecordPermission) {
+                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            } else {
+                runTest()
+            }
+        },
+    ) {
+        Text(if (isRunning) "Playing..." else "Run verification playback smoke test")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
     }
 }
 
