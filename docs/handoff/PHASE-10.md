@@ -1,15 +1,18 @@
 # Phase 10 — Scratchpad product UI
 
 **Status (2026-07-30): front-loaded from its nominal position in the
-plan's phase table** — Phase 4's internals (real-time multitrack
-playback, real overdub recording, punch-in splicing, WAV export, the JVM
-reference mixer, and `MultitrackProject` as the state to drive all of it)
-were built and verified first, per explicit instruction to keep UI work
-scoped to "only when the internals need it." With every one of those
-verified end-to-end on device, a first real UI became the natural next
-step rather than more diagnostics-screen plumbing. **Deliberately
-minimal** — this is "does the engine work reachable from actual UI," not
-a DAW-grade editor. See "What's left" for the real gaps.
+plan's phase table, now with real persistence** — Phase 4's internals
+(real-time multitrack playback, real overdub recording, punch-in
+splicing, WAV export, the JVM reference mixer, and `MultitrackProject` as
+the state to drive all of it) were built and verified first, per explicit
+instruction to keep UI work scoped to "only when the internals need it."
+With every one of those verified end-to-end on device, a first real UI
+became the natural next step rather than more diagnostics-screen
+plumbing. Persistence was added in the same pass, on the judgment call
+that a scratchpad which loses everything on close isn't really usable —
+see "Persistence shipped" below. **Deliberately minimal otherwise** — this
+is "does the engine work reachable from actual UI," not a DAW-grade
+editor. See "What's left" for the real gaps.
 
 ## What shipped
 
@@ -81,6 +84,35 @@ scrollable container, so a plain `Column` just takes each row's real
 height with no guessing needed. Re-verified after the fix — both tracks
 render fully, confirmed by the walkthrough above.
 
+## Persistence shipped (2026-07-30)
+
+**`MultitrackProjectStorage.kt`** (new, in `:core:audio`) — persists a
+`MultitrackProject` as one `manifest.json` (track gain/muted/soloed, and
+per-clip `startFrame`/`bufferOffsetFrames`/`lengthFrames`) plus one raw
+`.f32` file per clip holding its actual audio, at a single fixed
+`context.filesDir/scratchpad/` location (no multi-project management UI
+exists yet, so there's only ever "the" scratchpad to persist). Uses
+`org.json` (built into Android, no new dependency) for the manifest —
+matches `CalibrationStore`'s own "small scoped storage class, no
+front-loaded data layer" precedent, just applied to bigger (audio) data
+than a few key-value pairs.
+
+`ScratchpadScreen` auto-loads once on first composition, auto-saves after
+every mutation that matters (a committed recording, adding/removing a
+track), and exposes an explicit "Save" button for gain/mute/solo tweaks —
+those specifically aren't auto-saved on every slider drag tick (that would
+mean a file write per pixel of drag), so a deliberate Save is how they get
+persisted.
+
+**Verified on device**: recorded a take, confirmed the manifest + `.f32`
+clip file on disk via `run-as` (clip file was exactly `lengthFrames × 4`
+bytes, matching the manifest), then `am force-stop`'d the app entirely and
+relaunched — the scratchpad reopened with the exact same track/clip state
+auto-loaded from disk, and **playback of the reloaded audio worked
+correctly** (`172032 / 1309440` frames, matching the original recording's
+length exactly) — not just that the metadata round-tripped, but that the
+actual audio samples did too. Zero crashes across the whole sequence.
+
 ## What's left (not started)
 
 - **No timeline/scrub UI.** Punch-in always starts at project frame 0 —
@@ -92,10 +124,6 @@ render fully, confirmed by the walkthrough above.
   trimmable from the UI — `MultitrackProject`/`AudioEngine` support
   multi-clip tracks fully (verified in Phase 4), but nothing in this UI
   exposes that structure to the user yet.
-- **No persistence.** `MultitrackProject` lives in a `remember { mutableStateOf(...) }`
-  local to `ScratchpadScreen` — closing the screen (or the app) loses
-  everything. Saving/loading a project is a distinct, not-yet-started
-  feature.
 - **BPM/time signature are effectively fixed.** The BPM field exists, but
   beats-per-bar and count-in beats are hard-coded to 4/4 with a 4-beat
   count-in, matching every other recording flow in this codebase so far —
@@ -127,3 +155,24 @@ render fully, confirmed by the walkthrough above.
 3. **Recording never auto-stops** (matches `armOverdub`'s own documented
    behavior) — a user who walks away mid-recording just keeps recording
    until they come back and tap Stop. No timeout, no maximum length.
+4. **`MultitrackProjectStorage.save()` isn't atomic.** It deletes every
+   existing clip file, then writes the new set, then writes the manifest
+   last. A crash or kill between the delete and the last clip write would
+   leave a partially-overwritten project on disk — the next `load()` would
+   either fail (missing a file the manifest references) or silently load
+   a stale mix of old and new clips. Not exercised by the device
+   walkthrough above (which didn't kill the process mid-save); a real
+   fix would write to a temp location and rename over the old one only
+   after everything succeeded.
+5. **Gain/mute/solo changes are only persisted on explicit Save**, not
+   automatically — documented as a deliberate tradeoff (continuous
+   auto-save on every slider drag tick would mean a file write per pixel
+   of movement), but it does mean a user who adjusts a slider and force-
+   quits without tapping Save loses that specific change, even though
+   their recordings are safe (those auto-save on commit). Worth surfacing
+   more visibly in the UI than a plain "Save" button if this trips
+   someone up in practice.
+6. **Every `save()` rewrites every clip's full audio, even unchanged
+   ones** — fine at the scale exercised so far (a couple of tracks,
+   under a minute each), but would get slow for a genuinely large
+   project. No incremental/delta save exists.

@@ -47,6 +47,7 @@ import com.songnotes.core.audio.CalibrationStore
 import com.songnotes.core.audio.EngineState
 import com.songnotes.core.audio.MultitrackClipSpec
 import com.songnotes.core.audio.MultitrackProject
+import com.songnotes.core.audio.MultitrackProjectStorage
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -69,6 +70,14 @@ private const val kSampleRate = 48000
  * from). A real DAW-grade editor is out of scope for this pass; this is
  * "does the engine work reachable from actual UI," the same bar every
  * other phase's diagnostics-screen verification held itself to.
+ *
+ * Persisted via [MultitrackProjectStorage]: auto-loaded once when this
+ * screen first composes, auto-saved after every mutation that matters
+ * (a committed recording, adding/removing a track) so closing the app
+ * mid-session doesn't lose a take, plus an explicit "Save" button for
+ * gain/mute/solo tweaks — those aren't auto-saved on every slider drag
+ * tick (that would mean a file write per pixel of drag), so a deliberate
+ * Save is how those specifically get persisted.
  */
 @Composable
 fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
@@ -82,6 +91,7 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     var statusMessage by remember { mutableStateOf<String?>(null) }
     var engineState by remember { mutableStateOf(EngineState.idle()) }
     val scope = rememberCoroutineScope()
+    val storage = remember { MultitrackProjectStorage(context) }
 
     var hasRecordPermission by remember {
         mutableStateOf(
@@ -92,6 +102,21 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
 
     val takeFile = remember {
         File(context.filesDir, "takes/scratchpad_take.f32").also { it.parentFile?.mkdirs() }
+    }
+
+    // Auto-load once when the screen first composes — before this, the
+    // scratchpad started empty every time, even with a previously saved
+    // project sitting on disk.
+    LaunchedEffect(Unit) {
+        val loaded = withContext(Dispatchers.Default) { storage.load() }
+        if (loaded != null) project = loaded
+    }
+
+    fun persist(toSave: MultitrackProject, announce: Boolean = false) {
+        scope.launch {
+            withContext(Dispatchers.Default) { storage.save(toSave) }
+            if (announce) statusMessage = "Saved."
+        }
     }
 
     fun beginRecording() {
@@ -140,6 +165,7 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
             ByteBuffer.wrap(takeBytes).order(ByteOrder.nativeOrder()).asFloatBuffer().get(takeSamples)
             val newClip = MultitrackClipSpec(buffer = takeSamples, startFrame = 0L)
             project = project.withPunchIn(engine, targetIndex, newClip)
+            persist(project)
             statusMessage = "Recorded %.1fs onto track %d.".format(
                 takeSamples.size / kSampleRate.toDouble(), targetIndex + 1,
             )
@@ -252,13 +278,26 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
                         selectedTrackIndex != null && selectedTrackIndex!! > index -> selectedTrackIndex!! - 1
                         else -> selectedTrackIndex
                     }
+                    persist(project)
                 },
             )
         }
         Spacer(Modifier.height(8.dp))
 
-        Button(enabled = !isRecording && !isPlaying, onClick = { project = project.addTrack() }) {
-            Text("Add track")
+        Row {
+            Button(
+                enabled = !isRecording && !isPlaying,
+                onClick = {
+                    project = project.addTrack()
+                    persist(project)
+                },
+            ) {
+                Text("Add track")
+            }
+            Spacer(Modifier.width(12.dp))
+            Button(enabled = !isRecording, onClick = { persist(project, announce = true) }) {
+                Text("Save")
+            }
         }
         Spacer(Modifier.height(16.dp))
         HorizontalDivider()
