@@ -1,15 +1,16 @@
 # Phase 4 — Multitrack scratchpad engine (real overdubbing)
 
-**Status (2026-07-30): core mixing math + real-time engine integration,
-verified end-to-end on device.** Matching the plan's own instruction
-elsewhere ("host-testable C++ lib first, then JNI-wrapped") applied here
-too: the first slice delivered the pure `Track`/`Clip` data model and
-mixing/punch-in logic; this pass wires it into the real-time engine —
-`EngineMode::MultitrackPlaying`, the JNI bridge, and the Kotlin
-facade — and proves it actually plays back correctly on the physical
-device with zero xruns. **Still not started: punch-in recording
-integration, WAV export, JVM reference mixer, and product UI.** See
-"What's left" below.
+**Status (2026-07-30): core mixing math + real-time engine integration +
+multi-clip/punch-in JNI, verified end-to-end on device.** Matching the
+plan's own instruction elsewhere ("host-testable C++ lib first, then
+JNI-wrapped") applied here too: the first slice delivered the pure
+`Track`/`Clip` data model and mixing/punch-in logic; the second wired it
+into the real-time engine (`EngineMode::MultitrackPlaying`); this third
+slice widens the JNI bridge to N clips per track (not just one) and
+exposes `dsp::punchIn` over JNI so Kotlin can actually splice a new take
+into a track. **Still not started: wiring `armRecording()` to produce a
+punch-in `Clip` and hear existing tracks while recording a new one, WAV
+export, JVM reference mixer, and product UI.** See "What's left" below.
 
 ## What shipped
 
@@ -75,11 +76,17 @@ one reads quiet/loud/quiet exactly as expected on playback).
   overrun; fixed with a three-way `std::min`.
 - **JNI bridge** (`nativeStartMultitrackPlayback` in `jni_bridge.cpp`) and
   **Kotlin facade** (`AudioEngine.startMultitrackPlayback(List<MultitrackTrackSpec>)`
-  in `AudioEngine.kt`): first slice is **exactly one clip per track** —
-  `dsp::Track` natively supports multiple clips, but the JNI marshaling
-  (parallel arrays keyed by track index) doesn't expose that yet. Documented
-  in both the JNI comment and `MultitrackTrackSpec`'s kdoc as a known,
-  deliberate simplification, not an oversight.
+  in `AudioEngine.kt`): now supports **N clips per track** — the marshaling
+  is flat, track-major arrays (`clipBuffers`/`clipStartFrames`/
+  `clipBufferOffsetFrames`/`clipLengthFrames`) plus a `trackClipCounts`
+  array saying how many consecutive flat entries belong to each track.
+  (First shipped as exactly-one-clip-per-track; widened this pass — see
+  the git history on `jni_bridge.cpp` if the old shape is ever relevant.)
+- **`nativePunchIn`** (new JNI function, stateless) and **`AudioEngine.punchIn()`**
+  (Kotlin facade): wraps `dsp::punchIn` so Kotlin can splice a newly
+  recorded take into a track's existing clip list without reimplementing
+  the trim/split logic — the actual splicing math has exactly one
+  implementation (C++), not a Kotlin copy that could drift from it.
 
 **Verified on device (2026-07-30, real-time engine integration)**: added a
 "Multitrack playback smoke test" section to `DiagnosticsScreen.kt` — three
@@ -98,11 +105,49 @@ test's own result text — not separately re-verified by a human in this
 pass, since the automated frame-accounting and xrun checks are what would
 catch a real mixing bug; noted here for honesty, not glossed over.)
 
+**Verified on device (2026-07-30, multi-clip + punch-in JNI)**: upgraded
+the multitrack smoke test so one track carries **two clips with a silent
+gap** (440Hz, gap, then a C5 tone on the same track), plus a new
+"Punch-in smoke test" section that calls `AudioEngine.punchIn()` on a real
+device and asserts the exact resulting clip shape and sample values (not
+just "didn't crash"). First run of the punch-in test **crashed the app**
+(`ArrayIndexOutOfBoundsException` at `AudioEngine.kt:167`) — the Kotlin-
+side output-array capacity formula (`existingClips.size + 1`) assumed a
+punched clip could only split into 2 fragments total, but a single
+existing clip straddling both edges of the insert splits into a head *and*
+a tail (2 fragments from 1 input) plus the insert clip itself (3 total from
+1 existing clip) — exactly what the test's own inputs (a 1000-frame clip,
+punched in the middle) triggered. Fixed by correcting the capacity formula
+to `existingClips.size * 2 + 1` (the true worst case: every existing clip
+splits into 2) **and** hardening the native side to return the count it
+actually wrote rather than the true (possibly larger) result size, so a
+future capacity miscalculation elsewhere degrades to silent truncation
+instead of an out-of-bounds crash. Re-ran after the fix: both smoke tests
+**PASS** — multi-clip playback again showed correct total frames (120000)
+and 0 xruns; punch-in returned exactly 3 clips
+(`[0,300)`/`[300,700)`/`[700,1000)`) with sample values reading
+quiet/loud/quiet as expected, and a `logcat` check showed no crash. Left
+in here deliberately as a reminder that "the math is right" (host
+GoogleTest already proved `dsp::punchIn` itself) doesn't mean "the
+boundary around the math is right" — this was a marshaling bug, not a
+`dsp::punchIn` bug.
+
 ## What's left for Phase 4 (not started)
 
-- **Punch-in recording integration**: wiring `armRecording()`'s existing
-  machinery to produce a `Clip` at a specified position, then calling
-  `punchIn()` against the target track's existing clips to commit it.
+- **Punch-in recording integration**: the JNI/Kotlin plumbing to splice a
+  clip into a track ([`AudioEngine.punchIn`](../../core/audio/src/main/java/com/songnotes/core/audio/AudioEngine.kt))
+  now exists and is verified, but nothing calls it from a real recording
+  yet. Still needed: (1) a way to hear the *other* tracks while recording a
+  new one — today's `armRecording()`/`onAudioReady`'s Recording-mode output
+  branch only ever renders the count-in/metronome click, never a
+  `Scene::multitrack`; real overdubbing needs the existing tracks mixed
+  into the output during Recording, time-aligned to the same downbeat the
+  new take's `headSkipFrames` trim already anchors to. (2) After a take
+  stops, reading it back from disk into memory, wrapping it as a `Clip` at
+  the right project-timeline `startFrame`, and calling `punchIn()` against
+  the target track. (3) Somewhere to hold the "current project" (the list
+  of `Track`s) between calls — nothing persists this yet; today's
+  diagnostics sections all construct throwaway track lists inline.
 - **Offline mixdown to WAV**: a function that calls `mixTracks(tracks, 0,
   totalFrames)` once and writes a standard WAV file — needs a WAV encoder
   (none exists in this codebase yet; likely small enough to hand-write
@@ -142,22 +187,24 @@ catch a real mixing bug; noted here for honesty, not glossed over.)
    work correctly in that specific test, but a punch range itself starting
    at a negative frame, or a zero-length insert clip, aren't explicitly
    exercised).
-4. **The JNI bridge only supports one clip per track.**
-   `nativeStartMultitrackPlayback`'s parallel-array marshaling
-   (`clipBuffers[i]`/`clipStartFrames[i]` per track) has no way to express
-   multiple clips on one track — real punch-in recording (which produces
-   exactly that: several clip fragments per track) will need this widened
-   before it can drive real-time playback, even though `dsp::Track` and
-   `mixTracksInto()` already support it natively. Widen by changing the
-   marshaling shape (e.g. a flat clip array plus a per-track clip-count
-   array) rather than changing `dsp::Track` itself.
-5. **The multitrack smoke test's "you should have heard two staggered
-   tones, not three" claim is unverified by a human ear in the pass that
-   added it** — the automated checks (frame accounting, clean auto-stop,
-   zero xruns, clean logcat) are strong evidence the mixing itself is
-   correct, but they can't catch every possible audible-mixing bug (e.g. a
-   channel-interleaving mistake that garbles the tone without changing
-   frame counts). Worth an actual listen next time the device is in hand.
+4. **The multitrack smoke test's audible-correctness claims are unverified
+   by a human ear** — the automated checks (frame accounting, clean
+   auto-stop, zero xruns, clean logcat) are strong evidence the mixing
+   itself is correct, but they can't catch every possible audible-mixing
+   bug (e.g. a channel-interleaving mistake that garbles a tone without
+   changing frame counts). Worth an actual listen next time the device is
+   in hand.
+5. **No engine-level "current project" state exists yet.** Every
+   diagnostics section (multitrack playback, punch-in) constructs its own
+   throwaway `List<Track>` inline — there's no shared, mutable
+   representation of "the tracks in this song" that a real punch-in
+   recording flow could read from and write back to. This is explicitly
+   *not* a persistence gap (nothing needs to survive a process restart
+   yet) — it's that no single owner of "the current in-memory track list"
+   exists at all, on either side of the JNI boundary. Whoever builds punch-
+   in recording integration needs to decide where this lives (naturally
+   Kotlin-side, given `AudioEngine.startMultitrackPlayback`/`punchIn` are
+   both already stateless per-call from the engine's perspective).
 
 ## What Phase 4's next slice assumes
 

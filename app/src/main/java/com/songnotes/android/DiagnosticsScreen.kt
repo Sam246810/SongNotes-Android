@@ -144,21 +144,24 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         CalibrationSessionSection(engine)
         VerificationPlaybackSmokeTestSection(engine)
         MultitrackPlaybackSmokeTestSection(engine)
+        PunchInSmokeTestSection(engine)
     }
 }
 
 /**
- * Phase 4 first slice: real-time multitrack playback through
- * [AudioEngine.startMultitrackPlayback]. Three synthetic tracks at
- * different pitches/offsets/gains, one of them muted — audibly, only two
- * tones (440Hz and 660Hz, staggered) should be heard; the muted 220Hz track
- * exists to prove muting doesn't crash the mix AND that a muted track's
- * clip still counts toward the engine's total-duration/auto-stop
- * calculation (matches `startMultitrackPlayback`'s totalFrames computation
- * in audio_engine.cpp, which deliberately ignores mute/solo). The
- * automated pass/fail below checks total-frame accounting and clean
- * auto-stop; actually hearing two staggered tones (not three, not muffled)
- * is a manual confirmation on top of that.
+ * Phase 4, second slice: real-time multitrack playback through
+ * [AudioEngine.startMultitrackPlayback], now exercising multiple clips on
+ * one track (not just multiple tracks) — track 1 has two separate clips
+ * with a silent gap between them, which is what a punched-in track
+ * actually looks like. Audibly: 440Hz from the start, a gap, then a
+ * 523.25Hz (C5) clip on the SAME track from 1.5s; a 660Hz tone on a second
+ * track staggered in at 0.5s; a muted 220Hz track (silent) that's the
+ * longest of all, proving mute doesn't affect the engine's total-duration/
+ * auto-stop calculation (matches `startMultitrackPlayback`'s totalFrames
+ * computation in audio_engine.cpp, which deliberately ignores mute/solo).
+ * The automated pass/fail below checks total-frame accounting and clean
+ * auto-stop; actually hearing the right tones at the right times is a
+ * manual confirmation on top of that.
  */
 @Composable
 private fun MultitrackPlaybackSmokeTestSection(engine: AudioEngine) {
@@ -180,25 +183,37 @@ private fun MultitrackPlaybackSmokeTestSection(engine: AudioEngine) {
         }
     }
 
+    fun clip(freqHz: Double, lengthSeconds: Double, sampleRate: Double, amplitude: Float, startFrame: Long) =
+        com.songnotes.core.audio.MultitrackClipSpec(
+            buffer = sine(freqHz, lengthSeconds, sampleRate, amplitude), startFrame = startFrame,
+        )
+
     fun runTest() {
         resultText = null
         val sampleRate = 48000.0
         val tracks = listOf(
-            // 440Hz, from frame 0, 2.0s.
+            // Two clips on ONE track: 440Hz for 1.0s, a 0.5s silent gap,
+            // then 523.25Hz (C5) for 1.0s starting at 1.5s -> ends at 2.5s.
             com.songnotes.core.audio.MultitrackTrackSpec(
-                buffer = sine(440.0, 2.0, sampleRate, 0.3f), startFrame = 0L, gain = 0.7f,
+                clips = listOf(
+                    clip(440.0, 1.0, sampleRate, 0.3f, startFrame = 0L),
+                    clip(523.25, 1.0, sampleRate, 0.3f, startFrame = 72_000L),
+                ),
+                gain = 0.7f,
             ),
-            // 660Hz, staggered in 0.5s, 1.5s long -> also ends at frame 96000.
+            // 660Hz, staggered in 0.5s, 1.5s long -> ends at frame 96000.
             com.songnotes.core.audio.MultitrackTrackSpec(
-                buffer = sine(660.0, 1.5, sampleRate, 0.3f), startFrame = 24_000L, gain = 0.5f,
+                clips = listOf(clip(660.0, 1.5, sampleRate, 0.3f, startFrame = 24_000L)),
+                gain = 0.5f,
             ),
             // 220Hz, muted, but the longest clip (2.5s) -> should be silent
             // yet still drive the engine's total-duration/auto-stop frame count.
             com.songnotes.core.audio.MultitrackTrackSpec(
-                buffer = sine(220.0, 2.5, sampleRate, 0.3f), startFrame = 0L, muted = true,
+                clips = listOf(clip(220.0, 2.5, sampleRate, 0.3f, startFrame = 0L)),
+                muted = true,
             ),
         )
-        val expectedTotalFrames = (sampleRate * 2.5).toInt() // driven by the muted track's length
+        val expectedTotalFrames = (sampleRate * 2.5).toInt() // driven by track 1's second clip / the muted track
 
         if (!engine.startMultitrackPlayback(tracks)) {
             resultText = "startMultitrackPlayback returned false — see Last error above."
@@ -231,9 +246,10 @@ private fun MultitrackPlaybackSmokeTestSection(engine: AudioEngine) {
                 )
                 appendLine("xRun count: $xRunBefore -> $xRunAfter")
                 append(
-                    "Manual check: you should have heard a 440Hz tone from the start and a 660Hz " +
-                        "tone join 0.5s in, both stopping together at 2.0s, then ~0.5s more of silence " +
-                        "before playback fully stops at 2.5s. No third tone audible (220Hz is muted).",
+                    "Manual check: you should have heard a 440Hz tone from the start, silence from 1.0-" +
+                        "1.5s, then a 523.25Hz (C5) tone on that SAME track from 1.5-2.5s; a 660Hz tone " +
+                        "on a second track joining at 0.5s and stopping at 2.0s; no third tone audible " +
+                        "(220Hz is muted) even though it's what makes playback run the full 2.5s.",
                 )
             }
         }
@@ -249,11 +265,12 @@ private fun MultitrackPlaybackSmokeTestSection(engine: AudioEngine) {
     Spacer(Modifier.height(32.dp))
     HorizontalDivider()
     Spacer(Modifier.height(16.dp))
-    Text("Multitrack playback smoke test (Phase 4 first slice)", style = MaterialTheme.typography.titleMedium)
+    Text("Multitrack playback smoke test (Phase 4, multi-clip)", style = MaterialTheme.typography.titleMedium)
     Spacer(Modifier.height(8.dp))
     Text(
-        "Plays 3 synthetic tracks (one muted) through AudioEngine.startMultitrackPlayback — " +
-            "real-time chunked mixing via dsp::mixTracksInto, not an offline mixdown.",
+        "Plays 3 synthetic tracks (one with 2 clips + a gap, one muted) through " +
+            "AudioEngine.startMultitrackPlayback — real-time chunked mixing via dsp::mixTracksInto, " +
+            "not an offline mixdown.",
         style = MaterialTheme.typography.bodySmall,
     )
     Spacer(Modifier.height(12.dp))
@@ -269,6 +286,83 @@ private fun MultitrackPlaybackSmokeTestSection(engine: AudioEngine) {
         },
     ) {
         Text(if (isPlaying) "Playing..." else "Run multitrack playback smoke test")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+/**
+ * Not a product feature — a one-tap check that [AudioEngine.punchIn]
+ * (wrapping `dsp::punchIn` over JNI) actually links, marshals, and
+ * produces the right clip shape. Mirrors
+ * [CalibrationDspSmokeTestSection]'s pattern: pure logic, no audio
+ * playback, so it can assert exact values rather than relying on a human
+ * ear. Punches a loud clip into the middle of a quiet one and checks the
+ * result reads quiet/loud/quiet — the same property the host GoogleTest
+ * suite already proved for `dsp::punchIn` directly; this proves the JNI
+ * boundary doesn't corrupt it.
+ */
+@Composable
+private fun PunchInSmokeTestSection(engine: AudioEngine) {
+    var resultText by remember { mutableStateOf<String?>(null) }
+
+    fun runTest(): String {
+        val quietValue = 0.1f
+        val loudValue = 0.9f
+        val existingClips = listOf(
+            com.songnotes.core.audio.MultitrackClipSpec(
+                buffer = FloatArray(1000) { quietValue }, startFrame = 0L,
+            ),
+        )
+        val insertClip = com.songnotes.core.audio.MultitrackClipSpec(
+            buffer = FloatArray(400) { loudValue }, startFrame = 300L,
+        )
+        val result = engine.punchIn(existingClips, insertClip)
+
+        val sorted = result.sortedBy { it.startFrame }
+        val shapeOk = sorted.size == 3 &&
+            sorted[0].startFrame == 0L && sorted[0].lengthFrames == 300L &&
+            sorted[1].startFrame == 300L && sorted[1].lengthFrames == 400L &&
+            sorted[2].startFrame == 700L && sorted[2].lengthFrames == 300L
+        fun sampleAt(clip: com.songnotes.core.audio.MultitrackClipSpec, frameInClip: Int) =
+            clip.buffer[(clip.bufferOffsetFrames + frameInClip).toInt()]
+        val valuesOk = shapeOk &&
+            abs(sampleAt(sorted[0], 0) - quietValue) < 0.001f &&
+            abs(sampleAt(sorted[1], 0) - loudValue) < 0.001f &&
+            abs(sampleAt(sorted[2], 0) - quietValue) < 0.001f
+        val pass = shapeOk && valuesOk
+
+        return buildString {
+            appendLine(if (pass) "PASS — JNI punch-in boundary verified" else "FAIL — see values below")
+            appendLine("Result clip count: ${sorted.size} (expected 3, shapeOk=$shapeOk)")
+            sorted.forEachIndexed { i, c ->
+                appendLine(
+                    "  clip $i: start=${c.startFrame} bufferOffset=${c.bufferOffsetFrames} " +
+                        "length=${c.lengthFrames}",
+                )
+            }
+            append("Sample values read quiet/loud/quiet as expected: $valuesOk")
+        }
+    }
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Punch-in smoke test (Phase 4 JNI)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Punches a loud 400-frame clip into the middle of a quiet 1000-frame clip via " +
+            "AudioEngine.punchIn and checks the result reads quiet/loud/quiet — proves the JNI " +
+            "boundary around dsp::punchIn works, not just the underlying C++.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(onClick = { resultText = runTest() }) {
+        Text("Run punch-in smoke test")
     }
 
     resultText?.let {

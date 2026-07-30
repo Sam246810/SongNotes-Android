@@ -92,21 +92,87 @@ class AudioEngine {
     }
 
     /**
-     * Phase 4, first slice: real-time multitrack playback — one clip per
-     * track (see the JNI-side comment in `jni_bridge.cpp` for why). Mixing
-     * happens chunk-at-a-time inside the RT callback via
-     * `dsp::mixTracksInto`; this call itself just marshals the buffers
-     * across JNI once and returns immediately (mirrors
+     * Phase 4, second slice: real-time multitrack playback with N clips per
+     * track — flattens `tracks` into track-major flat arrays plus a
+     * per-track clip count, matching `nativeStartMultitrackPlayback`'s
+     * marshaling in `jni_bridge.cpp`. Mixing happens chunk-at-a-time inside
+     * the RT callback via `dsp::mixTracksInto`; this call itself just
+     * marshals the buffers across JNI once and returns immediately (mirrors
      * [startPlaybackFromBuffer]'s synchronous, no-loader-thread shape).
      */
     fun startMultitrackPlayback(tracks: List<MultitrackTrackSpec>): Boolean {
         if (!ensureCreated()) return false
-        val clipBuffers: Array<FloatArray> = Array(tracks.size) { tracks[it].buffer }
-        val startFrames = LongArray(tracks.size) { tracks[it].startFrame }
-        val gains = FloatArray(tracks.size) { tracks[it].gain }
-        val muted = BooleanArray(tracks.size) { tracks[it].muted }
-        val soloed = BooleanArray(tracks.size) { tracks[it].soloed }
-        return nativeStartMultitrackPlayback(handle, clipBuffers, startFrames, gains, muted, soloed)
+        val totalClips = tracks.sumOf { it.clips.size }
+        val clipBuffers: Array<FloatArray> = Array(totalClips) { FloatArray(0) }
+        val clipStartFrames = LongArray(totalClips)
+        val clipBufferOffsetFrames = LongArray(totalClips)
+        val clipLengthFrames = LongArray(totalClips)
+        val trackClipCounts = IntArray(tracks.size)
+        val trackGains = FloatArray(tracks.size)
+        val trackMuted = BooleanArray(tracks.size)
+        val trackSoloed = BooleanArray(tracks.size)
+        var flatIndex = 0
+        tracks.forEachIndexed { trackIndex, track ->
+            trackClipCounts[trackIndex] = track.clips.size
+            trackGains[trackIndex] = track.gain
+            trackMuted[trackIndex] = track.muted
+            trackSoloed[trackIndex] = track.soloed
+            for (clip in track.clips) {
+                clipBuffers[flatIndex] = clip.buffer
+                clipStartFrames[flatIndex] = clip.startFrame
+                clipBufferOffsetFrames[flatIndex] = clip.bufferOffsetFrames
+                clipLengthFrames[flatIndex] = clip.lengthFrames
+                flatIndex++
+            }
+        }
+        return nativeStartMultitrackPlayback(
+            handle, clipBuffers, clipStartFrames, clipBufferOffsetFrames, clipLengthFrames,
+            trackClipCounts, trackGains, trackMuted, trackSoloed,
+        )
+    }
+
+    /**
+     * Splices [insertClip] into a single track's existing clip list — see
+     * `dsp::punchIn` in `track_mixer.h` for the trim/split semantics
+     * (clips the insert fully covers are dropped, clips it partially
+     * overlaps are trimmed, a clip straddling both edges splits into a
+     * head and a tail fragment). Stateless: doesn't touch the live engine
+     * or [handle], so it's safe to call even if the engine was never
+     * started. The actual splicing logic lives once, in C++
+     * (`dsp::punchIn`), so this and any eventual JVM reference mixer stay
+     * independent implementations of *mixing*, not of punch-in splicing.
+     */
+    fun punchIn(existingClips: List<MultitrackClipSpec>, insertClip: MultitrackClipSpec): List<MultitrackClipSpec> {
+        val existingBuffers: Array<FloatArray> = Array(existingClips.size) { existingClips[it].buffer }
+        val existingStart = LongArray(existingClips.size) { existingClips[it].startFrame }
+        val existingOffset = LongArray(existingClips.size) { existingClips[it].bufferOffsetFrames }
+        val existingLength = LongArray(existingClips.size) { existingClips[it].lengthFrames }
+
+        // Worst case: EVERY existing clip straddles both edges of the
+        // insert and splits into a head + tail fragment (2 outputs per
+        // input clip), plus the insert clip itself (always exactly 1 more)
+        // — see the C++-side doc comment on nativePunchIn. A single clip
+        // splitting is 2 outputs from 1 input, not 1; sizing this as
+        // existingClips.size + 1 undercounts and previously crashed with
+        // an ArrayIndexOutOfBoundsException the first time a real
+        // straddling punch-in ran on device.
+        val outCapacity = existingClips.size * 2 + 1
+        val outBuffers = arrayOfNulls<FloatArray>(outCapacity)
+        val outStart = LongArray(outCapacity)
+        val outOffset = LongArray(outCapacity)
+        val outLength = LongArray(outCapacity)
+
+        val resultCount = nativePunchIn(
+            existingBuffers, existingStart, existingOffset, existingLength,
+            insertClip.buffer, insertClip.startFrame, insertClip.bufferOffsetFrames, insertClip.lengthFrames,
+            outBuffers, outStart, outOffset, outLength,
+        )
+        return (0 until resultCount).map { i ->
+            MultitrackClipSpec(
+                buffer = outBuffers[i]!!, startFrame = outStart[i], bufferOffsetFrames = outOffset[i],
+                lengthFrames = outLength[i],
+            )
+        }
     }
 
     /**
@@ -211,10 +277,27 @@ class AudioEngine {
         handle: Long,
         clipBuffers: Array<FloatArray>,
         clipStartFrames: LongArray,
+        clipBufferOffsetFrames: LongArray,
+        clipLengthFrames: LongArray,
+        trackClipCounts: IntArray,
         trackGains: FloatArray,
         trackMuted: BooleanArray,
         trackSoloed: BooleanArray,
     ): Boolean
+    private external fun nativePunchIn(
+        existingClipBuffers: Array<FloatArray>,
+        existingClipStartFrames: LongArray,
+        existingClipBufferOffsetFrames: LongArray,
+        existingClipLengthFrames: LongArray,
+        insertClipBuffer: FloatArray,
+        insertStartFrame: Long,
+        insertBufferOffsetFrames: Long,
+        insertLengthFrames: Long,
+        outClipBuffers: Array<FloatArray?>,
+        outClipStartFrames: LongArray,
+        outClipBufferOffsetFrames: LongArray,
+        outClipLengthFrames: LongArray,
+    ): Int
     private external fun nativeStartCalibrationCapture(
         handle: Long,
         sweep: FloatArray,
@@ -242,15 +325,28 @@ class AudioEngine {
 }
 
 /**
- * One track's worth of input to [AudioEngine.startMultitrackPlayback].
- * First slice: exactly one clip per track, so this is flat (buffer +
- * startFrame) rather than wrapping a clip list — matches the JNI marshaling
- * in `jni_bridge.cpp`'s `nativeStartMultitrackPlayback`, which is the actual
- * constraint. See docs/handoff/PHASE-04.md.
+ * One clip within a [MultitrackTrackSpec] — mirrors `dsp::Clip` in
+ * `track_mixer.h`. [bufferOffsetFrames]/[lengthFrames] let a clip be a
+ * trimmed *view* into [buffer] rather than requiring the buffer itself to
+ * be exactly the clip's length — e.g. a punch-in tail fragment, whose
+ * `bufferOffsetFrames` advances past the head that got trimmed off but
+ * whose underlying `buffer` is still the original full take.
  */
-data class MultitrackTrackSpec(
+data class MultitrackClipSpec(
     val buffer: FloatArray,
     val startFrame: Long,
+    val bufferOffsetFrames: Long = 0L,
+    val lengthFrames: Long = buffer.size.toLong() - bufferOffsetFrames,
+)
+
+/**
+ * One track's worth of input to [AudioEngine.startMultitrackPlayback].
+ * Phase 4, second slice: [clips] is a list (not a single buffer) — what
+ * makes a punched-in track (several clip fragments sharing one timeline)
+ * actually playable in real time. See docs/handoff/PHASE-04.md.
+ */
+data class MultitrackTrackSpec(
+    val clips: List<MultitrackClipSpec>,
     val gain: Float = 1.0f,
     val muted: Boolean = false,
     val soloed: Boolean = false,
