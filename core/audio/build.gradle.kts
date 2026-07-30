@@ -52,4 +52,11 @@ android {
 dependencies {
     implementation(libs.oboe)
     implementation(libs.kotlinx.coroutines.core)
+
+    // Only MultitrackProjectTest.kt uses this so far — its pure (non-
+    // engine-touching) methods run as a plain JVM unit test, no device
+    // needed. Anything that constructs a real AudioEngine can't run here:
+    // its companion object's System.loadLibrary("songnotes_audio") would
+    // throw UnsatisfiedLinkError outside an actual Android runtime.
+    testImplementation(libs.junit)
 }

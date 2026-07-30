@@ -2,7 +2,7 @@
 
 **Status (2026-07-30): Phase 4's own stated Done criterion is met and
 verified on a real device** — "exported WAV is sample-identical to a JVM
-reference mixer given the same clip list." Six slices got here, each
+reference mixer given the same clip list." Seven slices got here, each
 verified before the next started: (1) the pure `Track`/`Clip` data model
 and mixing/punch-in logic; (2) real-time engine integration
 (`EngineMode::MultitrackPlaying`); (3) widening the JNI bridge to N clips
@@ -12,9 +12,12 @@ the output during Recording, so a user can actually hear the song while
 recording a new part onto it; (5) **offline mixdown to a real 32-bit float
 WAV file**; (6) **a new `:core:domain` Gradle module holding a genuinely
 independent JVM reference mixer**, cross-validated against the C++ engine
-on-device — the two agree bit-for-bit. **Still not started: product UI and
-a real "current project" state to replace every call site's throwaway
-in-memory track lists.** See "What's left" below.
+on-device — the two agree bit-for-bit; (7) **`MultitrackProject`**, the
+single authoritative in-memory track list every call site now reads from
+and writes back to, replacing the throwaway inline lists every earlier
+diagnostics section built for itself — proven by refactoring the "Overdub
++ punch-in, end to end" section onto it and re-verifying on device.
+**Still not started: product UI.** See "What's left" below.
 
 ## What shipped
 
@@ -275,6 +278,48 @@ now actually met, not just possible**:
   device: `[0.5, 2.5, 3.0, 2.5, 2.5, 3.5, 1.5]` from all three sources,
   bit-for-bit identical between native and JVM.
 
+**`MultitrackProject` shipped (2026-07-30) — the "current project" gap
+(risk 5, above) is closed**:
+
+- **`MultitrackProject.kt`** (new, in `:core:audio`): an immutable
+  `data class MultitrackProject(val tracks: List<MultitrackTrackSpec>)`
+  with reducer-style mutation methods (`addTrack`, `removeTrack`,
+  `withTrackGain`/`Muted`/`Soloed`, `withPunchIn`, plus `play`/`armOverdub`/
+  `exportToWav` as thin wrappers around the matching `AudioEngine` calls) —
+  every mutation returns a new instance rather than changing one in place,
+  the same pattern `EngineState`/`EngineCapabilities` already use for
+  engine-observed state. Deliberately placed in `:core:audio`, not
+  `:core:domain` — this is not the JVM reference mixer's data model
+  (`:core:domain`'s `Clip`/`Track` exist only for cross-validating the
+  mixing math independently) and punch-in recording is inherently a
+  real-time engine operation, so this project model is tied to
+  `AudioEngine`'s own `MultitrackTrackSpec`/`MultitrackClipSpec` types
+  rather than requiring conversion back and forth. `withPunchIn` never
+  reimplements splicing — it always calls `AudioEngine.punchIn` (the one
+  C++-backed implementation), same reasoning as everywhere else in Phase 4.
+- **`MultitrackProjectTest.kt`** (new): 8 JUnit cases covering every method
+  that doesn't touch a real engine (`addTrack`, `removeTrack`, the
+  per-track setters, `totalFrames` including the "mute doesn't shorten
+  duration" case) — added `testImplementation(libs.junit)` to
+  `core/audio/build.gradle.kts` for this, the first JVM unit test
+  `:core:audio` has ever had. `withPunchIn`/`play`/`armOverdub`/
+  `exportToWav` all construct or call a real `AudioEngine`, whose
+  companion object loads a native library that doesn't exist in a plain
+  JVM test process — those stay verified on-device, same as everything
+  else that touches JNI in this project. **8/8 passing.**
+- **Proven in real use, not just added unused**: refactored the "Overdub +
+  punch-in, end to end" diagnostics section to build its 3-track setup via
+  `MultitrackProject().addTrack(...).addTrack(...).addTrack()`, arm the
+  overdub via `project.armOverdub(...)`, commit the take via
+  `project.withPunchIn(...)`, and play the result via `project.play(...)`
+  — replacing the hand-built-then-concatenated `backingTracks + MultitrackTrackSpec(...)`
+  list construction that section used before. **Verified on device**: PASS,
+  identical numbers to the pre-refactor run (97536 frames recorded, exactly
+  1 spliced clip, `project.totalFrames` correctly reflecting the punched-in
+  take, clean combined playback, 0 xruns) — the abstraction didn't change
+  behavior, it just gave every future call site (a real punch-in UI,
+  eventually) somewhere to hold state instead of reinventing it.
+
 ## What's left for Phase 4 (not started)
 
 - **UI**: gain/mute/solo controls, punch-in triggering, track list — Phase
@@ -316,20 +361,18 @@ now actually met, not just possible**:
    bug (e.g. a channel-interleaving mistake that garbles a tone without
    changing frame counts). Worth an actual listen next time the device is
    in hand.
-5. **Still no engine- or app-level "current project" state exists.** The
-   engine and JNI layers are now fully capable of overdub recording +
-   splicing (verified end to end), but every call site — including the new
-   "Overdub + punch-in" diagnostics section — still constructs its own
-   throwaway `List<Track>` inline rather than reading from/writing back to
-   any shared representation of "the tracks in this song." This is
-   explicitly *not* a persistence gap (nothing needs to survive a process
-   restart yet) — it's that no single owner of "the current in-memory track
-   list" exists at all. This is now the most load-bearing remaining gap for
-   turning the verified engine capability into an actual usable feature:
-   whoever builds the real punch-in UI needs a place to hold and mutate
-   that list (naturally Kotlin-side, given `AudioEngine`'s multitrack/punch-in
-   methods are all already stateless per-call from the engine's own
-   perspective).
+5. **RESOLVED (2026-07-30) — `MultitrackProject` is the single owner of
+   "the current in-memory track list" now**, and the "Overdub + punch-in"
+   diagnostics section is refactored onto it (see "What shipped" above).
+   What's still genuinely open: (a) no persistence — `MultitrackProject`
+   is purely in-memory, nothing writes it to disk or restores it across a
+   process restart, which was explicitly out of scope ("this is not a
+   persistence gap" was true when written and remains true — persistence
+   is a distinct, not-yet-started concern); (b) it's held as a local `var`
+   inside the one refactored diagnostics section, not lifted into any
+   shared/app-level container (a `ViewModel` or similar) that multiple
+   screens could read from — appropriate for a diagnostics harness, not
+   yet for a real UI with more than one screen touching the same project.
 6. **The metronome click is not toggleable during an overdub take.**
    `onAudioReady`'s Armed/Recording branch mixes the backing tracks in
    *alongside* the existing count-in/metronome click, unconditionally —

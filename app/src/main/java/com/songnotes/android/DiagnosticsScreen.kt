@@ -44,6 +44,7 @@ import com.songnotes.core.audio.CalibrationSession
 import com.songnotes.core.audio.CalibrationStore
 import com.songnotes.core.audio.EngineCapabilities
 import com.songnotes.core.audio.EngineState
+import com.songnotes.core.audio.MultitrackProject
 import com.songnotes.core.audio.RealCalibrationAudio
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
@@ -405,16 +406,17 @@ private fun WavExportSmokeTestSection(engine: AudioEngine) {
 }
 
 /**
- * The full Phase 4 punch-in loop, end to end: arm a real recording WITH
- * backing tracks audible ([AudioEngine.armRecording]'s `backingTracks`
- * param — real overdubbing, not just click-only recording), record ~2s of
- * actual mic input, read the resulting take back, splice it onto an
- * initially-empty third track via [AudioEngine.punchIn], then play all
- * three tracks back together via [AudioEngine.startMultitrackPlayback].
- * Splicing correctness itself is already proven by [PunchInSmokeTestSection]
- * (exact clip shape + sample values); this section instead proves the
- * pieces connect — a real recorded take can actually be punched in and
- * played back — which unit-testing punchIn() alone can't show.
+ * The full Phase 4 punch-in loop, end to end — now driven through
+ * [MultitrackProject] instead of hand-built/concatenated track lists, the
+ * way a real punch-in UI eventually would: arm a real recording WITH
+ * backing tracks audible ([MultitrackProject.armOverdub]), record ~2s of
+ * actual mic input, read the resulting take back, splice it onto the
+ * project's empty third track via [MultitrackProject.withPunchIn], then
+ * play the whole project back via [MultitrackProject.play]. Splicing
+ * correctness itself is already proven by [PunchInSmokeTestSection] (exact
+ * clip shape + sample values); this section instead proves the pieces
+ * connect — a real recorded take can actually be punched into a project
+ * and played back — which unit-testing punchIn() alone can't show.
  */
 @Composable
 private fun OverdubPunchInEndToEndSection(engine: AudioEngine) {
@@ -449,35 +451,44 @@ private fun OverdubPunchInEndToEndSection(engine: AudioEngine) {
         val beatsPerBar = 4
         val countInBeats = 4
         val recordSeconds = 2.0
-        val backingTracks = listOf(
-            com.songnotes.core.audio.MultitrackTrackSpec(
-                clips = listOf(
-                    com.songnotes.core.audio.MultitrackClipSpec(
-                        buffer = sine(440.0, 2.0, sampleRate, 0.3f), startFrame = 0L,
-                    ),
-                ),
-            ),
-            com.songnotes.core.audio.MultitrackTrackSpec(
-                clips = listOf(
-                    com.songnotes.core.audio.MultitrackClipSpec(
-                        buffer = sine(660.0, 1.5, sampleRate, 0.3f), startFrame = 24_000L,
-                    ),
-                ),
-            ),
-        )
         val backingTracksStartFrame = 0L
+        val overdubTrackIndex = 2
+
+        // Two backing tracks plus an empty target track for the overdub —
+        // building this up via MultitrackProject is what every other call
+        // site in this file used to do by hand-concatenating lists.
+        var project = MultitrackProject()
+            .addTrack(
+                com.songnotes.core.audio.MultitrackTrackSpec(
+                    clips = listOf(
+                        com.songnotes.core.audio.MultitrackClipSpec(
+                            buffer = sine(440.0, 2.0, sampleRate, 0.3f), startFrame = 0L,
+                        ),
+                    ),
+                ),
+            )
+            .addTrack(
+                com.songnotes.core.audio.MultitrackTrackSpec(
+                    clips = listOf(
+                        com.songnotes.core.audio.MultitrackClipSpec(
+                            buffer = sine(660.0, 1.5, sampleRate, 0.3f), startFrame = 24_000L,
+                        ),
+                    ),
+                ),
+            )
+            .addTrack() // empty — the overdub's target
 
         context.startForegroundService(Intent(context, RecordingForegroundService::class.java))
         scope.launch {
             statusText = "Recording (count-in, then ~${recordSeconds.toInt()}s) — backing tracks should be audible..."
-            val armed = engine.armRecording(
-                takeFile.absolutePath, bpm, beatsPerBar, countInBeats, calibrationOffsetFrames = 0.0,
-                backingTracks = backingTracks, backingTracksStartFrame = backingTracksStartFrame,
+            val armed = project.armOverdub(
+                engine, takeFile.absolutePath, bpm, beatsPerBar, countInBeats,
+                targetIndex = overdubTrackIndex, backingTracksStartFrame = backingTracksStartFrame,
             )
             if (!armed) {
                 context.stopService(Intent(context, RecordingForegroundService::class.java))
                 statusText = null
-                resultText = "armRecording (with backing tracks) returned false — see Last error above."
+                resultText = "armOverdub returned false — see Last error above."
                 isRunning = false
                 return@launch
             }
@@ -505,11 +516,11 @@ private fun OverdubPunchInEndToEndSection(engine: AudioEngine) {
             val newClip = com.songnotes.core.audio.MultitrackClipSpec(
                 buffer = takeSamples, startFrame = backingTracksStartFrame,
             )
-            val splicedClips = engine.punchIn(existingClips = emptyList(), insertClip = newClip)
+            project = project.withPunchIn(engine, overdubTrackIndex, newClip)
+            val splicedClipCount = project.tracks[overdubTrackIndex].clips.size
 
             statusText = "Playing back backing tracks + the take just recorded..."
-            val allTracks = backingTracks + com.songnotes.core.audio.MultitrackTrackSpec(clips = splicedClips)
-            val playbackOk = engine.startMultitrackPlayback(allTracks)
+            val playbackOk = project.play(engine)
             var xrunAfterPlayback = engine.capabilities().xRunCount
             if (playbackOk) {
                 while (engine.state().isPlaying) delay(50)
@@ -525,8 +536,11 @@ private fun OverdubPunchInEndToEndSection(engine: AudioEngine) {
                         recordedSeconds, recordSeconds,
                     ),
                 )
-                appendLine("punchIn onto an empty track produced ${splicedClips.size} clip(s) (expected 1)")
-                appendLine("Combined multitrack playback (2 backing tracks + the overdub) started: $playbackOk")
+                appendLine(
+                    "MultitrackProject.withPunchIn onto the empty track produced $splicedClipCount " +
+                        "clip(s) (expected 1); project.totalFrames = ${project.totalFrames}",
+                )
+                appendLine("Combined multitrack playback (project.play, 3 tracks) started: $playbackOk")
                 appendLine("xRun count after combined playback: $xrunAfterPlayback")
                 append(
                     "Manual check: during recording you should have heard a 440Hz tone from the " +
@@ -552,8 +566,8 @@ private fun OverdubPunchInEndToEndSection(engine: AudioEngine) {
     Spacer(Modifier.height(8.dp))
     Text(
         "Records a real ~2s take while 2 backing tracks play audibly, splices the take onto a " +
-            "third track via AudioEngine.punchIn, then plays all 3 tracks back together — the full " +
-            "record-while-listening-then-splice loop, not just its individual pieces.",
+            "third track, then plays all 3 tracks back together — the full record-while-listening-" +
+            "then-splice loop, driven through MultitrackProject rather than hand-built track lists.",
         style = MaterialTheme.typography.bodySmall,
     )
     Spacer(Modifier.height(12.dp))
