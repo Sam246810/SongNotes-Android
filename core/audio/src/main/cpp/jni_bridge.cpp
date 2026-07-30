@@ -45,11 +45,13 @@ Java_com_songnotes_core_audio_AudioEngine_nativeStopTestTone(JNIEnv *, jobject, 
 JNIEXPORT jboolean JNICALL
 Java_com_songnotes_core_audio_AudioEngine_nativeArmRecording(JNIEnv *env, jobject, jlong handle,
                                                               jstring filePath, jdouble bpm,
-                                                              jint beatsPerBar, jint countInBeats) {
+                                                              jint beatsPerBar, jint countInBeats,
+                                                              jdouble calibrationOffsetFrames) {
     auto *engine = toEngine(handle);
     if (!engine || !filePath) return JNI_FALSE;
     const char *path = env->GetStringUTFChars(filePath, nullptr);
-    const bool ok = engine->armRecording(std::string(path), bpm, beatsPerBar, countInBeats);
+    const bool ok =
+        engine->armRecording(std::string(path), bpm, beatsPerBar, countInBeats, calibrationOffsetFrames);
     env->ReleaseStringUTFChars(filePath, path);
     return ok ? JNI_TRUE : JNI_FALSE;
 }

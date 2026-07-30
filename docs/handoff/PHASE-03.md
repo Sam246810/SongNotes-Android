@@ -408,6 +408,63 @@ a synthetic sine "take" — see "Rules A/B/C/I plumbing" above) — the wizard
 doesn't yet prompt the user to record a short verification take and play
 it back pre-mixed. That's part of a fuller wizard pass, not this one.
 
+## Rule C's actual mechanism: applying the offset to real recordings (2026-07-30)
+
+Everything above this point measures and saves a calibration offset —
+nothing until now actually *applied* it to a real recording. That gap is
+closed: `armRecording()` gained a `calibrationOffsetFrames` parameter,
+folded into the writer thread's head-skip amount
+(`preRollFrames + calibrationOffsetFrames`, clamped ≥0) rather than the
+fixed pre-roll alone. `preRollFrames` itself — capture *start* timing —
+is deliberately untouched; only how much the writer thread discards
+changes. `DiagnosticsScreen`'s record flow now looks up
+`CalibrationStore.load(route.routeKey)?.offsetFrames` before arming.
+
+**Direction/sign reasoning** (worth spelling out since getting this
+backwards would make alignment worse, not better): content emitted at
+output frame D shows up in the input stream at input frame
+`D + offsetFrames` — that's literally what the calibration sweep measures.
+A user performing along with the downbeat click they hear lands their
+actual performance in the raw input stream at that same later frame, not
+at frame D. Trimming only the fixed pre-roll leaves the stored take's
+frame 0 sitting `offsetFrames` *before* where the performance actually
+landed — the performance would sound late on playback. Trimming
+`preRoll + offset` instead shifts frame 0 to where the performance actually
+happened.
+
+**First on-device test appeared to fail** — applying a calibration of
+21.3ms (saved earlier by the wizard, in an *earlier app session*) to a
+new recording, the residual measured offset came out to **+70.12ms**,
+worse than the ~21ms uncorrected baseline. Before assuming the sign was
+backwards, measured the *current* actual round-trip latency in the same
+session: **90.47ms** — not 21.3ms. `90.47 − 21.3 ≈ 69.17ms`, matching the
+observed 70.12ms residual almost exactly. This wasn't a bug in the
+correction logic; it was a **stale calibration value** — the true latency
+had genuinely drifted between the wizard measurement and this recording
+(the same session-to-session variability already documented earlier in
+this file, now caught in the act by end-to-end testing rather than by
+comparing two isolated numbers).
+
+**Confirmed the mechanism itself is correct** by measuring a *fresh*
+calibration (90.33ms, matching the standalone reading almost exactly) in
+the same session as a new test recording, then re-running
+`measure_click_alignment.py` on it: of 32 detected beats, roughly half
+landed at **0.5–1.5ms residual offset** — a near-total collapse from the
+tens-of-milliseconds range seen uncorrected. The remaining beats showed
+large, inconsistent outliers (up to ±118ms) that don't fit any
+sign/scaling error — almost certainly `measure_click_alignment.py`'s
+simple loudest-transient-in-a-window peak search locking onto room
+noise/reverb rather than the actual click in this particular (noisy,
+late-night) recording, not a flaw in the correction itself. The clean
+half is the real signal, and it confirms both direction and magnitude are
+right.
+
+**Practical implication worth carrying into the wizard/product UI**: a
+calibration value's shelf life on this device is not indefinite — it can
+go stale within the span of one interactive session, let alone across
+days. Whatever eventually surfaces calibration status to the user should
+probably show *when* it was last measured, not just that a value exists.
+
 ## What's left for Phase 3 (not started)
 
 Roughly in the order the plan's architecture section implies:

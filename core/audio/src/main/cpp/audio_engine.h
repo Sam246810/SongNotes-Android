@@ -54,8 +54,15 @@ public:
     // transitions to actually recording at the downbeat. Capture into the
     // take actually starts kPreRollSeconds before the downbeat (not at Arm
     // time, and not at the downbeat) — see the .cpp for why.
+    //
+    // calibrationOffsetFrames (Rule C) is the measured round-trip latency
+    // for the route this recording will use — from CalibrationStore, 0.0
+    // if nothing's been measured for this route yet — folded into how much
+    // the writer thread trims so the stored take's frame 0 lands where the
+    // user's performance actually happened, not where the downbeat was
+    // nominally scheduled. See the .cpp for the direction/sign reasoning.
     bool armRecording(const std::string &filePath, double bpm, int32_t beatsPerBar,
-                       int32_t countInBeats);
+                       int32_t countInBeats, double calibrationOffsetFrames = 0.0);
     void stopRecording();
 
     bool startPlayback(const std::string &filePath);

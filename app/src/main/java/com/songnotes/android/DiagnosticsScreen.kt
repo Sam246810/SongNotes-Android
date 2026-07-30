@@ -628,12 +628,22 @@ private fun RecordPlaybackSection(engine: AudioEngine) {
             return
         }
         context.startForegroundService(Intent(context, RecordingForegroundService::class.java))
+        // Rule C: apply whatever calibration this route has saved, if any
+        // — 0.0 (no correction) if this route has never been calibrated.
+        val route = AudioRouteDetector(context).currentInputRoute()
+        val calibrationOffsetFrames = CalibrationStore(context).load(route.routeKey)?.offsetFrames ?: 0.0
         // 4 beats of count-in, 4/4 time — fixed for this diagnostic screen;
         // a real UI for these lands with Phase 8/10.
-        if (engine.armRecording(takeFile.absolutePath, bpm, beatsPerBar = 4, countInBeats = 4)) {
+        if (engine.armRecording(
+                takeFile.absolutePath, bpm, beatsPerBar = 4, countInBeats = 4,
+                calibrationOffsetFrames = calibrationOffsetFrames,
+            )
+        ) {
             engineState = engine.state()
             isPolling = true
-            statusMessage = null
+            statusMessage = "Applying calibration offset for \"${route.label}\": %.2f frames".format(
+                calibrationOffsetFrames,
+            )
         } else {
             statusMessage = "Failed to arm recording — see Last error above."
             context.stopService(Intent(context, RecordingForegroundService::class.java))

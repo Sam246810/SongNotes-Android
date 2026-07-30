@@ -205,7 +205,7 @@ void NativeAudioEngine::stopTestTone() {
 }
 
 bool NativeAudioEngine::armRecording(const std::string &filePath, double bpm, int32_t beatsPerBar,
-                                      int32_t countInBeats) {
+                                      int32_t countInBeats, double calibrationOffsetFrames) {
     if (!ensureStreamsOpen()) return false;
     stopRecordingInternal(); // in case one was already in flight
 
@@ -216,13 +216,29 @@ bool NativeAudioEngine::armRecording(const std::string &filePath, double bpm, in
     }
     const auto preRollFrames = static_cast<int64_t>(std::llround(static_cast<double>(sr) * kPreRollSeconds));
 
+    // Rule C ("takes are stored already-aligned, so the verify player
+    // contains no offset math at all"): content emitted at output frame D
+    // shows up in the input stream at input frame (D + calibrationOffset)
+    // — that's exactly what the calibration sweep measures. A user
+    // performing along with the downbeat click they hear lands their
+    // actual performance in the raw input stream at that same later frame,
+    // not at frame D itself. Trimming only the fixed pre-roll would leave
+    // the stored take's "frame 0" calibrationOffsetFrames early — the
+    // performed downbeat would land late in the file. Trimming
+    // (preRoll + calibrationOffset) instead shifts frame 0 to where the
+    // performance actually landed. preRollFrames itself (capture START
+    // timing, ~0.75s) is intentionally untouched by this — only how much
+    // the writer thread discards changes.
+    const auto headSkipFrames = std::max<int64_t>(
+        0, preRollFrames + static_cast<int64_t>(std::llround(calibrationOffsetFrames)));
+
     mState.framesRecorded.store(0, std::memory_order_relaxed);
     mState.framesDropped.store(0, std::memory_order_relaxed);
     mState.isArmed.store(1, std::memory_order_relaxed);
     mState.isRecording.store(0, std::memory_order_relaxed);
     mState.countInBeatsRemaining.store(countInBeats, std::memory_order_relaxed);
     mWriterShouldRun.store(true, std::memory_order_relaxed);
-    mWriterThread = std::thread(&NativeAudioEngine::writerThreadLoop, this, filePath, preRollFrames);
+    mWriterThread = std::thread(&NativeAudioEngine::writerThreadLoop, this, filePath, headSkipFrames);
 
     Command cmd;
     cmd.type = CommandType::Arm;

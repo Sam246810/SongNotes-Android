@@ -60,9 +60,22 @@ class AudioEngine {
      * actually recording at the downbeat. [filePath] should live under the
      * app's own storage (e.g. `context.filesDir`) — no permission-scoped
      * storage handling here yet.
+     *
+     * [calibrationOffsetFrames] (Rule C) should come from
+     * `CalibrationStore.load(route.routeKey)?.offsetFrames` for whatever
+     * route this recording will use — 0.0 (the default) if nothing's been
+     * measured for that route, which reproduces the pre-calibration
+     * pre-roll-only trim exactly.
      */
-    fun armRecording(filePath: String, bpm: Double, beatsPerBar: Int, countInBeats: Int): Boolean =
-        ensureCreated() && nativeArmRecording(handle, filePath, bpm, beatsPerBar, countInBeats)
+    fun armRecording(
+        filePath: String,
+        bpm: Double,
+        beatsPerBar: Int,
+        countInBeats: Int,
+        calibrationOffsetFrames: Double = 0.0,
+    ): Boolean =
+        ensureCreated() &&
+            nativeArmRecording(handle, filePath, bpm, beatsPerBar, countInBeats, calibrationOffsetFrames)
 
     fun stopRecording() {
         if (handle != 0L) nativeStopRecording(handle)
@@ -170,6 +183,7 @@ class AudioEngine {
         bpm: Double,
         beatsPerBar: Int,
         countInBeats: Int,
+        calibrationOffsetFrames: Double,
     ): Boolean
     private external fun nativeStopRecording(handle: Long)
     private external fun nativeStartPlayback(handle: Long, filePath: String): Boolean
