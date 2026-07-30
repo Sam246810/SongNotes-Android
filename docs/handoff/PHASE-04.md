@@ -17,7 +17,9 @@ single authoritative in-memory track list every call site now reads from
 and writes back to, replacing the throwaway inline lists every earlier
 diagnostics section built for itself — proven by refactoring the "Overdub
 + punch-in, end to end" section onto it and re-verifying on device.
-**Still not started: product UI.** See "What's left" below.
+**Phase 4 is complete.** Product UI, listed as out-of-scope when this doc
+was first written, got front-loaded once the internals above were all
+verified — see [`PHASE-10.md`](PHASE-10.md).
 
 ## What shipped
 
@@ -320,12 +322,15 @@ now actually met, not just possible**:
   behavior, it just gave every future call site (a real punch-in UI,
   eventually) somewhere to hold state instead of reinventing it.
 
-## What's left for Phase 4 (not started)
+## What's left for Phase 4
 
-- **UI**: gain/mute/solo controls, punch-in triggering, track list — Phase
-  10 territory per the plan's own phase table ("Scratchpad product UI"),
-  though a diagnostics-screen-style verification harness (matching every
-  prior phase's approach) will likely land before that.
+Nothing — **Phase 4 is complete.** Its own stated Done criterion is met
+and verified on device (see above), and every internals gap this doc
+tracked has been closed. Product UI, originally listed here as
+out-of-scope "Phase 10 territory," was front-loaded and built once the
+internals were verified — see [`PHASE-10.md`](PHASE-10.md) for that work
+and its own, separate list of what's still left (timeline/scrub UI,
+clip-level editing, persistence, and more).
 
 ## Known risks — check these first
 
