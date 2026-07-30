@@ -4,12 +4,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -19,8 +17,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -33,27 +33,29 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.ui.input.key.KeyEventType
 import com.songnotes.core.domain.Song
 import com.songnotes.core.domain.SongLine
 import com.songnotes.core.domain.SongMeta
@@ -68,35 +70,40 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Phase 5.5's editor, second pass — rebuilt to match the desktop web app's
- * actual editing model (`src/components/SongLine/SongLine.jsx`) instead of
- * a from-scratch Android-native design, after the first pass's tap-to-place
- * anchor UI proved genuinely unusable. The desktop app's model is a plain
- * space-padded chords string aligned above a lyrics string per line —
- * literally a notes app, with a colored inline token view when the chord
- * row isn't focused. This is a faithful behavioral port of that: same
- * paper-notebook visual language, same Enter-creates-a-line /
- * Backspace-at-start-merges-with-previous flow, same auto-split when a
- * line runs long.
+ * Phase 5.5's editor, third pass. The second pass ported the desktop web
+ * app's editing model faithfully (plain padded-string chords, colored
+ * token display, Enter/Backspace line flow) — that part stays. What this
+ * pass drops is the desktop's literal *visual* metaphor: a shadowed,
+ * rounded-corner "page" card indented for a red margin rule. On a wide
+ * monitor that reads as a notebook page with room to spare; on a phone it
+ * meant a permanent ~40dp tax on every line's available width just to
+ * clear a vertical line that then still visually cut across short lines'
+ * text anyway. Dropped in favor of the same warm palette and typography
+ * applied directly to a full-bleed background, with a thin horizontal
+ * rule under each line (not a vertical one through the text) as the only
+ * "ruled paper" cue — a more discreet nod to the theme that doesn't cost
+ * layout width to maintain.
  *
- * The wire-format anchor model (`docs/WIRE-FORMAT-v2.md` §4,
- * [ChordAnchor]) is kept, but demoted to a pure storage/serialization
- * detail — [EditorLine] works entirely in the padded-string domain the
- * user actually edits, converting to/from anchors only at load ([songToEditorLines])
- * and save ([currentSong]/[chordsLineToAnchors]) via functions already
- * built for exactly this purpose.
+ * Also replaces the fixed-character-count auto-split heuristic with one
+ * based on actually measuring the line's rendered width
+ * ([TextMeasurer]) against the real available width, for two reasons a
+ * guessed character count got wrong in practice: it doesn't adapt to the
+ * font-size control below, and worse, its "no good word-boundary found"
+ * fallback could hard-split *inside* a word — never acceptable, per
+ * direct feedback after it happened. The new version always finds an
+ * actual space to split on, searching forward past the target width if
+ * necessary rather than ever breaking a word.
+ *
+ * The wire-format anchor model ([ChordAnchor]) stays exactly as
+ * demoted-to-storage-detail as the second pass left it — nothing about
+ * this pass touches that boundary.
  */
 
-private val ParchmentBg = Color(0xFFFDFBF7)
-private val WorkspaceBg = Color(0xFFEAE1CE)
-private val PaperBorder = Color(0xFFCEBFAB)
-private val MarginLine = Color(0xFFDC2626).copy(alpha = 0.22f)
+private val ParchmentBg = Color(0xFFF7F1E6)
 private val ChordColor = Color(0xFFB45309)
 private val LyricColor = Color(0xFF2A221B)
 private val TextMuted = Color(0xFF8A7663)
-private val PaperLine = Color(0xFFB45309).copy(alpha = 0.14f)
-
-private const val kMaxLineChars = 38
+private val PaperLine = Color(0xFFB45309).copy(alpha = 0.16f)
 
 private data class EditorLine(val id: String, val chords: String, val lyrics: String)
 private enum class Track { Chords, Lyrics }
@@ -131,6 +138,28 @@ private fun mergeWithPrevious(prev: EditorLine, curr: EditorLine): EditorLine {
     return EditorLine(prev.id, alignChordsWithLyrics(mergedChords, mergedLyrics), mergedLyrics)
 }
 
+/**
+ * Finds where to split [text] so it fits within [maxWidthPx] at [style],
+ * always at a real space — never inside a word. Returns null if the text
+ * already fits, or if there's truly no space anywhere to split on (one
+ * unbroken run of characters longer than the available width, which is
+ * left alone rather than mangled).
+ */
+private fun findSplitIndex(text: String, style: TextStyle, maxWidthPx: Int, measurer: TextMeasurer): Int? {
+    if (maxWidthPx <= 0 || text.isEmpty()) return null
+    val layout = measurer.measure(text, style)
+    if (layout.size.width <= maxWidthPx) return null
+    val boundary = layout.getOffsetForPosition(Offset(maxWidthPx.toFloat(), 0f)).coerceIn(0, text.length - 1)
+    val lastSpaceBefore = text.lastIndexOf(' ', boundary)
+    if (lastSpaceBefore > 0) return lastSpaceBefore
+    // No space before the target width at all — one very long leading
+    // word/token. Rather than break it, look forward for the next space
+    // so the whole word stays together, even if this line ends up a bit
+    // wider than the target.
+    val nextSpaceAfter = text.indexOf(' ', boundary)
+    return if (nextSpaceAfter > 0) nextSpaceAfter else null
+}
+
 @Composable
 fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     val context = LocalContext.current
@@ -141,7 +170,13 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     var lines by remember { mutableStateOf(songToEditorLines(loadedSong)) }
     var pendingFocus by remember { mutableStateOf<PendingFocus?>(null) }
     var showImport by remember { mutableStateOf(false) }
+    var fontScale by remember { mutableStateOf(1f) }
+    var linesAreaWidthPx by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
+    val textMeasurer = rememberTextMeasurer()
+
+    val chordStyle = baseChordTextStyle.copy(fontSize = baseChordTextStyle.fontSize * fontScale)
+    val lyricStyle = baseLyricTextStyle.copy(fontSize = baseLyricTextStyle.fontSize * fontScale)
 
     fun currentSong(): Song = Song(
         id = songId,
@@ -198,11 +233,7 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     }
 
     fun handleAutoSplit(line: EditorLine, caretIndex: Int) {
-        val text = line.lyrics
-        if (text.length < kMaxLineChars) return
-        var splitIdx = text.lastIndexOf(' ', kMaxLineChars)
-        if (splitIdx == -1 || splitIdx < kMaxLineChars / 2) splitIdx = kMaxLineChars - 1
-        if (splitIdx <= 0 || splitIdx >= text.length) return
+        val splitIdx = findSplitIndex(line.lyrics, lyricStyle, linesAreaWidthPx, textMeasurer) ?: return
         val (first, second) = splitLineAt(line, splitIdx)
         val idx = lines.indexOfFirst { it.id == line.id }
         if (idx == -1) return
@@ -238,32 +269,38 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(WorkspaceBg)
-            .padding(16.dp),
+            .background(ParchmentBg),
     ) {
+        // Top bar: just Done, own row with real clearance from the status
+        // bar — same "actions on top, title below with room to breathe"
+        // rhythm Samsung Notes/Keep/Apple Notes all use, rather than
+        // cramming the title into the same row as an action button flush
+        // against the top edge.
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+            horizontalArrangement = Arrangement.End,
         ) {
-            BasicTextField(
-                value = title,
-                onValueChange = { title = it; persist() },
-                textStyle = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold, color = LyricColor),
-                singleLine = true,
-                modifier = Modifier.weight(1f).padding(vertical = 8.dp),
-                decorationBox = { inner ->
-                    if (title.isEmpty()) Text("Untitled", style = MaterialTheme.typography.headlineSmall, color = TextMuted)
-                    inner()
-                },
-            )
-            Spacer(Modifier.width(12.dp))
             TextButton(onClick = {
                 storage.save(currentSong()) // flush immediately — don't lose the last debounced edit
                 onDone()
-            }) { Text("Done") }
+            }) { Text("Done", fontWeight = FontWeight.Bold, color = ChordColor) }
         }
-        Row(modifier = Modifier.horizontalScroll(rememberScrollState())) {
+        BasicTextField(
+            value = title,
+            onValueChange = { title = it; persist() },
+            textStyle = TextStyle(fontSize = 26.sp, fontWeight = FontWeight.Bold, color = LyricColor),
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            decorationBox = { inner ->
+                if (title.isEmpty()) Text("Title", style = TextStyle(fontSize = 26.sp, fontWeight = FontWeight.Bold), color = TextMuted)
+                inner()
+            },
+        )
+        Spacer(Modifier.height(16.dp))
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             TextButton(onClick = { showImport = true }) { Text("Import text", color = ChordColor) }
             TextButton(onClick = {
                 lines = lines.map { it.copy(chords = transposeChordsLine(it.chords, -1) ?: it.chords) }
@@ -273,59 +310,51 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
                 lines = lines.map { it.copy(chords = transposeChordsLine(it.chords, 1) ?: it.chords) }
                 persist()
             }) { Text("Transpose +1", color = ChordColor) }
+            Spacer(Modifier.width(8.dp))
+            TextButton(onClick = { fontScale = (fontScale - 0.1f).coerceAtLeast(0.75f) }) {
+                Text("A-", color = TextMuted, fontWeight = FontWeight.Bold)
+            }
+            TextButton(onClick = { fontScale = (fontScale + 0.1f).coerceAtMost(1.4f) }) {
+                Text("A+", color = TextMuted, fontWeight = FontWeight.Bold)
+            }
         }
-        Spacer(Modifier.height(8.dp))
+        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = PaperLine, thickness = 1.dp)
+        Spacer(Modifier.height(4.dp))
 
-        Box(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .shadow(4.dp, RoundedCornerShape(8.dp))
-                .background(ParchmentBg, RoundedCornerShape(8.dp))
-                .padding(1.dp),
+                .padding(horizontal = 16.dp)
+                .onGloballyPositioned { linesAreaWidthPx = it.size.width },
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Transparent)
-                    .padding(start = 28.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
-            ) {
-                // The notebook's red margin rule — purely decorative, matches the desktop paper theme.
-                Box(
-                    modifier = Modifier
-                        .padding(start = 16.dp)
-                        .fillMaxHeight()
-                        .width(1.dp)
-                        .background(MarginLine),
+            items(lines, key = { it.id }) { line ->
+                LineRow(
+                    line = line,
+                    chordStyle = chordStyle,
+                    lyricStyle = lyricStyle,
+                    pendingFocus = pendingFocus,
+                    onConsumedPendingFocus = { pendingFocus = null },
+                    onChordsChange = { updated -> updateLine(line.id) { it.copy(chords = updated) } },
+                    onLyricsChange = { updated, caret ->
+                        updateLine(line.id) { it.copy(lyrics = updated) }
+                        handleAutoSplit(line.copy(lyrics = updated), caret)
+                    },
+                    onEnter = { handleEnterFromLyrics(line.id) },
+                    onBackspaceMerge = { handleMergeWithPrevious(line.id) },
+                    onBackspaceDeleteEmpty = { handleDeleteLine(line.id) },
+                    onDelete = { handleDeleteLine(line.id) },
                 )
-                LazyColumn(modifier = Modifier.fillMaxSize().padding(start = 12.dp)) {
-                    items(lines, key = { it.id }) { line ->
-                        LineRow(
-                            line = line,
-                            pendingFocus = pendingFocus,
-                            onConsumedPendingFocus = { pendingFocus = null },
-                            onChordsChange = { updated -> updateLine(line.id) { it.copy(chords = updated) } },
-                            onLyricsChange = { updated, caret ->
-                                updateLine(line.id) { it.copy(lyrics = updated) }
-                                handleAutoSplit(line.copy(lyrics = updated), caret)
-                            },
-                            onEnter = { handleEnterFromLyrics(line.id) },
-                            onBackspaceMerge = { handleMergeWithPrevious(line.id) },
-                            onBackspaceDeleteEmpty = { handleDeleteLine(line.id) },
-                            onDelete = { handleDeleteLine(line.id) },
-                        )
-                    }
-                    item {
-                        Spacer(Modifier.height(8.dp))
-                        TextButton(
-                            onClick = {
-                                val newLine = EditorLine(UUID.randomUUID().toString(), "", "")
-                                lines = lines + newLine
-                                pendingFocus = PendingFocus(newLine.id, Track.Lyrics)
-                                persist()
-                            },
-                        ) { Text("+ Add line", color = TextMuted) }
-                    }
-                }
+            }
+            item {
+                Spacer(Modifier.height(8.dp))
+                TextButton(
+                    onClick = {
+                        val newLine = EditorLine(UUID.randomUUID().toString(), "", "")
+                        lines = lines + newLine
+                        pendingFocus = PendingFocus(newLine.id, Track.Lyrics)
+                        persist()
+                    },
+                ) { Text("+ Add line", color = TextMuted) }
             }
         }
     }
@@ -333,20 +362,22 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
 
 private fun emptySong(id: String) = Song(id = id, title = "", createdAt = 0L, updatedAt = 0L)
 
-private val chordTextStyle = TextStyle(
+private val baseChordTextStyle = TextStyle(
     fontFamily = FontFamily.Monospace,
-    fontSize = 14.sp,
+    fontSize = 13.sp,
     fontWeight = FontWeight.Bold,
     letterSpacing = 0.4.sp,
 )
-private val lyricTextStyle = TextStyle(
-    fontSize = 16.sp,
+private val baseLyricTextStyle = TextStyle(
+    fontSize = 15.sp,
     color = LyricColor,
 )
 
 @Composable
 private fun LineRow(
     line: EditorLine,
+    chordStyle: TextStyle,
+    lyricStyle: TextStyle,
     pendingFocus: PendingFocus?,
     onConsumedPendingFocus: () -> Unit,
     onChordsChange: (String) -> Unit,
@@ -401,14 +432,14 @@ private fun LineRow(
             BasicTextField(
                 value = chordsField,
                 onValueChange = { chordsField = it; onChordsChange(it.text) },
-                textStyle = chordTextStyle.copy(color = ChordColor),
+                textStyle = chordStyle.copy(color = ChordColor),
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                 keyboardActions = KeyboardActions(onNext = { lyricsFocus.requestFocus() }),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 26.dp)
-                    .padding(vertical = 2.dp)
+                    .heightIn(min = 24.dp)
+                    .padding(vertical = 1.dp)
                     .focusRequester(chordsFocus)
                     .onFocusChanged { focusState ->
                         if (focusState.isFocused) {
@@ -428,9 +459,13 @@ private fun LineRow(
                             false
                         }
                     },
+                decorationBox = { inner ->
+                    if (chordsField.text.isEmpty()) Text("Chords…", style = chordStyle.copy(color = TextMuted))
+                    inner()
+                },
             )
         } else {
-            ChordTokenRow(text = line.chords, onClick = { chordEditMode = true })
+            ChordTokenRow(text = line.chords, style = chordStyle, onClick = { chordEditMode = true })
         }
 
         BasicTextField(
@@ -439,14 +474,14 @@ private fun LineRow(
                 lyricsField = new
                 onLyricsChange(new.text, new.selection.start)
             },
-            textStyle = lyricTextStyle,
+            textStyle = lyricStyle,
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
             keyboardActions = KeyboardActions(onNext = { onEnter() }),
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 30.dp)
-                .padding(vertical = 2.dp)
+                .heightIn(min = 28.dp)
+                .padding(vertical = 1.dp)
                 .focusRequester(lyricsFocus)
                 .onPreviewKeyEvent { event ->
                     if (event.type == KeyEventType.KeyDown && event.key == Key.Backspace &&
@@ -459,32 +494,32 @@ private fun LineRow(
                     }
                 },
             decorationBox = { inner ->
-                if (line.lyrics.isEmpty()) Text("Lyrics…", style = lyricTextStyle.copy(color = TextMuted))
+                if (line.lyrics.isEmpty()) Text("Lyrics…", style = lyricStyle.copy(color = TextMuted))
                 inner()
             },
         )
-        androidx.compose.material3.HorizontalDivider(color = PaperLine, thickness = 1.dp)
+        HorizontalDivider(color = PaperLine, thickness = 1.dp)
     }
 }
 
 @Composable
-private fun ChordTokenRow(text: String, onClick: () -> Unit) {
+private fun ChordTokenRow(text: String, style: TextStyle, onClick: () -> Unit) {
     val tokens = remember(text) { tokenizeChordLine(text) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 26.dp)
+            .heightIn(min = 24.dp)
             .clickable(onClick = onClick)
-            .padding(vertical = 2.dp),
+            .padding(vertical = 1.dp),
         verticalAlignment = Alignment.Bottom,
     ) {
         if (tokens.isEmpty()) {
-            Text(" ", style = chordTextStyle)
+            Text("Chords…", style = style.copy(color = TextMuted))
         } else {
             for (tok in tokens) {
                 Text(
                     tok.text,
-                    style = chordTextStyle.copy(
+                    style = style.copy(
                         color = when {
                             tok.isWhitespace -> Color.Transparent
                             tok.looksLikeChord -> ChordColor
@@ -501,7 +536,7 @@ private fun ChordTokenRow(text: String, onClick: () -> Unit) {
 @Composable
 private fun ImportStep(onCancel: () -> Unit, onImport: (String) -> Unit) {
     var text by remember { mutableStateOf("") }
-    Column(modifier = Modifier.fillMaxSize().background(WorkspaceBg).padding(24.dp)) {
+    Column(modifier = Modifier.fillMaxSize().background(ParchmentBg).padding(24.dp)) {
         Text("Import lyrics + chords", style = MaterialTheme.typography.headlineSmall, color = LyricColor)
         Spacer(Modifier.height(8.dp))
         Text(
@@ -514,11 +549,11 @@ private fun ImportStep(onCancel: () -> Unit, onImport: (String) -> Unit) {
         BasicTextField(
             value = text,
             onValueChange = { text = it },
-            textStyle = lyricTextStyle,
+            textStyle = baseLyricTextStyle,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .background(ParchmentBg, RoundedCornerShape(8.dp))
+                .background(Color.White, RoundedCornerShape(8.dp))
                 .padding(12.dp),
         )
         Spacer(Modifier.height(12.dp))

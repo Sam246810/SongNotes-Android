@@ -293,6 +293,96 @@ through it):
   a synthetic test.
 - Zero crashes across this entire pass.
 
+## Fourth pass, same day — real bugs from a real test song + layout redesign (2026-07-30)
+
+Feedback came in against an actual song the user had been writing (not a
+synthetic test), which surfaced two concrete problems the third pass
+didn't catch, plus direction on where the visual design should go next.
+
+**Bug 1 — the auto-split could break a word in half.** The character-count
+threshold's fallback ("no good space found early enough, hard-split at a
+fixed position") didn't care whether that position landed inside a word.
+In the user's song, typing "...the early rain is pouring..." past the
+limit split "rain" into " ra" stranded alone on its own line while a
+duplicate " rain is pouring..." appeared on the line after — confirmed by
+reading the actual persisted JSON, which is exactly this: `{"lyrics":"
+ra"}` as its own line. **Root fix, not a patch**: replaced the fixed
+38-character guess with real measurement. [findSplitIndex] uses
+[TextMeasurer] to measure the line's actual rendered width against the
+real available width (via `Modifier.onGloballyPositioned` on the lines
+container) and only ever splits at an actual space — searching *forward*
+past the target width if no space exists before it, so a long word always
+stays whole even if that makes one line run a little wide, rather than
+ever being cut. Re-verified against the exact same overflowing text from
+the user's song afterward: "rain" (and every other word) now stays fully
+intact, split lands cleanly between "is" and "pouring".
+
+This also directly answers the "not enough space to write longer lines"
+complaint from two angles at once: real measurement (rather than a
+guessed character count) means a line only splits when it's *actually*
+too wide for *this* device/font, not a conservative estimate; and —
+paired with the layout changes below — there's meaningfully more usable
+width now that the second pass's card-indent padding is gone.
+
+**Font size + zoom control.** Base sizes reduced slightly (chords 14→13sp,
+lyrics 16→15sp) and a session-scoped `fontScale` (0.75×–1.4×, "A-"/"A+"
+buttons in the toolbar) now scales both — and because splitting is
+measurement-based, changing zoom automatically changes how much text
+fits per line with no separate retuning needed.
+
+**Layout redesign, moving deliberately away from the desktop's literal
+visual metaphor** (explicit user direction: "now move away from it while
+preserving certain thematic things"). Both complaints pointed at the same
+underlying issue — the desktop's shadowed, rounded-corner "page" card
+with a red margin rule works because monitors are wide; on a phone the
+~40dp reserved to clear the margin line from the text was pure waste, and
+the margin line still visually cut across shorter lines' text anyway.
+Removed the floating card, its shadow, its rounded corners, and the
+margin rule entirely. Kept the palette (parchment background, rust-brown
+chords, dark-sepia lyrics) and added a thin horizontal rule *under* each
+line — not a vertical one *through* the text — as the only remaining
+"ruled paper" cue, applied directly to a full-bleed background instead of
+a boxed insert. This is strictly more width-efficient (every dp saved
+from the card's padding/shadow margin is a dp available for actual lyrics)
+as well as more "discreet," per the specific ask.
+
+**Header/title placement**, flagged separately as "way too high, looks
+unnatural" — the title had been sharing a row with the Done button flush
+against the very top of the screen. Restructured to match the rhythm
+ordinary notes apps (Samsung Notes, Keep, Apple Notes) use: Done alone on
+its own top row with real clearance from the status bar, then the title
+as a large field on its own row below with room to breathe, *then* the
+toolbar. Not pixel-matched to any specific app, but the same "actions,
+then title, then body" vertical structure all of them share.
+
+**Verified on the physical device**, reproducing the user's actual
+reported scenario rather than a synthetic one: retyped the same
+overflowing lyric that broke "rain" before — this time it split cleanly
+at a word boundary with the word fully intact, confirmed both on-screen
+and in the persisted JSON. New header layout, zoom controls, and the
+full-bleed no-card layout all render correctly with zero crashes. One
+self-inflicted testing mistake along the way is worth noting for the
+record (not a product bug): a tap intended for the lyrics field landed on
+the chord row instead after the header restructure shifted every
+element's position, so an entire round of typed text became individual
+chord tokens instead of lyrics — caught by reading the actual persisted
+JSON rather than trusting the on-screen UI state alone, which is
+generally the more reliable way to confirm what a test actually did.
+
+**Addendum — chord/lyrics row ambiguity**, flagged immediately after that
+same testing mistake: "make sure its clear where lyrics go and where
+chords go." With the card and margin line gone, the two rows had nothing
+left distinguishing them but font/color, which isn't enough when one is
+empty (an empty chord row rendered as an invisible single space). Added a
+muted "Chords…" placeholder — both in the blurred `ChordTokenRow` and via
+a `decorationBox` on the chord `BasicTextField` in edit mode — mirroring
+the lyrics field's existing "Lyrics…" placeholder exactly. Verified on
+device: a fresh line's chord row now reads "Chords…" above "Lyrics…"
+even before either has content, the placeholder correctly clears once a
+chord is typed, and the field's focus state (confirmed via `uiautomator`
+dump, `focused="true"`) behaves the same as before — this was a purely
+additive UI change with no risk to the underlying focus-handling logic.
+
 ## What's left (deliberately deferred, not bugs)
 
 - **No chord-diagram rendering or `customChords` editing** — Phase 8's
