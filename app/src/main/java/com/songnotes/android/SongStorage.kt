@@ -38,6 +38,7 @@ class SongStorage(context: Context) {
     }
 
     fun save(song: Song) {
+        songsDir.mkdirs() // idempotent — guards against the directory having been removed since construction
         File(songsDir, "${song.id}.json").writeText(writeSong(song).toString())
     }
 

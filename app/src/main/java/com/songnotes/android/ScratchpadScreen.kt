@@ -28,6 +28,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -110,6 +111,26 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     LaunchedEffect(Unit) {
         val loaded = withContext(Dispatchers.Default) { storage.load() }
         if (loaded != null) project = loaded
+    }
+
+    // Nothing previously stopped an in-progress recording if the user left
+    // this screen mid-take (navigating away, or the system tearing the
+    // Activity down) — the native writer thread and RT engine mode were
+    // left dangling, since only the explicit "Stop recording" button ever
+    // called engine.stopRecording(). A later armRecording() call does
+    // clean up a stale session first, but nothing guaranteed one would
+    // ever be made, and playback/export attempted against a still-Recording
+    // engine is a real, not-yet-understood-crash-risk state this project
+    // should just never be able to enter. isRecording is deliberately not
+    // a DisposableEffect key — it only needs to run once, on final
+    // disposal, not every time recording starts/stops.
+    DisposableEffect(Unit) {
+        onDispose {
+            if (isRecording) {
+                engine.stopRecording()
+                context.stopService(Intent(context, RecordingForegroundService::class.java))
+            }
+        }
     }
 
     fun persist(toSave: MultitrackProject, announce: Boolean = false) {

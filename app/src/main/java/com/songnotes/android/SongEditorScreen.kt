@@ -1,19 +1,25 @@
 package com.songnotes.android
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -21,46 +27,56 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.songnotes.core.domain.ChordAnchor
 import com.songnotes.core.domain.Song
 import com.songnotes.core.domain.SongLine
 import com.songnotes.core.domain.SongMeta
-import com.songnotes.core.domain.anchorsToChordsLine
 import com.songnotes.core.domain.chordsLineToAnchors
 import com.songnotes.core.domain.parseLyricsText
 import com.songnotes.core.domain.transposeChordAnchors
 import java.util.UUID
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
  * Phase 5.5's minimum shippable editor. Deliberately simple compared to
  * Phase 8's real editor UI ("budget real time for typography" — that's
- * explicitly a later phase's job): one lyrics [OutlinedTextField] per
- * line, a read-only chords-above-lyrics preview rendered via
- * [anchorsToChordsLine], and chord chips you tap to remove. Adding a
- * chord means typing it into a small per-line field and tapping "Add" —
- * it lands at wherever the lyrics field's cursor currently sits, per the
- * anchor model `docs/PLAN.md` locks in.
+ * explicitly a later phase's job).
+ *
+ * Chord placement is tap-to-place, directly on the rendered lyrics: tap
+ * the exact character you want a chord above, a small editor appears
+ * right there pre-filled if a chord already exists at that spot, type
+ * the chord name and Save. This replaced an earlier version that placed
+ * chords via an invisible text-cursor position in a separate field —
+ * genuinely unusable (there was no way to see or control where a chord
+ * would land before committing it). Positioning uses
+ * [TextLayoutResult.getHorizontalPosition] to place each chord chip
+ * exactly above its target character, and [TextLayoutResult.getOffsetForPosition]
+ * to translate a tap back into a character index — the same anchor model
+ * (`i` = character index into `lyrics`) `docs/WIRE-FORMAT-v2.md` §4
+ * mandates, just with an actually-visual way to control it.
  *
  * Autosaves on a short debounce after any edit rather than requiring an
- * explicit save action — the product thesis this whole phase exists to
- * prove out ("you can write a real song on it and prefer it to a notes
- * app") fails immediately if the user has to remember to hit Save like
- * it's 1995.
+ * explicit save action.
  */
 @Composable
 fun SongEditorScreen(songId: String, onDone: () -> Unit) {
@@ -71,10 +87,11 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     val scope = rememberCoroutineScope()
 
     fun persist(updated: Song) {
-        song = updated.copy(updatedAt = System.currentTimeMillis())
+        val toSave = updated.copy(updatedAt = System.currentTimeMillis())
+        song = toSave
         scope.launch {
             delay(400) // debounce — avoid a disk write on every keystroke
-            storage.save(song)
+            storage.save(toSave)
         }
     }
 
@@ -163,64 +180,144 @@ private fun emptySong(id: String) = Song(id = id, title = "", createdAt = 0L, up
 
 @Composable
 private fun LineEditor(line: SongLine, onChange: (SongLine) -> Unit, onDelete: () -> Unit) {
-    var fieldValue by remember(line.id) { mutableStateOf(TextFieldValue(line.lyrics)) }
-    var chordInput by remember(line.id) { mutableStateOf("") }
+    var textLayout by remember(line.id) { mutableStateOf<TextLayoutResult?>(null) }
+    var selectedIndex by remember(line.id) { mutableStateOf<Int?>(null) }
+    var chordDraft by remember(line.id) { mutableStateOf("") }
 
-    // Keep the field's text in sync if the line changed from elsewhere
-    // (transpose, import) without stomping the user's own in-progress
-    // cursor position on every recomposition.
-    if (fieldValue.text != line.lyrics) {
-        fieldValue = TextFieldValue(line.lyrics, selection = TextRange(line.lyrics.length))
+    // The lyrics text field's own state, synced from `line.lyrics` via a
+    // proper side effect (LaunchedEffect) rather than a raw comparison
+    // during composition — writing to a MutableState mid-composition based
+    // on a value comparison is a real Compose anti-pattern that can loop
+    // or crash under concurrent recomposition (e.g. every LineEditor in
+    // this list recomposing together when a line is added/removed).
+    var fieldValue by remember(line.id) { mutableStateOf(TextFieldValue(line.lyrics)) }
+    LaunchedEffect(line.lyrics) {
+        if (fieldValue.text != line.lyrics) {
+            fieldValue = TextFieldValue(line.lyrics, selection = TextRange(line.lyrics.length.coerceAtMost(fieldValue.selection.start)))
+        }
     }
 
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        if (line.chords.isNotEmpty()) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
+        Text(
+            "Tap the lyrics below to place a chord",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(28.dp)) // reserves room for chord chips rendered above the text
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .pointerInput(line.id, line.lyrics) {
+                    detectTapGestures { tapOffset ->
+                        val layout = textLayout ?: return@detectTapGestures
+                        val tappedIndex = layout.getOffsetForPosition(tapOffset)
+                        val nearestExisting = line.chords.minByOrNull { abs(it.i - tappedIndex) }
+                        selectedIndex = if (nearestExisting != null && abs(nearestExisting.i - tappedIndex) <= 2) {
+                            nearestExisting.i
+                        } else {
+                            tappedIndex
+                        }
+                        chordDraft = line.chords.firstOrNull { it.i == selectedIndex }?.c ?: ""
+                    }
+                },
+        ) {
             Text(
-                anchorsToChordsLine(line.lyrics.length, line.chords),
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
+                text = line.lyrics.ifEmpty { " " },
+                onTextLayout = { textLayout = it },
+                style = MaterialTheme.typography.bodyLarge,
             )
+            textLayout?.let { layout ->
+                for (chord in line.chords) {
+                    val x = layout.getHorizontalPosition(chord.i.coerceIn(0, line.lyrics.length), true)
+                    ChordChip(
+                        text = chord.c,
+                        highlighted = selectedIndex == chord.i,
+                        modifier = Modifier
+                            .offset { IntOffset(x.roundToInt(), -56) }
+                            .clickable {
+                                selectedIndex = chord.i
+                                chordDraft = chord.c
+                            },
+                    )
+                }
+                val selected = selectedIndex
+                if (selected != null && line.chords.none { it.i == selected }) {
+                    val x = layout.getHorizontalPosition(selected.coerceIn(0, line.lyrics.length), true)
+                    Box(
+                        modifier = Modifier
+                            .offset { IntOffset(x.roundToInt() - 1, -8) }
+                            .width(2.dp)
+                            .height(20.dp)
+                            .background(MaterialTheme.colorScheme.primary),
+                    )
+                }
+            }
         }
+
+        selectedIndex?.let { idx ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(top = 8.dp),
+            ) {
+                OutlinedTextField(
+                    value = chordDraft,
+                    onValueChange = { chordDraft = it },
+                    modifier = Modifier.width(100.dp),
+                    singleLine = true,
+                    placeholder = { Text("Chord") },
+                )
+                Spacer(Modifier.width(8.dp))
+                TextButton(
+                    onClick = {
+                        if (chordDraft.isNotBlank()) {
+                            val without = line.chords.filterNot { it.i == idx }
+                            onChange(line.copy(chords = (without + ChordAnchor(idx, chordDraft)).sortedBy { it.i }))
+                        }
+                        selectedIndex = null
+                    },
+                ) { Text("Save") }
+                if (line.chords.any { it.i == idx }) {
+                    TextButton(
+                        onClick = {
+                            onChange(line.copy(chords = line.chords.filterNot { it.i == idx }))
+                            selectedIndex = null
+                        },
+                    ) { Text("Remove") }
+                }
+                TextButton(onClick = { selectedIndex = null }) { Text("Cancel") }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
         OutlinedTextField(
             value = fieldValue,
             onValueChange = {
                 fieldValue = it
                 if (it.text != line.lyrics) onChange(line.copy(lyrics = it.text))
             },
+            label = { Text("Lyrics") },
             modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("Lyrics") },
         )
         Spacer(Modifier.height(4.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            for (chord in line.chords) {
-                Card(
-                    modifier = Modifier.padding(end = 6.dp),
-                    onClick = { onChange(line.copy(chords = line.chords - chord)) },
-                ) {
-                    Text(chord.c, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
-                }
-            }
-            OutlinedTextField(
-                value = chordInput,
-                onValueChange = { chordInput = it },
-                modifier = Modifier.width(90.dp),
-                singleLine = true,
-                placeholder = { Text("Chord") },
-            )
-            TextButton(
-                onClick = {
-                    if (chordInput.isNotBlank()) {
-                        val at = fieldValue.selection.start.coerceIn(0, line.lyrics.length)
-                        val updatedChords = (line.chords + ChordAnchor(at, chordInput)).sortedBy { it.i }
-                        onChange(line.copy(chords = updatedChords))
-                        chordInput = ""
-                    }
-                },
-            ) { Text("Add") }
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = onDelete) { Text("Delete line") }
-        }
+        TextButton(onClick = onDelete) { Text("Delete line") }
     }
+}
+
+@Composable
+private fun ChordChip(text: String, highlighted: Boolean, modifier: Modifier = Modifier) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        fontWeight = FontWeight.Bold,
+        color = if (highlighted) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onPrimaryContainer,
+        modifier = modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(
+                if (highlighted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer,
+            )
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    )
 }
 
 @Composable

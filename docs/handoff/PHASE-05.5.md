@@ -126,6 +126,84 @@ unaddressed (`Modifier.navigationBarsPadding()` or equivalent) — now
 confirmed to recur on every bottom-pinned button row across the app, not
 a one-off.
 
+## Second pass, same day — chord UI redesign + crash fixes (2026-07-30)
+
+User feedback after using the first version: the chord-placement UI was
+"absolutely atrocious" — no visual way to see or control where a chord
+would land before committing it (place cursor in an invisible position in
+one field, type the chord name into an unrelated field, hope it landed
+where intended). Also reported two crashes: one adding a line to a song,
+one recording a new Scratchpad track and playing it back.
+
+**Chord placement, fully redesigned.** `LineEditor` now renders the
+lyrics as tappable text (`Modifier.pointerInput` + `detectTapGestures`),
+using `TextLayoutResult.getOffsetForPosition` to translate the tap into
+a character index and `TextLayoutResult.getHorizontalPosition` to
+position each chord chip exactly above its target character — the same
+`i`-is-a-character-index anchor model the wire format already mandates,
+just with an actually-visual way to control it. Tapping shows a caret
+marker at the exact target position and an inline chord-name field with
+Save/Remove/Cancel right there; tapping an existing chip re-opens it
+pre-filled. **Verified on device**: tapped mid-word, caret landed exactly
+there; typed "G", tapped Save, the chip rendered exactly above the tapped
+word; confirmed correct behavior across several (imprecise, adb-scripted)
+taps. Chip padding also increased (6dp/2dp → 10dp/8dp) after the first
+attempt's tap target proved too small to hit reliably.
+
+**Crash investigation.** Found one real crash in logcat
+(`SongStorage.save` → `FileNotFoundException`), but its actual cause was
+self-inflicted during this session's own testing (an adb `rm -rf` on the
+songs directory while an editor session was still alive with a pending
+debounced save) — not something a real user could trigger. Still fixed
+defensively: **`SongStorage.save()` now calls `songsDir.mkdirs()`**
+before writing, so a missing directory (however it got that way) no
+longer crashes the save.
+
+Could not reproduce either of the user's two reported crashes despite
+substantial effort — repeated single-line and multi-line "add line"
+attempts, and single-track, two-track-overdub, and mixed-playback
+Scratchpad record/play sequences, including a mid-recording
+navigate-away-and-back scenario, all completed cleanly. Two real,
+independently-justified fixes were made anyway:
+
+- **`SongEditorScreen`'s `LineEditor` had a genuine Compose anti-pattern**:
+  it wrote to a `MutableState` directly during composition
+  (`if (fieldValue.text != line.lyrics) { fieldValue = ... }`, evaluated
+  on every recomposition) instead of via a proper side effect. This is a
+  known crash/infinite-recomposition risk specifically when multiple
+  instances of a composable recompose together — exactly what "add
+  another line" does to every `LineEditor` in the list at once — and is
+  the kind of timing-sensitive bug adb's slow, deliberate scripted taps
+  are unlikely to trigger even though rapid real typing might. Fixed by
+  moving the sync into `LaunchedEffect(line.lyrics)`, the correct pattern
+  already used elsewhere in this codebase.
+- **`ScratchpadScreen` never stopped an in-progress recording if the user
+  left the screen mid-take** — only the explicit "Stop recording" button
+  called `engine.stopRecording()`. Navigating away (or the Activity being
+  torn down) left the native writer thread and RT engine mode dangling
+  indefinitely; a later `armRecording()` call does clean up a stale
+  session first, but nothing guaranteed one would ever be made, and
+  attempting playback/export against a still-Recording engine is exactly
+  the kind of state this project should never be able to enter. Fixed
+  with a `DisposableEffect` that calls `engine.stopRecording()` (and stops
+  the foreground service) on final disposal if a recording was still in
+  flight.
+
+**Honest status**: the chord UI fix is fully verified and clearly the
+right redesign regardless of the crash question. The two crash fixes are
+well-justified by code review (both are real bugs, not guesses) but
+neither was confirmed against the user's actual crash by reproducing it
+first — if either recurs, the exact repeat steps (especially anything
+involving rapid typing immediately before/after a structural change, for
+the editor; or backgrounding/navigating mid-recording, for Scratchpad)
+would help confirm or rule out these fixes as the actual cause.
+
+**Not done**: PDF import was explicitly ruled out of scope for the
+Android app per user direction — nothing to do here (it was never built;
+Phase 9's plain-text/PDF import work applies to the desktop app, and
+Android's own Phase 9 scope should be revisited with this in mind when
+that phase starts).
+
 ## What's left (deliberately deferred, not bugs)
 
 - **No chord-diagram rendering or `customChords` editing** — Phase 8's
@@ -133,9 +211,10 @@ a one-off.
 - **No line reordering** — lines can be added (always at the end) and
   deleted, not moved. A real drag-to-reorder is more Phase 8 "budget
   real time for typography" territory than a Phase 5.5 MVP concern.
-- **Chord editing is remove-only** — to change an existing chord's name,
-  delete it and add a new one; there's no in-place rename/tap-to-edit
-  yet.
+- ~~Chord editing is remove-only~~ — superseded by the second pass:
+  tapping an existing chip re-opens it pre-filled for rename or removal.
+  Moving a chord to a *different* character still means remove + re-place,
+  not drag — a real drag-to-reposition is more Phase 8 territory.
 - **No meta (Key/BPM/Capo/Tuning) UI fields** — the model and the import
   path both carry this data correctly (verified above), but there's no
   way to view or hand-edit it directly in the editor screen yet, only
