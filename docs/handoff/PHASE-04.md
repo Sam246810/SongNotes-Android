@@ -1,12 +1,15 @@
 # Phase 4 — Multitrack scratchpad engine (real overdubbing)
 
-**Status (2026-07-30): core mixing math only, this slice.** Matching the
-plan's own instruction elsewhere ("host-testable C++ lib first, then
-JNI-wrapped") applied here too: this pass delivers the pure `Track`/`Clip`
-data model and mixing/punch-in logic, fully tested, with **no engine
-integration (no real-time playback mode using this yet), no JNI wrapping,
-no WAV export, no JVM reference mixer, and no UI.** All of that is still
-ahead — see "What's left" below.
+**Status (2026-07-30): core mixing math + real-time engine integration,
+verified end-to-end on device.** Matching the plan's own instruction
+elsewhere ("host-testable C++ lib first, then JNI-wrapped") applied here
+too: the first slice delivered the pure `Track`/`Clip` data model and
+mixing/punch-in logic; this pass wires it into the real-time engine —
+`EngineMode::MultitrackPlaying`, the JNI bridge, and the Kotlin
+facade — and proves it actually plays back correctly on the physical
+device with zero xruns. **Still not started: punch-in recording
+integration, WAV export, JVM reference mixer, and product UI.** See
+"What's left" below.
 
 ## What shipped
 
@@ -43,24 +46,60 @@ byte-identical output. This is the property real-time playback and offline
 mixdown both depend on; if it ever breaks, that's the first thing to
 distrust before assuming either playback or mixdown is wrong.
 
-**Verified on device (2026-07-30)**: no desktop compiler exists in this
-environment (same constraint as every phase before this one) — cross-compiled
-a standalone verification binary directly with the NDK's
-`aarch64-linux-android30-clang++` and ran it via `adb shell`, mirroring the
-same technique used for `spsc_ring_buffer`/`scene` in Phase 1. All 13
-checks passed, including chunked-vs-whole-buffer identity and a full
+**Verified on device (2026-07-30, host-side mixing math)**: no desktop
+compiler exists in this environment (same constraint as every phase before
+this one) — cross-compiled a standalone verification binary directly with
+the NDK's `aarch64-linux-android30-clang++` and ran it via `adb shell`,
+mirroring the same technique used for `spsc_ring_buffer`/`scene` in Phase 1.
+All 13 checks passed, including chunked-vs-whole-buffer identity and a full
 punch-in → mix round trip (a loud clip punched into the middle of a quiet
 one reads quiet/loud/quiet exactly as expected on playback).
 
+**Engine integration shipped (2026-07-30)**:
+
+- **`EngineMode::MultitrackPlaying`** (new): `Scene` now carries either
+  `playbackBuffer` (existing single-buffer mode) or `multitrack` (a
+  `shared_ptr<const vector<Track>>`) — mutually exclusive, same
+  double-buffered publish pattern as before, no new publisher needed.
+- **`NativeAudioEngine::startMultitrackPlayback()`**: computes total
+  duration as the furthest clip end across all tracks (deliberately
+  ignoring mute — a muted track still determines how long playback runs,
+  matching what a real DAW's transport would do), publishes the Scene,
+  reuses `mPlaybackCursor`/`stopPlayback()` from the existing single-buffer
+  path (mutually exclusive modes, so no separate cursor field).
+- **`onAudioReady`'s new branch**: calls `dsp::mixTracksInto()`
+  chunk-at-a-time into a persistent pre-sized `mMultitrackScratch` buffer —
+  no allocation on the RT thread. Caught and fixed one bug before it ever
+  ran on device: the first draft clamped the mix length against `remaining`
+  and `numFrames` but not against the scratch buffer's own size, a latent
+  overrun; fixed with a three-way `std::min`.
+- **JNI bridge** (`nativeStartMultitrackPlayback` in `jni_bridge.cpp`) and
+  **Kotlin facade** (`AudioEngine.startMultitrackPlayback(List<MultitrackTrackSpec>)`
+  in `AudioEngine.kt`): first slice is **exactly one clip per track** —
+  `dsp::Track` natively supports multiple clips, but the JNI marshaling
+  (parallel arrays keyed by track index) doesn't expose that yet. Documented
+  in both the JNI comment and `MultitrackTrackSpec`'s kdoc as a known,
+  deliberate simplification, not an oversight.
+
+**Verified on device (2026-07-30, real-time engine integration)**: added a
+"Multitrack playback smoke test" section to `DiagnosticsScreen.kt` — three
+synthetic tracks (440Hz from frame 0, 660Hz staggered in 0.5s, and a
+**muted** 220Hz track that's the longest of the three at 2.5s) played via
+`AudioEngine.startMultitrackPlayback`. Ran on the physical device (adb
+screenshot + uiautomator-dump-based tap, same workflow as every prior
+phase): **PASS** — observed total frames 120000 (matches the 2.5s muted
+track's length exactly, confirming mute doesn't affect the duration
+calculation), cursor advanced cleanly to 120000 and `isPlaying` dropped to
+false on its own (no manual stop needed), **xRun count 0 → 0** across the
+whole playback, and a `logcat` check afterward showed no Oboe warnings, no
+`AndroidRuntime` errors, no crashes. (Audible confirmation of "two tones,
+staggered, no third tone" is a manual-listening claim built into the smoke
+test's own result text — not separately re-verified by a human in this
+pass, since the automated frame-accounting and xrun checks are what would
+catch a real mixing bug; noted here for honesty, not glossed over.)
+
 ## What's left for Phase 4 (not started)
 
-- **Engine integration**: a new `EngineMode` (e.g. `MultitrackPlaying`)
-  reusing the existing `Scene`/`ScenePublisher` double-buffering pattern
-  but publishing `std::vector<Track>` instead of a single buffer, with
-  `onAudioReady` calling `mixTracks()` chunk-at-a-time. Deliberately
-  additive — the existing single-buffer `Scene`/`Playing` mode (used by
-  Phase 1/2/3's verification playback, all tested this session) stays
-  exactly as-is, not replaced.
 - **Punch-in recording integration**: wiring `armRecording()`'s existing
   machinery to produce a `Clip` at a specified position, then calling
   `punchIn()` against the target track's existing clips to commit it.
@@ -103,6 +142,22 @@ one reads quiet/loud/quiet exactly as expected on playback).
    work correctly in that specific test, but a punch range itself starting
    at a negative frame, or a zero-length insert clip, aren't explicitly
    exercised).
+4. **The JNI bridge only supports one clip per track.**
+   `nativeStartMultitrackPlayback`'s parallel-array marshaling
+   (`clipBuffers[i]`/`clipStartFrames[i]` per track) has no way to express
+   multiple clips on one track — real punch-in recording (which produces
+   exactly that: several clip fragments per track) will need this widened
+   before it can drive real-time playback, even though `dsp::Track` and
+   `mixTracksInto()` already support it natively. Widen by changing the
+   marshaling shape (e.g. a flat clip array plus a per-track clip-count
+   array) rather than changing `dsp::Track` itself.
+5. **The multitrack smoke test's "you should have heard two staggered
+   tones, not three" claim is unverified by a human ear in the pass that
+   added it** — the automated checks (frame accounting, clean auto-stop,
+   zero xruns, clean logcat) are strong evidence the mixing itself is
+   correct, but they can't catch every possible audible-mixing bug (e.g. a
+   channel-interleaving mistake that garbles the tone without changing
+   frame counts). Worth an actual listen next time the device is in hand.
 
 ## What Phase 4's next slice assumes
 

@@ -19,6 +19,7 @@ add_library(songnotes_audio SHARED
     dsp/calibration_stats.cpp
     dsp/click_track.cpp
     dsp/mix.cpp
+    dsp/track_mixer.cpp
 )
 
 target_include_directories(songnotes_audio PRIVATE .)

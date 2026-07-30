@@ -4,11 +4,11 @@
 
 namespace songnotes::dsp {
 
-std::vector<float> mixTracks(const std::vector<Track> &tracks, int64_t startFrameInclusive,
-                              int64_t endFrameExclusive) {
+void mixTracksInto(const std::vector<Track> &tracks, int64_t startFrameInclusive, int64_t endFrameExclusive,
+                    float *out) {
     const int64_t length = std::max<int64_t>(0, endFrameExclusive - startFrameInclusive);
-    std::vector<float> out(static_cast<size_t>(length), 0.0f);
-    if (length == 0) return out;
+    if (length == 0) return;
+    std::fill(out, out + length, 0.0f);
 
     const bool anySoloed = std::any_of(tracks.begin(), tracks.end(), [](const Track &t) { return t.soloed; });
 
@@ -33,7 +33,15 @@ std::vector<float> mixTracks(const std::vector<Track> &tracks, int64_t startFram
             }
         }
     }
+}
 
+std::vector<float> mixTracks(const std::vector<Track> &tracks, int64_t startFrameInclusive,
+                              int64_t endFrameExclusive) {
+    const int64_t length = std::max<int64_t>(0, endFrameExclusive - startFrameInclusive);
+    std::vector<float> out(static_cast<size_t>(length), 0.0f);
+    if (length > 0) {
+        mixTracksInto(tracks, startFrameInclusive, endFrameExclusive, out.data());
+    }
     return out;
 }
 

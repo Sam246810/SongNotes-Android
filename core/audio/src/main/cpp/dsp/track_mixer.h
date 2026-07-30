@@ -32,12 +32,15 @@ struct Track {
     bool soloed = false;
 };
 
-// Mixes `tracks` into a single mono buffer covering exactly
-// [startFrameInclusive, endFrameExclusive) on the shared track timeline.
-// Overlapping clips within a track sum; no output clipping/limiting is
-// applied (a reference mixer wouldn't add one either, and this function's
-// whole reason to exist is being bit-for-bit reproducible against one —
-// see docs/handoff/PHASE-04.md).
+// Mixes `tracks` into `out[0, endFrameExclusive - startFrameInclusive)` —
+// `out` must already be sized/allocated by the caller to at least that
+// many frames; this function performs no allocation of its own, which is
+// what makes it safe to call from the RT audio callback (mixTracks() below
+// cannot be — it allocates its return vector on every call). Overlapping
+// clips within a track sum; no output clipping/limiting is applied (a
+// reference mixer wouldn't add one either, and this function's whole
+// reason to exist is being bit-for-bit reproducible against one — see
+// docs/handoff/PHASE-04.md).
 //
 // Solo semantics (a judgment call, not specified by the plan — documented
 // here since a different reading would break sample-identity against
@@ -46,11 +49,19 @@ struct Track {
 // while any solo is active (solo overrides mute) — this is the common DAW
 // convention, not "the" convention.
 //
-// This ONE function is used for both real-time playback (called
-// chunk-at-a-time from onAudioReady, per the plan's "same engine path"
-// principle applied here too) and offline mixdown (called once with
-// [0, totalFrames)) — deliberately not two independently-written mixing
-// paths that could silently drift apart.
+// This is the ONE mixing implementation meant to back both real-time
+// playback (called chunk-at-a-time from onAudioReady, per the plan's
+// "same engine path" principle applied here too) and offline mixdown
+// (called once with [0, totalFrames), via mixTracks() below) —
+// deliberately not two independently-written mixing paths that could
+// silently drift apart.
+void mixTracksInto(const std::vector<Track> &tracks, int64_t startFrameInclusive, int64_t endFrameExclusive,
+                    float *out);
+
+// Allocating convenience wrapper around mixTracksInto() — for offline
+// mixdown and host tests, where allocation is fine. Never call this from
+// the RT audio callback; use mixTracksInto() with a pre-sized scratch
+// buffer there instead.
 std::vector<float> mixTracks(const std::vector<Track> &tracks, int64_t startFrameInclusive,
                               int64_t endFrameExclusive);
 

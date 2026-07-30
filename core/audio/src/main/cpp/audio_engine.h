@@ -23,6 +23,7 @@ enum class EngineMode : int32_t {
     Playing = 3,
     TestTone = 4,
     Calibrating = 5, // Phase 3: plays a sweep from mScenePublisher while capturing the loopback into mRecordRing
+    MultitrackPlaying = 6, // Phase 4: mixes Scene::multitrack chunk-at-a-time via dsp::mixTracksInto
 };
 
 // Output-master duplex engine: one Oboe output stream owns the data
@@ -76,6 +77,15 @@ public:
     // verification playback (Calibration.buildPreMixedVerificationBuffer)
     // — no new RT-thread code needed for it.
     bool startPlaybackFromBuffer(const std::vector<float> &buffer);
+
+    // Phase 4: plays a multitrack mix in real time — dsp::mixTracksInto()
+    // called chunk-at-a-time from onAudioReady using a persistent
+    // pre-sized scratch buffer (mMultitrackScratch), never allocating on
+    // the RT thread. Total length is the furthest clip end across all
+    // tracks; auto-stops there, same as startPlaybackFromBuffer(). Shares
+    // stopPlayback()/mPlaybackCursor with the single-buffer Playing mode
+    // (mutually exclusive, so no separate cursor field is needed).
+    bool startMultitrackPlayback(const std::vector<dsp::Track> &tracks);
 
     void stopPlayback();
 
@@ -204,6 +214,17 @@ private:
     // of the capture.
     int64_t mCalibrationCaptureTargetFrames = 0;
     int64_t mCalibrationFramesCaptured = 0;
+
+    // Phase 4 multitrack playback: mMultitrackTotalFrames is set by
+    // startMultitrackPlayback() before the mode store, same handoff
+    // pattern as mPlaybackCursor above (which multitrack playback reuses
+    // as its own cursor too). mMultitrackScratch is sized once — to
+    // kMaxFramesPerCallback frames, mono — the first time it's needed and
+    // never resized afterward; onAudioReady writes into it via
+    // dsp::mixTracksInto() every callback, which performs no allocation of
+    // its own, keeping this RT-safe.
+    int64_t mMultitrackTotalFrames = 0;
+    std::vector<float> mMultitrackScratch;
 
     EngineStateBlock mState;
 

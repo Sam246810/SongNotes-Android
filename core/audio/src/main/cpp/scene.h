@@ -5,14 +5,22 @@
 #include <memory>
 #include <vector>
 
+#include "dsp/track_mixer.h"
+
 namespace songnotes {
 
 // Immutable per-take playback scene: the samples currently playing back
-// through the output stream. Phase 4 adds real multitrack graphs (multiple
-// clips, gain/mute/solo); Phase 1 establishes the double-buffered pointer
-// pattern at its smallest possible scope — one buffer, or none.
+// through the output stream. Two mutually-exclusive payloads, one per
+// playback mode (EngineMode::Playing uses playbackBuffer; ::MultitrackPlaying
+// uses multitrack) — both live on the same Scene/ScenePublisher rather than
+// each mode getting its own publisher, since a Scene is already just an
+// immutable snapshot published atomically and only one mode is ever active
+// at a time. Phase 1 established the double-buffered pointer pattern at
+// its smallest possible scope (one buffer, or none); Phase 4 is the real
+// multitrack graph that comment always pointed at.
 struct Scene {
     std::shared_ptr<const std::vector<float>> playbackBuffer; // mono f32; null = silence
+    std::shared_ptr<const std::vector<dsp::Track>> multitrack; // null unless MultitrackPlaying
 };
 
 // A tiny poor-man's RCU. The audio (RT) thread only ever dereferences the

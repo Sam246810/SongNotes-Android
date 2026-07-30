@@ -6,6 +6,7 @@
 
 using songnotes::dsp::Clip;
 using songnotes::dsp::mixTracks;
+using songnotes::dsp::mixTracksInto;
 using songnotes::dsp::punchIn;
 using songnotes::dsp::Track;
 
@@ -131,6 +132,24 @@ TEST(TrackMixer, ChunkedMixingMatchesWholeBufferMixing) {
     ASSERT_EQ(chunked.size(), wholeBuffer.size());
     for (size_t i = 0; i < wholeBuffer.size(); i++) {
         EXPECT_FLOAT_EQ(chunked[i], wholeBuffer[i]) << "mismatch at frame " << i;
+    }
+}
+
+TEST(TrackMixer, NonAllocatingVariantMatchesAllocatingVariant) {
+    // mixTracks() is a thin wrapper around mixTracksInto() -- this pins
+    // that relationship down explicitly, since mixTracksInto() is the one
+    // actually safe to call from the RT audio callback (no internal
+    // allocation) and it's important the two never quietly diverge.
+    Track track;
+    track.clips.push_back(fullClip(makeBuffer({1.0f, 2.0f, 3.0f, 4.0f}), 0));
+    auto viaAllocating = mixTracks({track}, 0, 4);
+
+    std::vector<float> viaNonAllocating(4, -999.0f); // poisoned, to prove it gets fully overwritten
+    mixTracksInto({track}, 0, 4, viaNonAllocating.data());
+
+    ASSERT_EQ(viaAllocating.size(), viaNonAllocating.size());
+    for (size_t i = 0; i < viaAllocating.size(); i++) {
+        EXPECT_FLOAT_EQ(viaAllocating[i], viaNonAllocating[i]) << "mismatch at frame " << i;
     }
 }
 

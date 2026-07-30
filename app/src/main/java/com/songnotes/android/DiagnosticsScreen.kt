@@ -143,6 +143,137 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         EngineCalibrationCaptureSection(engine)
         CalibrationSessionSection(engine)
         VerificationPlaybackSmokeTestSection(engine)
+        MultitrackPlaybackSmokeTestSection(engine)
+    }
+}
+
+/**
+ * Phase 4 first slice: real-time multitrack playback through
+ * [AudioEngine.startMultitrackPlayback]. Three synthetic tracks at
+ * different pitches/offsets/gains, one of them muted — audibly, only two
+ * tones (440Hz and 660Hz, staggered) should be heard; the muted 220Hz track
+ * exists to prove muting doesn't crash the mix AND that a muted track's
+ * clip still counts toward the engine's total-duration/auto-stop
+ * calculation (matches `startMultitrackPlayback`'s totalFrames computation
+ * in audio_engine.cpp, which deliberately ignores mute/solo). The
+ * automated pass/fail below checks total-frame accounting and clean
+ * auto-stop; actually hearing two staggered tones (not three, not muffled)
+ * is a manual confirmation on top of that.
+ */
+@Composable
+private fun MultitrackPlaybackSmokeTestSection(engine: AudioEngine) {
+    val context = LocalContext.current
+    var hasRecordPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    var isPlaying by remember { mutableStateOf(false) }
+    var resultText by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun sine(freqHz: Double, lengthSeconds: Double, sampleRate: Double, amplitude: Float): FloatArray {
+        val frameCount = (sampleRate * lengthSeconds).toInt()
+        return FloatArray(frameCount) { i ->
+            (kotlin.math.sin(2.0 * Math.PI * freqHz * i / sampleRate) * amplitude).toFloat()
+        }
+    }
+
+    fun runTest() {
+        resultText = null
+        val sampleRate = 48000.0
+        val tracks = listOf(
+            // 440Hz, from frame 0, 2.0s.
+            com.songnotes.core.audio.MultitrackTrackSpec(
+                buffer = sine(440.0, 2.0, sampleRate, 0.3f), startFrame = 0L, gain = 0.7f,
+            ),
+            // 660Hz, staggered in 0.5s, 1.5s long -> also ends at frame 96000.
+            com.songnotes.core.audio.MultitrackTrackSpec(
+                buffer = sine(660.0, 1.5, sampleRate, 0.3f), startFrame = 24_000L, gain = 0.5f,
+            ),
+            // 220Hz, muted, but the longest clip (2.5s) -> should be silent
+            // yet still drive the engine's total-duration/auto-stop frame count.
+            com.songnotes.core.audio.MultitrackTrackSpec(
+                buffer = sine(220.0, 2.5, sampleRate, 0.3f), startFrame = 0L, muted = true,
+            ),
+        )
+        val expectedTotalFrames = (sampleRate * 2.5).toInt() // driven by the muted track's length
+
+        if (!engine.startMultitrackPlayback(tracks)) {
+            resultText = "startMultitrackPlayback returned false — see Last error above."
+            return
+        }
+        isPlaying = true
+        val xRunBefore = engine.capabilities().xRunCount
+        scope.launch {
+            var observedTotal = 0
+            while (engine.state().isPlaying) {
+                observedTotal = engine.state().playbackTotalFrames
+                delay(50)
+            }
+            isPlaying = false
+            val finalState = engine.state()
+            val xRunAfter = engine.capabilities().xRunCount
+            val totalOk = observedTotal == expectedTotalFrames
+            // The engine doesn't reset the cursor on natural completion (only
+            // isPlaying flips false) — see the onAudioReady multitrack branch
+            // in audio_engine.cpp — so "stopped cleanly" means the cursor rode
+            // all the way to the end, not that it reset to 0.
+            val stoppedCleanly = !finalState.isPlaying && finalState.playbackFrame == expectedTotalFrames
+            val pass = totalOk && stoppedCleanly
+            resultText = buildString {
+                appendLine(if (pass) "PASS" else "FAIL — see values below")
+                appendLine("Observed total frames: $observedTotal (expected $expectedTotalFrames, ok=$totalOk)")
+                appendLine(
+                    "Stopped cleanly (auto-idle at cursor=$expectedTotalFrames): $stoppedCleanly " +
+                        "(actual cursor: ${finalState.playbackFrame})",
+                )
+                appendLine("xRun count: $xRunBefore -> $xRunAfter")
+                append(
+                    "Manual check: you should have heard a 440Hz tone from the start and a 660Hz " +
+                        "tone join 0.5s in, both stopping together at 2.0s, then ~0.5s more of silence " +
+                        "before playback fully stops at 2.5s. No third tone audible (220Hz is muted).",
+                )
+            }
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        hasRecordPermission = granted
+        if (granted) runTest() else resultText = "Microphone permission is required (duplex engine opens both streams)."
+    }
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Multitrack playback smoke test (Phase 4 first slice)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Plays 3 synthetic tracks (one muted) through AudioEngine.startMultitrackPlayback — " +
+            "real-time chunked mixing via dsp::mixTracksInto, not an offline mixdown.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isPlaying,
+        onClick = {
+            if (!hasRecordPermission) {
+                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            } else {
+                runTest()
+            }
+        },
+    ) {
+        Text(if (isPlaying) "Playing..." else "Run multitrack playback smoke test")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
     }
 }
 

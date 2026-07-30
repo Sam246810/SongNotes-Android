@@ -92,6 +92,24 @@ class AudioEngine {
     }
 
     /**
+     * Phase 4, first slice: real-time multitrack playback — one clip per
+     * track (see the JNI-side comment in `jni_bridge.cpp` for why). Mixing
+     * happens chunk-at-a-time inside the RT callback via
+     * `dsp::mixTracksInto`; this call itself just marshals the buffers
+     * across JNI once and returns immediately (mirrors
+     * [startPlaybackFromBuffer]'s synchronous, no-loader-thread shape).
+     */
+    fun startMultitrackPlayback(tracks: List<MultitrackTrackSpec>): Boolean {
+        if (!ensureCreated()) return false
+        val clipBuffers: Array<FloatArray> = Array(tracks.size) { tracks[it].buffer }
+        val startFrames = LongArray(tracks.size) { tracks[it].startFrame }
+        val gains = FloatArray(tracks.size) { tracks[it].gain }
+        val muted = BooleanArray(tracks.size) { tracks[it].muted }
+        val soloed = BooleanArray(tracks.size) { tracks[it].soloed }
+        return nativeStartMultitrackPlayback(handle, clipBuffers, startFrames, gains, muted, soloed)
+    }
+
+    /**
      * Phase 3 calibration: plays [sweep] out through the same duplex engine
      * used for everything else, capturing the acoustic/electrical loopback
      * for `sweep.size + tailPaddingFrames` frames total. Poll [state] for
@@ -189,6 +207,14 @@ class AudioEngine {
     private external fun nativeStartPlayback(handle: Long, filePath: String): Boolean
     private external fun nativeStartPlaybackFromBuffer(handle: Long, buffer: FloatArray): Boolean
     private external fun nativeStopPlayback(handle: Long)
+    private external fun nativeStartMultitrackPlayback(
+        handle: Long,
+        clipBuffers: Array<FloatArray>,
+        clipStartFrames: LongArray,
+        trackGains: FloatArray,
+        trackMuted: BooleanArray,
+        trackSoloed: BooleanArray,
+    ): Boolean
     private external fun nativeStartCalibrationCapture(
         handle: Long,
         sweep: FloatArray,
@@ -214,3 +240,18 @@ class AudioEngine {
         }
     }
 }
+
+/**
+ * One track's worth of input to [AudioEngine.startMultitrackPlayback].
+ * First slice: exactly one clip per track, so this is flat (buffer +
+ * startFrame) rather than wrapping a clip list — matches the JNI marshaling
+ * in `jni_bridge.cpp`'s `nativeStartMultitrackPlayback`, which is the actual
+ * constraint. See docs/handoff/PHASE-04.md.
+ */
+data class MultitrackTrackSpec(
+    val buffer: FloatArray,
+    val startFrame: Long,
+    val gain: Float = 1.0f,
+    val muted: Boolean = false,
+    val soloed: Boolean = false,
+)

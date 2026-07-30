@@ -10,6 +10,7 @@
 
 #include "dsp/click.h"
 #include "dsp/sine_wave.h"
+#include "dsp/track_mixer.h"
 
 #define LOG_TAG "SongNotesAudioEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -300,11 +301,49 @@ bool NativeAudioEngine::startPlaybackFromBuffer(const std::vector<float> &buffer
     return ensureOutputStarted();
 }
 
+bool NativeAudioEngine::startMultitrackPlayback(const std::vector<dsp::Track> &tracks) {
+    if (!ensureStreamsOpen()) return false;
+    stopPlaybackInternal();
+    stopCalibrationInternal();
+    if (mLoaderThread.joinable()) {
+        mLoaderThread.join(); // same publish-race reasoning as startPlaybackFromBuffer()
+    }
+
+    // Sized here (calling/JNI thread), never on the RT thread — mirrors
+    // mInputScratch's "sized once, RT thread only touches" contract.
+    if (mMultitrackScratch.size() < static_cast<size_t>(kMaxFramesPerCallback)) {
+        mMultitrackScratch.assign(static_cast<size_t>(kMaxFramesPerCallback), 0.0f);
+    }
+
+    auto scene = std::make_shared<Scene>();
+    scene->multitrack = std::make_shared<std::vector<dsp::Track>>(tracks);
+
+    int64_t totalFrames = 0;
+    for (const auto &track : tracks) {
+        for (const auto &clip : track.clips) {
+            totalFrames = std::max(totalFrames, clip.startFrame + clip.lengthFrames);
+        }
+    }
+
+    mPlaybackCursor = 0; // reused across Playing/Calibrating/MultitrackPlaying — mutually exclusive modes
+    mMultitrackTotalFrames = totalFrames;
+    mState.playbackTotalFrames.store(static_cast<int32_t>(totalFrames), std::memory_order_relaxed);
+    mState.playbackFrame.store(0, std::memory_order_relaxed);
+    mState.isPlaying.store(1, std::memory_order_relaxed);
+    mScenePublisher.publish(scene);
+    mMode.store(static_cast<int32_t>(EngineMode::MultitrackPlaying), std::memory_order_release);
+
+    return ensureOutputStarted();
+}
+
 void NativeAudioEngine::stopPlayback() { stopPlaybackInternal(); }
 
 void NativeAudioEngine::stopPlaybackInternal() {
     auto expected = static_cast<int32_t>(EngineMode::Playing);
-    mMode.compare_exchange_strong(expected, static_cast<int32_t>(EngineMode::Idle));
+    if (!mMode.compare_exchange_strong(expected, static_cast<int32_t>(EngineMode::Idle))) {
+        expected = static_cast<int32_t>(EngineMode::MultitrackPlaying);
+        mMode.compare_exchange_strong(expected, static_cast<int32_t>(EngineMode::Idle));
+    }
     mState.isPlaying.store(0, std::memory_order_relaxed);
 }
 
@@ -569,6 +608,42 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
             mPlaybackCursor += toCopy;
             mState.playbackFrame.store(static_cast<int32_t>(mPlaybackCursor), std::memory_order_relaxed);
             if (mPlaybackCursor >= static_cast<int64_t>(buffer->size())) {
+                mMode.store(static_cast<int32_t>(EngineMode::Idle), std::memory_order_release);
+                mState.isPlaying.store(0, std::memory_order_relaxed);
+            }
+        }
+    } else if (mode == EngineMode::MultitrackPlaying) {
+        // dsp::mixTracksInto() writes into mMultitrackScratch (pre-sized,
+        // never reallocated here) — no allocation on this thread, unlike
+        // the allocating dsp::mixTracks() convenience wrapper, which must
+        // never be called from onAudioReady. Auto-stops at
+        // mMultitrackTotalFrames, mirroring Playing's own auto-stop at
+        // buffer end above, just against a precomputed total instead of a
+        // single buffer's size().
+        const Scene *scene = mScenePublisher.current();
+        if (scene->multitrack && mPlaybackCursor < mMultitrackTotalFrames) {
+            const int64_t remaining = mMultitrackTotalFrames - mPlaybackCursor;
+            // Clamped against the scratch buffer's own size too, not just
+            // numFrames — mMultitrackScratch is sized to kMaxFramesPerCallback
+            // once, up front, and mixTracksInto() has no bounds-checking of
+            // its own against the caller's buffer; this is the only thing
+            // standing between a callback larger than expected and an
+            // out-of-bounds write. Mirrors mInputScratch's own
+            // framesWanted clamp above (step 1).
+            const auto maxMixFrames = static_cast<int64_t>(mMultitrackScratch.size());
+            const auto toMix =
+                static_cast<int32_t>(std::min({remaining, static_cast<int64_t>(numFrames), maxMixFrames}));
+            dsp::mixTracksInto(*scene->multitrack, mPlaybackCursor, mPlaybackCursor + toMix,
+                                mMultitrackScratch.data());
+            for (int32_t frame = 0; frame < toMix; frame++) {
+                const float sample = mMultitrackScratch[static_cast<size_t>(frame)];
+                for (int32_t ch = 0; ch < outChannels; ch++) {
+                    out[frame * outChannels + ch] = sample;
+                }
+            }
+            mPlaybackCursor += toMix;
+            mState.playbackFrame.store(static_cast<int32_t>(mPlaybackCursor), std::memory_order_relaxed);
+            if (mPlaybackCursor >= mMultitrackTotalFrames) {
                 mMode.store(static_cast<int32_t>(EngineMode::Idle), std::memory_order_release);
                 mState.isPlaying.store(0, std::memory_order_relaxed);
             }
