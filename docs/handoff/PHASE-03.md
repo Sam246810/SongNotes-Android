@@ -465,6 +465,40 @@ go stale within the span of one interactive session, let alone across
 days. Whatever eventually surfaces calibration status to the user should
 probably show *when* it was last measured, not just that a value exists.
 
+## The wizard's verify-take step, verified on device (2026-07-30)
+
+`CalibrationWizardScreen` gained a "Verify — record a quick take" button on
+the Results step: Verifying (records 4-beat count-in + 2 bars through
+`AudioEngine.armRecording` directly, complete with its normal audible
+metronome, with the just-measured `calibrationOffsetFrames` applied) →
+reads the take back → `Calibration.buildPreMixedVerificationBuffer()` →
+VerifyPlayback (`CalibrationAudio.playPreMixed`) → back to Results, so the
+user can actually hear the correction rather than just read a number.
+
+**A real design question came up and is worth recording**: does recording
+this demo take violate Rule I ("the calibration ViewModel... has no
+reference to the metronome or transport API")? Resolved by re-reading what
+Rule I is actually protecting: it's specifically about the *sweep
+measurement* ViewModel not being able to schedule a click that competes
+with an in-flight calibration measurement. Recording a short demo take
+isn't calibration measurement — it's the same ordinary Phase 1/2 recording
+path with its normal metronome, just invoked from the wizard for
+demonstration, after measurement has already finished. So `Verifying` uses
+`engine.armRecording()` directly (with the metronome, correctly — a user
+needs something to perform against), while the *playback* that follows
+still goes exclusively through `CalibrationAudio.playPreMixed()` — that's
+where Rule I's actual guarantee (no independently-scheduled second click
+layered onto verification playback) continues to hold. Documented this
+reasoning in the file's own doc comment, not just here, so a future editor
+sees it before "simplifying" the mixed access pattern away.
+
+**Ran the complete verify flow on the physical device**: tapped Verify
+from Results → recording ran through count-in and 2 bars with the
+metronome audible → automatically stopped → pre-mixed buffer built and
+played back via `CalibrationAudio.playPreMixed` → returned cleanly to
+Results. Logcat showed a single clean stream reuse for the whole sequence,
+zero warnings or errors.
+
 ## What's left for Phase 3 (not started)
 
 Roughly in the order the plan's architecture section implies:
@@ -475,11 +509,6 @@ Roughly in the order the plan's architecture section implies:
   measure/apply to," not yet sufficient for e.g. invalidating a displayed
   calibration value if the route changes while a result is still on
   screen.
-- **The Rule A/B/C verify-playback step inside the wizard itself** —
-  recording a real short take, applying the calibration offset once at
-  commit (Rule C), and playing it back pre-mixed against a regenerated
-  click (Rule A/B) so the user can actually hear that calibration worked,
-  not just read a number.
 - **The manual slider fallback path**, needed on devices where AEC can't be
   defeated (the plan is explicit that on those devices, manual isn't a
   fallback, it's *the* path) — including Rule D's constraint that the

@@ -2,6 +2,7 @@ package com.songnotes.android
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.VibrationEffect
@@ -41,20 +42,31 @@ import androidx.core.content.ContextCompat
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.audio.AudioRoute
 import com.songnotes.core.audio.AudioRouteDetector
+import com.songnotes.core.audio.Calibration
 import com.songnotes.core.audio.CalibrationAudio
 import com.songnotes.core.audio.CalibrationSession
 import com.songnotes.core.audio.CalibrationStore
 import com.songnotes.core.audio.RealCalibrationAudio
+import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private const val kRepetitionCount = 5
 private const val kSampleRateHz = 48000.0
+private const val kVerifyBpm = 80.0
+private const val kVerifyBeatsPerBar = 4
+private const val kVerifyCountInBeats = 4
+private const val kVerifyRecordBeats = 8 // 2 bars of actual performance after count-in
 
 private sealed interface WizardStep {
     data object Intro : WizardStep
     data class BluetoothWarning(val route: AudioRoute) : WizardStep
     data class Running(val completed: Int, val total: Int, val lastPnrDb: Double?) : WizardStep
     data class Results(val result: CalibrationSession.Result, val route: AudioRoute) : WizardStep
+    data class Verifying(val secondsElapsed: Int, val totalSeconds: Int) : WizardStep
+    data object VerifyPlayback : WizardStep
     data class Saved(val route: AudioRoute, val offsetFrames: Double) : WizardStep
     data class Failed(val message: String) : WizardStep
 }
@@ -62,10 +74,23 @@ private sealed interface WizardStep {
 /**
  * The Phase 3 automatic-calibration wizard's primary flow — the manual
  * slider fallback is a separate screen (see docs/handoff/PHASE-03.md's
- * "What's left"). Talks to audio exclusively through [CalibrationAudio]
- * (Rule I) — never [AudioEngine] directly — so it is architecturally
- * incapable of scheduling a competing click no matter what a future edit
- * does to it.
+ * "What's left"). The sweep *measurement* step ([beginCalibration]) talks
+ * to audio exclusively through [CalibrationAudio] (Rule I) — never
+ * [AudioEngine] directly — so it is architecturally incapable of
+ * scheduling a competing click during measurement no matter what a future
+ * edit does to it.
+ *
+ * The [Verifying] step is a deliberate, narrower exception: it records a
+ * short demo take through [AudioEngine.armRecording] directly, complete
+ * with its normal audible metronome — this is not calibration
+ * *measurement* in Rule I's sense (nothing is being swept or measured
+ * here), it's the same ordinary Phase 1/2 recording path the ViewModel
+ * would use for any real take, just invoked from the wizard for
+ * demonstration, now with the just-measured offset applied. What Rule I
+ * actually still holds throughout: the *verification playback* that
+ * follows recording goes exclusively through
+ * [CalibrationAudio.playPreMixed] (Rules A/B/C), never a second,
+ * independently-scheduled click layered on top at playback time.
  *
  * Rules F/G ("every control laid out at mount in a constant-size slot;
  * state toggles enabled, never presence... nothing pops mid-flow") are
@@ -122,6 +147,52 @@ fun CalibrationWizardScreen(engine: AudioEngine, onDone: () -> Unit) {
         }
     }
 
+    fun beginVerification(result: CalibrationSession.Result, route: AudioRoute) {
+        val countInSeconds = kVerifyCountInBeats * 60.0 / kVerifyBpm
+        val recordSeconds = kVerifyRecordBeats * 60.0 / kVerifyBpm
+        val totalSeconds = countInSeconds + recordSeconds
+        step = WizardStep.Verifying(secondsElapsed = 0, totalSeconds = totalSeconds.toInt())
+        scope.launch {
+            val verifyFile = File(context.filesDir, "takes/calibration_verify.f32").also { it.parentFile?.mkdirs() }
+            context.startForegroundService(Intent(context, RecordingForegroundService::class.java))
+            val armed = engine.armRecording(
+                verifyFile.absolutePath, kVerifyBpm, kVerifyBeatsPerBar, kVerifyCountInBeats,
+                calibrationOffsetFrames = result.meanAcceptedDelayFrames,
+            )
+            if (!armed) {
+                context.stopService(Intent(context, RecordingForegroundService::class.java))
+                step = WizardStep.Results(result, route)
+                return@launch
+            }
+
+            val startTimeMs = System.currentTimeMillis()
+            while (true) {
+                val elapsedSeconds = (System.currentTimeMillis() - startTimeMs) / 1000.0
+                step = WizardStep.Verifying(elapsedSeconds.toInt(), totalSeconds.toInt())
+                if (elapsedSeconds >= totalSeconds) break
+                delay(150)
+            }
+            engine.stopRecording()
+            context.stopService(Intent(context, RecordingForegroundService::class.java))
+
+            val takeBytes = verifyFile.readBytes()
+            val take = FloatArray(takeBytes.size / 4)
+            ByteBuffer.wrap(takeBytes).order(ByteOrder.nativeOrder()).asFloatBuffer().get(take)
+
+            if (take.isEmpty()) {
+                step = WizardStep.Results(result, route)
+                return@launch
+            }
+
+            val mixed = Calibration.buildPreMixedVerificationBuffer(
+                take = take, sampleRate = kSampleRateHz, bpm = kVerifyBpm, beatsPerBar = kVerifyBeatsPerBar,
+            )
+            step = WizardStep.VerifyPlayback
+            calibrationAudio.playPreMixed(mixed) // Rule I boundary: playback goes only through here
+            step = WizardStep.Results(result, route)
+        }
+    }
+
     fun proceedPastPermissionCheck() {
         val route = AudioRouteDetector(context).currentInputRoute()
         if (route.isBluetooth) {
@@ -168,7 +239,10 @@ fun CalibrationWizardScreen(engine: AudioEngine, onDone: () -> Unit) {
                     step = WizardStep.Saved(current.route, current.result.meanAcceptedDelayFrames)
                 },
                 onRetry = { step = WizardStep.Intro },
+                onVerify = { beginVerification(current.result, current.route) },
             )
+            is WizardStep.Verifying -> VerifyingStep(current)
+            WizardStep.VerifyPlayback -> VerifyPlaybackStep()
             is WizardStep.Saved -> SavedStep(route = current.route, offsetFrames = current.offsetFrames, onDone = onDone)
             is WizardStep.Failed -> FailedStep(message = current.message, onRetry = { step = WizardStep.Intro })
         }
@@ -262,6 +336,7 @@ private fun ColumnScope.ResultsStep(
     route: AudioRoute,
     onSave: () -> Unit,
     onRetry: () -> Unit,
+    onVerify: () -> Unit,
 ) {
     val delayMs = result.meanAcceptedDelayFrames / kSampleRateHz * 1000.0
     Spacer(Modifier.weight(1f))
@@ -287,9 +362,54 @@ private fun ColumnScope.ResultsStep(
         Text("Retry")
     }
     Spacer(Modifier.height(12.dp))
+    OutlinedButton(onClick = onVerify, modifier = Modifier.fillMaxWidth()) {
+        Text("Verify — record a quick take")
+    }
+    Spacer(Modifier.height(12.dp))
     Button(onClick = onSave, modifier = Modifier.fillMaxWidth()) {
         Text("Save")
     }
+}
+
+@Composable
+private fun ColumnScope.VerifyingStep(state: WizardStep.Verifying) {
+    Spacer(Modifier.weight(1f))
+    // Same fixed-slot treatment as RunningStep — present from the instant
+    // this step mounts, only its fill/text change as recording proceeds.
+    Box(
+        modifier = Modifier
+            .size(160.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primary),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            "${state.secondsElapsed}s",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.onPrimary,
+        )
+    }
+    Spacer(Modifier.height(24.dp))
+    Text("Recording a quick take...", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Play or sing along with the click — we'll play it back afterward so you can hear " +
+            "how it lines up.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.weight(1f))
+}
+
+@Composable
+private fun ColumnScope.VerifyPlaybackStep() {
+    Spacer(Modifier.weight(1f))
+    Text("Playing it back...", style = MaterialTheme.typography.headlineSmall)
+    Spacer(Modifier.height(16.dp))
+    Text(
+        "One mixed track — your take and a reference click, already aligned. No count-in.",
+        style = MaterialTheme.typography.bodyMedium,
+    )
+    Spacer(Modifier.weight(1f))
 }
 
 @Composable
