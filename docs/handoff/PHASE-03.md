@@ -1,14 +1,16 @@
 # Phase 3 — Automatic acoustic loopback calibration
 
-**Status (2026-07-30): DSP core, JNI wrapping, engine integration, AEC/NS/AGC
-disabling, N-rep sessions with AEC-defeat detection, per-route storage,
-Bluetooth refusal, the Rules A/B/C/I plumbing, the wizard's full
-auto-calibration flow, the manual slider fallback, live route swapping,
-and the recommended-conditions notice are all done and verified on a
-physical device.** Only the tap-along+onset-detection manual path remains
-— see "What's left" below. `docs/PLAN.md` now holds the full plan text
-verbatim (it had nearly been lost to context compaction — this doc's
-"Rules A–I" summary below is no longer the only surviving copy).
+**Status (2026-07-30): Phase 3 is done.** DSP core, JNI wrapping, engine
+integration, AEC/NS/AGC disabling, N-rep sessions with AEC-defeat
+detection, per-route storage, Bluetooth refusal, the Rules A/B/C/I
+plumbing, the wizard's full auto-calibration flow, the manual slider
+fallback, live route swapping, the recommended-conditions notice, and the
+tap-along onset-detection manual path are all done and verified on a
+physical device — the last item was verified end-to-end with a real
+person tapping, not just synthesized data. `docs/PLAN.md` now holds the
+full plan text verbatim (it had nearly been lost to context compaction —
+this doc's "Rules A–I" summary below is no longer the only surviving
+copy).
 
 Phase 3 is the largest phase in the plan ("most of the pain in Phase 3,"
 per its own honest notes). The earliest pass through this phase matched the
@@ -649,17 +651,56 @@ pure-silence and too-few-matches edge cases both correct. Confirms the
 port, the JNI method-name mangling, and the array marshaling all work —
 not just that the C++ compiles.
 
-**Not yet done**: the actual user-facing screen (record a real take with
-a metronome, have the user physically tap along, detect the real taps,
-show/save the measured offset) — the DSP core above is what that screen
-will call, but building and wiring it is the next step, and unlike this
-smoke test, verifying *that* end-to-end needs a person actually tapping
-the device in rhythm, not synthesized data.
+## Tap-along calibration screen, verified end-to-end on device (2026-07-30)
+
+`TapAlongCalibrationScreen.kt` (new, `:app`) plus `TapAlongCalibrationRecorder.kt`
+(new, `:core:audio`) — the actual user-facing feature the DSP core above
+was built for. Reuses almost entirely existing infrastructure rather than
+adding new engine machinery: `AudioEngine.armRecording()` with its normal
+audible metronome (4-beat count-in + 8 steady clicks at 80bpm,
+`calibrationOffsetFrames = 0` since this is *measuring* an offset, not
+correcting for one already known), the same take-file read-back pattern
+`VerificationTakeRecorder` already uses, and `CalibrationStore`/
+`AudioRouteDetector` for route-keyed persistence, matching the sweep
+wizard and manual slider paths exactly. Scheduled tap times are computed
+directly from BPM (`i * 60/bpm` seconds for beat `i`, 0-indexed from the
+downbeat) rather than read from the engine — valid specifically because
+`calibrationOffsetFrames = 0` means the plan's "head-skip applied once at
+commit" design guarantees the stored take's frame 0 is exactly the
+transport downbeat, the same assumption `VerificationTakeRecorder`'s
+click regeneration already relies on.
+
+Intro → Recording (fixed-slot elapsed/total-seconds readout) → Results
+(measured ms + detected-N/8 count, Save; or a "not enough taps detected,
+try again" message if `estimateLatencyFromOnsets` returned null) → Saved
+→ Done. Distinct from `ManualCalibrationScreen`'s ear-adjusted slider —
+this is an objective measurement from the user's own taps, useful
+specifically when the room is too noisy for the sweep but the user can
+still tap reliably.
+
+**Ran the complete flow on the physical device with a real person
+tapping** (not synthesized data — that's what the DSP smoke test above
+already covers): recording completed, onset detection found enough
+confidently-matched taps, Results showed a measured latency, Save
+persisted it, and `songnotes_calibration_routes.xml` confirms **1066.0
+frames (22.2ms)** was written for the built-in-mic route — a plausible
+value consistent with this device's previously-documented baseline
+measurements elsewhere in this doc (~19–22ms without a heavier AEC
+session state). Returned cleanly to Diagnostics; zero crashes in logcat
+across the whole session.
+
+This closes the last item in `docs/PLAN.md`'s Phase 3 line item list
+("wizard obeying Rules A–I, manual slider" — plus this plan's own
+call-out to "keep the onset detector... for the manual tap-along path").
 
 ## What's left for Phase 3 (not started)
 
-- The tap-along screen's UI/engine-integration work described directly
-  above — the DSP core it depends on is done and verified.
+Nothing outstanding against the plan's own Phase 3 scope. Everything
+listed in `docs/PLAN.md`'s Phase 3 row — DSP core, JNI wrapping, engine
+integration, AEC/NS/AGC disabling, per-route storage, Bluetooth
+handling, Rules A–I, the wizard, the manual slider fallback, live route
+swapping, the recommended-conditions notice, and the tap-along path —
+is done and verified on a physical device.
 
 ## Manual slider fallback, verified on device (2026-07-30)
 

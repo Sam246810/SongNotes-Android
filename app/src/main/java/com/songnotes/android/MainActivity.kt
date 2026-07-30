@@ -18,7 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.songnotes.core.audio.AudioEngine
 
-private enum class Screen { Diagnostics, Wizard, Manual, Scratchpad }
+private enum class Screen { Diagnostics, Wizard, Manual, TapAlong, Scratchpad }
 
 class MainActivity : ComponentActivity() {
 
@@ -38,6 +38,8 @@ class MainActivity : ComponentActivity() {
                             CalibrationWizardScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
                         Screen.Manual ->
                             ManualCalibrationScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
+                        Screen.TapAlong ->
+                            TapAlongCalibrationScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
                         Screen.Scratchpad ->
                             ScratchpadScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
                         Screen.Diagnostics -> Column(modifier = Modifier.fillMaxSize()) {
@@ -58,6 +60,12 @@ class MainActivity : ComponentActivity() {
                                 modifier = Modifier.padding(horizontal = 24.dp),
                             ) {
                                 Text("Open manual calibration")
+                            }
+                            Button(
+                                onClick = { screen = Screen.TapAlong },
+                                modifier = Modifier.padding(horizontal = 24.dp),
+                            ) {
+                                Text("Open tap-along calibration")
                             }
                             DiagnosticsScreen(engine = audioEngine)
                         }
