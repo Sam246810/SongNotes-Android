@@ -17,7 +17,8 @@ A third pass the same night ported `formatFretsForInput`,
 this doc originally listed under "What's left" except the two that are
 genuinely out of Phase 5's scope (`lookupChord`'s voicing-data dependency,
 deferred to Phase 8; `dragMath`, which doesn't exist yet in the desktop
-repo).
+repo). A fourth pass hand-ported the plan's own requested "~30
+structural/ordering tests" on top of the golden fixtures — see below.
 
 ## What shipped
 
@@ -152,10 +153,58 @@ in the other codebase, since that's where the JS source of truth lives):
   still-unstarted clip drag/trim timeline UI, worth checking again when
   that work starts.
 
+**Fourth pass, same night — hand-ported structural/ordering tests**:
+
+`docs/PLAN.md`'s own Verification section asks for more than the golden
+fixtures: *"Hand-port only the ~30 structural/ordering tests — the
+`maj#7`-before-bare-`maj` rule deserves an explicit named test."* The
+fixture tests prove byte-identical output at far higher volume than any
+hand-written test could, but they don't document *why* a given input
+matters — a maintainer reading `ChordsGoldenFixtureTest` sees 1,319 cases
+pass, not which one is the load-bearing regression guard for the
+`maj#7`/`maj` ordering rule. This pass went through the desktop repo's
+`chords.test.js`, `transpose.test.js`, and `lyricsImport.test.js` and
+selected the tests that name a specific rule, ambiguity, or invariant —
+skipping tests that just restate flat input/output coverage the fixtures
+already give more thoroughly (e.g. "shifts a simple major chord up") —
+and ported them as descriptively-named Kotlin tests:
+
+- **`ChordsStructuralTest.kt`** (new, 16 tests): the `maj#7`-before-`maj`
+  ordering rule itself; jazz shorthand (`-`/`+`/`°`); enharmonic aliasing;
+  the `isChord` vs. `looksLikeChord` distinction (two different signals —
+  one gates diagram lookup, the other gates whether a word counts as
+  chord-track content at all); `customChords` override precedence (not
+  covered by any golden fixture, since nothing calls `tokenizeChordLine`
+  with a non-null `customChords` yet); the `alignChordsWithLyrics` safety
+  invariant that real trailing chord content is never trimmed, only
+  whitespace padding.
+- **`TransposeStructuralTest.kt`** (new, 9 tests): octave wraparound at
+  both ends; the dual independent root+slash-bass parse; flat-to-sharp
+  respelling on output; the full-octave (±12 semitone) identity; per-token
+  independence on a chords-track line (one unrecognized word must not
+  block its neighbors from transposing).
+- **`LyricsImportStructuralTest.kt`** (new, 21 tests): the flagship
+  ambiguity case (a lowercase `"a"` line must not misfire as chord `A`);
+  punctuation-terminated lines are never chord lines; the "never pair two
+  consecutive chord lines" and "instrumental chord cue doesn't swallow a
+  following section marker as its lyrics" structural pairing rules;
+  bracket vs. section-marker disambiguation; PDF-extraction left-margin
+  indent tolerance in header detection while leaving the surviving lines'
+  own indentation untouched.
+- Deliberately **not** ported: `lookupChord`/`CHORD_DB structure` tests
+  from `chords.test.js` (voicing data out of scope, same reasoning as the
+  third pass) and any test that's pure flat input/output coverage with no
+  named rule behind it — the golden fixtures already cover that ground at
+  higher volume than a hand-written test could add.
+- All 46 pass on the first attempt, zero failures — no bugs found by this
+  pass, which is the expected outcome given the same logic already passed
+  ~3,300 golden-fixture cases; the value here is documentation and
+  regression-guard naming, not new bug-finding.
+
 ## Verified
 
 `./gradlew :core:domain:test` — **all passing, zero failures**, across
-six test classes, 21 tests total:
+nine test classes, 67 tests total:
 - `ChordsGoldenFixtureTest`: 1 test, 1,319 `normalizeChordName` cases.
 - `TransposeGoldenFixtureTest`: 2 tests — 1,915 `transposeChordToken`
   cases and 49 `transposeChordsLine` cases.
@@ -167,11 +216,16 @@ six test classes, 21 tests total:
 - `ChordInputGoldenFixtureTest`: 3 tests — `formatFretsForInput`,
   `parseFretsInput` (structural `FretsInput` comparison, including
   null-vs-null and null-vs-non-null mismatches), and `alignChordsWithLyrics`.
+- `ChordsStructuralTest`: 16 tests (hand-ported, named rules).
+- `TransposeStructuralTest`: 9 tests (hand-ported, named rules).
+- `LyricsImportStructuralTest`: 21 tests (hand-ported, named rules).
 - `ClipMixerTest` (from the earlier JVM reference mixer work): 12 tests,
   unaffected.
 
-`./gradlew assembleDebug` also verified BUILD SUCCESSFUL after this pass
-— the full app still assembles cleanly with the new module content.
+`./gradlew assembleDebug` verified BUILD SUCCESSFUL after the third pass
+— the full app still assembles cleanly with the new module content. (The
+fourth pass only added test sources, so assembling the app again wasn't
+needed to confirm nothing broke.)
 
 All byte-identical to the JS fixtures on the first real attempt after
 fixing the one Kotlin-comment mistake below — including a genuinely
