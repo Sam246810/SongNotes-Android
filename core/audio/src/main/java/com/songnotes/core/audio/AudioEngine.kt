@@ -209,6 +209,25 @@ class AudioEngine {
     }
 
     /**
+     * Phase 4: offline mixdown export — mixes [tracks] with the same math
+     * as [startMultitrackPlayback] (`dsp::mixTracks`, the allocating
+     * wrapper; safe here since this runs on a normal thread, never the RT
+     * callback) and writes the result as a 32-bit float WAV file at
+     * [filePath]. Stateless: doesn't touch the live engine or [handle], so
+     * it's safe to call even if the engine was never started. Runs
+     * synchronously — call from a background dispatcher (e.g.
+     * `Dispatchers.Default`) for anything beyond a short test buffer, since
+     * mixing + encoding + file I/O for a full song isn't free.
+     */
+    fun exportMixdownToWav(filePath: String, tracks: List<MultitrackTrackSpec>, sampleRate: Int): Boolean {
+        val f = flattenTracks(tracks)
+        return nativeExportMixdownToWav(
+            filePath, sampleRate, f.clipBuffers, f.clipStartFrames, f.clipBufferOffsetFrames,
+            f.clipLengthFrames, f.trackClipCounts, f.trackGains, f.trackMuted, f.trackSoloed,
+        )
+    }
+
+    /**
      * Phase 3 calibration: plays [sweep] out through the same duplex engine
      * used for everything else, capturing the acoustic/electrical loopback
      * for `sweep.size + tailPaddingFrames` frames total. Poll [state] for
@@ -340,6 +359,18 @@ class AudioEngine {
         outClipBufferOffsetFrames: LongArray,
         outClipLengthFrames: LongArray,
     ): Int
+    private external fun nativeExportMixdownToWav(
+        filePath: String,
+        sampleRate: Int,
+        clipBuffers: Array<FloatArray>,
+        clipStartFrames: LongArray,
+        clipBufferOffsetFrames: LongArray,
+        clipLengthFrames: LongArray,
+        trackClipCounts: IntArray,
+        trackGains: FloatArray,
+        trackMuted: BooleanArray,
+        trackSoloed: BooleanArray,
+    ): Boolean
     private external fun nativeStartCalibrationCapture(
         handle: Long,
         sweep: FloatArray,

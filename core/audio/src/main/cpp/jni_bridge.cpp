@@ -4,6 +4,7 @@
 
 #include "audio_engine.h"
 #include "dsp/track_mixer.h"
+#include "dsp/wav_encoder.h"
 
 using songnotes::NativeAudioEngine;
 
@@ -272,6 +273,39 @@ Java_com_songnotes_core_audio_AudioEngine_nativePunchIn(
     // actually trigger — but if it ever does, a silently-truncated result
     // is far better than a crash.
     return static_cast<jint>(resultCount);
+}
+
+// Phase 4: offline mixdown export. Stateless — no engine handle needed,
+// same as nativePunchIn — since mixing (dsp::mixTracks, the ALLOCATING
+// wrapper; this runs on a normal thread, never onAudioReady, so
+// allocation is fine here) and WAV encoding are both pure, engine-
+// independent operations. totalFrames is computed the same way
+// startMultitrackPlayback's is (furthest clip end across all tracks).
+// tracks* use the same flat, track-major marshaling as
+// nativeStartMultitrackPlayback (see parseFlatTracks).
+JNIEXPORT jboolean JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeExportMixdownToWav(
+    JNIEnv *env, jobject, jstring filePath, jint sampleRate, jobjectArray clipBuffers,
+    jlongArray clipStartFrames, jlongArray clipBufferOffsetFrames, jlongArray clipLengthFrames,
+    jintArray trackClipCounts, jfloatArray trackGains, jbooleanArray trackMuted,
+    jbooleanArray trackSoloed) {
+    if (!filePath) return JNI_FALSE;
+    const auto tracks =
+        parseFlatTracks(env, clipBuffers, clipStartFrames, clipBufferOffsetFrames, clipLengthFrames,
+                         trackClipCounts, trackGains, trackMuted, trackSoloed);
+
+    int64_t totalFrames = 0;
+    for (const auto &track : tracks) {
+        for (const auto &clip : track.clips) {
+            totalFrames = std::max(totalFrames, clip.startFrame + clip.lengthFrames);
+        }
+    }
+    const std::vector<float> mixed = songnotes::dsp::mixTracks(tracks, 0, totalFrames);
+
+    const char *path = env->GetStringUTFChars(filePath, nullptr);
+    const bool ok = songnotes::dsp::writeWavFile(std::string(path), mixed, sampleRate, /*channelCount=*/1);
+    env->ReleaseStringUTFChars(filePath, path);
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL

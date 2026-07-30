@@ -1,19 +1,19 @@
 # Phase 4 — Multitrack scratchpad engine (real overdubbing)
 
 **Status (2026-07-30): the full punch-in loop works end to end on a real
-device** — record a real take while existing tracks play audibly, splice
-it in, play the combined result back. Four slices got here, each verified
-on device before the next started: (1) the pure `Track`/`Clip` data model
-and mixing/punch-in logic; (2) real-time engine integration
-(`EngineMode::MultitrackPlaying`); (3) widening the JNI bridge to N clips
-per track and exposing `dsp::punchIn` over JNI; (4) **real overdub
-recording** — `armRecording()` now optionally mixes existing tracks into
-the output during Recording, so a user can actually hear the song while
-recording a new part onto it, matching the plan's own "same engine path"
-principle (this reuses `dsp::mixTracksInto`, not a second mixing
-implementation). **Still not started: WAV export, JVM reference mixer,
-product UI, and a real "current project" state to replace the
-diagnostics screen's throwaway in-memory track lists.** See "What's left"
+device, and mixes now export to real WAV files.** Five slices got here,
+each verified on device before the next started: (1) the pure
+`Track`/`Clip` data model and mixing/punch-in logic; (2) real-time engine
+integration (`EngineMode::MultitrackPlaying`); (3) widening the JNI bridge
+to N clips per track and exposing `dsp::punchIn` over JNI; (4) **real
+overdub recording** — `armRecording()` now optionally mixes existing
+tracks into the output during Recording, so a user can actually hear the
+song while recording a new part onto it; (5) **offline mixdown to a real
+32-bit float WAV file** — `dsp::mixTracks` piped through a new,
+independently host-tested `dsp::encodeWavFloat32`/`writeWavFile`. **Still
+not started: the JVM reference mixer (Phase 4's actual cross-validation
+Done criterion), product UI, and a real "current project" state to replace
+every call site's throwaway in-memory track lists.** See "What's left"
 below.
 
 ## What shipped
@@ -188,12 +188,45 @@ the right times) is, as with the other multitrack tests, a manual-listening
 claim embedded in the result text, not separately confirmed by ear in this
 pass.
 
+**WAV export shipped (2026-07-30)**:
+
+- **`dsp/wav_encoder.{h,cpp}`** (new, host-tested): `encodeWavFloat32(samples,
+  sampleRate, channelCount)` — pure, allocating, no file I/O — encodes as
+  32-bit float WAV (RIFF/WAVE, fmt tag 3 = `WAVE_FORMAT_IEEE_FLOAT`), the
+  same layout libsndfile/soundfile write for float32 output. Chosen over
+  16-bit PCM specifically because Phase 4's Done criterion is
+  sample-identity against a JVM reference mixer — int16 quantization would
+  add a rounding step two independent implementations could disagree on
+  for reasons unrelated to whether the mixing math itself agrees.
+  `writeWavFile(path, samples, sampleRate, channelCount)` is the thin
+  file-writing wrapper actually used for export.
+- **`host/test_wav_encoder.cpp`**: GoogleTest cases covering header field
+  correctness (mono and stereo), exact sample round-tripping, the
+  empty-input edge case, and that `writeWavFile`'s on-disk bytes match
+  `encodeWavFloat32`'s in-memory bytes exactly.
+- **Verified on device**: cross-compiled a standalone verification binary
+  with the NDK's `aarch64-linux-android30-clang++` (needed `-static-libstdc++`
+  this time — the device's system libc++ was missing a `basic_ifstream`
+  symbol the statically-available one has; every prior Phase 1/4
+  cross-compiled binary happened not to need `std::ifstream`, so this
+  hadn't come up before) and ran it via `adb shell`. All 28 checks passed.
+- **JNI + Kotlin**: `nativeExportMixdownToWav` (stateless, no engine handle
+  needed — same pattern as `nativePunchIn`, since mixing + encoding are
+  both engine-independent) and `AudioEngine.exportMixdownToWav(filePath,
+  tracks, sampleRate)`. Computes `totalFrames` from the tracks' own clip
+  end frames (same logic `startMultitrackPlayback` already uses), calls
+  the allocating `dsp::mixTracks` (fine off the RT thread), encodes, writes.
+- **Verified on device (app level)**: a new "WAV export smoke test"
+  section in `DiagnosticsScreen.kt` mixes two overlapping synthetic tracks
+  with a hand-computed expected result (`[1.0, 1.5, 1.5]`), exports via
+  `AudioEngine.exportMixdownToWav`, then reads the written file back from
+  app storage and checks BOTH the WAV header fields and the actual sample
+  values against that hand computation. **PASS** on the physical device: a
+  real 56-byte file (44-byte header + 12 bytes of data) with every header
+  field correct and sample values matching exactly.
+
 ## What's left for Phase 4 (not started)
 
-- **Offline mixdown to WAV**: a function that calls `mixTracks(tracks, 0,
-  totalFrames)` once and writes a standard WAV file — needs a WAV encoder
-  (none exists in this codebase yet; likely small enough to hand-write
-  rather than pull in a dependency for one file format).
 - **JVM reference mixer**: a second, independently-written implementation
   of the same mixing logic in Kotlin, for the phase's actual Done
   criterion ("exported WAV is sample-identical to a JVM reference mixer
@@ -271,6 +304,21 @@ pass.
    splicing happens, playback works) but not frame-accurate sync; that
    would need either a loopback-capture measurement (like calibration's
    own sweep-based approach) or careful manual listening for drift.
+8. **`exportMixdownToWav`'s `sampleRate` param is caller-supplied, not
+   derived from anything.** Nothing checks it against the sample rate the
+   clips' buffers were actually captured/generated at — passing the wrong
+   value produces a structurally valid WAV file that plays back at the
+   wrong pitch/speed, silently. Once a real project model exists (see risk
+   5), the project's own sample rate should be threaded through here rather
+   than trusting each call site to pass the right constant.
+9. **WAV export has no UI or user-facing trigger yet** — it's exercised
+   only by the diagnostics smoke test's synthetic 3-sample buffer. Export
+   of a real, multi-minute mixdown hasn't been exercised for performance
+   (mixing + encoding + writing a full song, still all synchronous/
+   single-threaded) or storage-location correctness (`context.filesDir` is
+   fine for a diagnostics test but is app-private storage — a real export
+   feature will need to decide whether that's the actual target or if it
+   should go through `MediaStore`/a user-chosen location instead).
 
 ## What Phase 4's next slice assumes
 
@@ -282,3 +330,9 @@ pass.
 - The chunked-vs-whole-buffer identity test is the thing to run first
   after any future change to `mixTracks()`, before trusting either
   real-time playback or offline mixdown against it.
+- `dsp::encodeWavFloat32`'s 32-bit float format is what the JVM reference
+  mixer's own WAV output (once it exists) needs to match byte-for-byte —
+  if the reference mixer instead writes 16-bit PCM, sample-identity
+  comparison would need to happen before encoding (on the raw mixed float
+  buffers) rather than after, since the two encodings are never going to
+  agree bit-for-bit.

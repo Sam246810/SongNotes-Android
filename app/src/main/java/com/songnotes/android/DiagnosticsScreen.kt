@@ -148,6 +148,120 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         MultitrackPlaybackSmokeTestSection(engine)
         PunchInSmokeTestSection(engine)
         OverdubPunchInEndToEndSection(engine)
+        WavExportSmokeTestSection(engine)
+    }
+}
+
+/**
+ * Not a product feature — a one-tap check that [AudioEngine.exportMixdownToWav]
+ * actually links, mixes, encodes, and writes a real file on device. Two
+ * short synthetic tracks with a known, hand-computed expected mix (an
+ * overlap case, same shape as the host GoogleTest suite's own
+ * `OverlappingClipsWithinATrackSum`-style cases, just across two tracks
+ * instead of within one) — export, then read the file back from disk and
+ * check BOTH the WAV header fields and the actual sample values, not just
+ * "a file exists."
+ */
+@Composable
+private fun WavExportSmokeTestSection(engine: AudioEngine) {
+    val context = LocalContext.current
+    var resultText by remember { mutableStateOf<String?>(null) }
+    var isRunning by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    fun runTest(): String {
+        val sampleRate = 48000
+        val trackA = com.songnotes.core.audio.MultitrackTrackSpec(
+            clips = listOf(
+                com.songnotes.core.audio.MultitrackClipSpec(
+                    buffer = floatArrayOf(1.0f, 1.0f, 1.0f), startFrame = 0L,
+                ),
+            ),
+        )
+        val trackB = com.songnotes.core.audio.MultitrackTrackSpec(
+            clips = listOf(
+                com.songnotes.core.audio.MultitrackClipSpec(
+                    buffer = floatArrayOf(0.5f, 0.5f), startFrame = 1L,
+                ),
+            ),
+        )
+        // frame 0: A only = 1.0. frames 1-2: A + B = 1.5.
+        val expectedMix = floatArrayOf(1.0f, 1.5f, 1.5f)
+
+        val outFile = File(context.filesDir, "exports/phase4_wav_export_test.wav")
+        outFile.parentFile?.mkdirs()
+        outFile.delete()
+
+        val exportOk = engine.exportMixdownToWav(outFile.absolutePath, listOf(trackA, trackB), sampleRate)
+        if (!exportOk) return "FAIL — exportMixdownToWav returned false. See Last error above."
+        if (!outFile.exists()) return "FAIL — exportMixdownToWav returned true but no file was written."
+
+        val bytes = outFile.readBytes()
+        val expectedDataSize = expectedMix.size * 4
+        val headerOk = bytes.size >= 44 &&
+            String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF" &&
+            String(bytes, 8, 4, Charsets.US_ASCII) == "WAVE" &&
+            String(bytes, 12, 4, Charsets.US_ASCII) == "fmt " &&
+            ByteBuffer.wrap(bytes, 20, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt() == 3 && // IEEE float
+            ByteBuffer.wrap(bytes, 22, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt() == 1 && // mono
+            ByteBuffer.wrap(bytes, 24, 4).order(ByteOrder.LITTLE_ENDIAN).int == sampleRate &&
+            ByteBuffer.wrap(bytes, 34, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt() == 32 && // bits/sample
+            String(bytes, 36, 4, Charsets.US_ASCII) == "data" &&
+            ByteBuffer.wrap(bytes, 40, 4).order(ByteOrder.LITTLE_ENDIAN).int == expectedDataSize
+
+        val samplesOk = headerOk && bytes.size == 44 + expectedDataSize
+        val actualSamples = if (samplesOk) {
+            FloatArray(expectedMix.size).also {
+                ByteBuffer.wrap(bytes, 44, expectedDataSize).order(ByteOrder.nativeOrder()).asFloatBuffer().get(it)
+            }
+        } else {
+            FloatArray(0)
+        }
+        val valuesOk = samplesOk && actualSamples.indices.all { abs(actualSamples[it] - expectedMix[it]) < 0.0001f }
+
+        val pass = headerOk && samplesOk && valuesOk
+        return buildString {
+            appendLine(if (pass) "PASS" else "FAIL — see values below")
+            appendLine("File: ${outFile.absolutePath} (${bytes.size} bytes)")
+            appendLine("Header fields correct: $headerOk")
+            appendLine("Data size matches expected ($expectedDataSize bytes): $samplesOk")
+            appendLine(
+                "Sample values: ${actualSamples.toList()} (expected ${expectedMix.toList()}, ok=$valuesOk)",
+            )
+        }
+    }
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("WAV export smoke test (Phase 4)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Mixes 2 overlapping synthetic tracks via AudioEngine.exportMixdownToWav, writes a real " +
+            "32-bit float WAV file to app storage, then reads it back and checks both the header " +
+            "fields and the actual mixed sample values against a hand-computed expectation.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isRunning,
+        onClick = {
+            isRunning = true
+            resultText = null
+            scope.launch {
+                val result = withContext(Dispatchers.Default) { runTest() }
+                resultText = result
+                isRunning = false
+            }
+        },
+    ) {
+        Text(if (isRunning) "Running..." else "Run WAV export smoke test")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
     }
 }
 
