@@ -499,23 +499,70 @@ played back via `CalibrationAudio.playPreMixed` → returned cleanly to
 Results. Logcat showed a single clean stream reuse for the whole sequence,
 zero warnings or errors.
 
+## Live route swapping, shipped but NOT verified on device (2026-07-30)
+
+**`AudioRouteMonitor`** (new, `:core:audio`) — the piece flagged below as
+"not started" as of the previous update, now implemented: live
+route-change notification backed by `AudioManager.registerAudioDeviceCallback`,
+exposing a `StateFlow<AudioRoute>` that updates whenever the OS reports an
+input device added or removed. Same `routeKey`/heuristic as
+`AudioRouteDetector`'s existing point-in-time query (`AudioRouteMonitor`
+uses that same detector internally) — only WHEN callers find out the
+route changed is new here, not WHAT counts as "the route."
+
+Wired into **`ManualCalibrationScreen`** — the plan's own example of what
+this was for ("invalidating a displayed calibration value if the route
+changes while a result is still on screen"): the screen now starts the
+monitor on composition (`DisposableEffect`, stopped on dispose) and
+collects `currentRoute` for the whole screen's lifetime, instead of a
+one-time `LaunchedEffect(Unit)` query at first composition. On a route
+change, the slider reloads to the new route's own stored calibration (or
+a sensible default if none exists) and a status message tells the user
+what happened, rather than silently continuing to show a value that
+belonged to a different route.
+
+**Explicitly NOT verified on a physical device.** This was written and
+built (`./gradlew assembleDebug` succeeds, `./gradlew :core:audio:testDebugUnitTest`
+and `:core:domain:test` both still pass) during a session where the
+phone was intentionally disconnected — the user wanted to sleep without
+needing to babysit device testing, so this shipped as reasoned-through,
+carefully-written code with zero on-device confirmation, a deliberate
+and disclosed exception to this project's usual "verify on device before
+calling it done" bar. Specifically unconfirmed:
+- Whether `AudioDeviceCallback.onAudioDevicesAdded`/`onAudioDevicesRemoved`
+  actually fire promptly (or at all, on this specific device/Android
+  version) for a real route change — headphones plugged in, Bluetooth
+  connected.
+- Whether `AudioManager.getDevices()` reflects the new device set by the
+  time the callback fires, or whether there's a race where the callback
+  fires before the device list updates (the implementation assumes not).
+- Whether `registerAudioDeviceCallback`'s `Handler` parameter (main
+  thread `Looper` here) causes any issue given the callback triggers a
+  `StateFlow` update, which a Composable then collects.
+- The actual UX of the reload-on-change behavior in `ManualCalibrationScreen`
+  — does the status message appear at a sensible time relative to the
+  slider visibly jumping, is it confusing mid-`Test` recording, etc.
+
+**Next device session**: plug in wired headphones (or connect Bluetooth)
+while `ManualCalibrationScreen` is open and confirm the slider/status
+text actually update — that's the whole verification this needs.
+
 ## What's left for Phase 3 (not started)
 
 Roughly in the order the plan's architecture section implies:
 
-- **AudioDeviceCallback-driven route swapping** — `AudioRouteDetector`
-  above is a point-in-time query called right before a capture starts, not
-  a live listener. Fine for "what route is this capture about to
-  measure/apply to," not yet sufficient for e.g. invalidating a displayed
-  calibration value if the route changes while a result is still on
-  screen.
 - **Recommended-minimum-specs notice** and the Bluetooth-latency warning
   copy — product/content work, not DSP.
 - **Porting the plan's other-described manual path** (tap-along +
   onset-detection, reusing the intent — not the code — of the web app's
   dead `detectOnsets`/`estimateLatencyFromOnsets` module) is still not
   done; see "Manual slider fallback" below for what shipped instead and
-  why it's a different, simpler mechanism than that one.
+  why it's a different, simpler mechanism than that one. Real DSP work —
+  this environment's "host-testable C++" verification has always meant
+  cross-compiling for ARM64 and running on the physical device via adb
+  (no desktop C++ compiler here), so this specifically needs the device
+  connected to make any real progress on, unlike the route-monitoring
+  work above.
 
 ## Manual slider fallback, verified on device (2026-07-30)
 
@@ -576,6 +623,14 @@ same route) that exactly **7200.00 frames** was persisted — precisely
    validate input lengths once real engine integration exists, since a
    malformed recording would currently just produce a meaningless peak
    rather than an explicit error.
+4. **`AudioRouteMonitor` (live route swapping) is entirely unverified on
+   a physical device** — see its own section above for the full list of
+   specific unconfirmed assumptions (callback firing promptly and at all,
+   `getDevices()` freshness relative to the callback, main-`Looper`
+   interaction with the `StateFlow` it feeds). Written and built during a
+   deliberately phone-disconnected session; first thing to actually test
+   next time the device is in hand, before building anything else on top
+   of it.
 
 ## What Phase 3's next slice assumes
 

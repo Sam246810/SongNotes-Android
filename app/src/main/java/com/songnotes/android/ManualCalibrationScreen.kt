@@ -17,6 +17,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,12 +31,13 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.audio.AudioRoute
-import com.songnotes.core.audio.AudioRouteDetector
+import com.songnotes.core.audio.AudioRouteMonitor
 import com.songnotes.core.audio.CalibrationAudio
 import com.songnotes.core.audio.CalibrationStore
 import com.songnotes.core.audio.RealCalibrationAudio
 import com.songnotes.core.audio.VerificationTakeRecorder
 import java.io.File
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 private const val kSampleRateHz = 48000.0
@@ -62,6 +64,19 @@ private const val kMaxOffsetMs = 300f
  * recording, not calibration *measurement*, so nothing here needs Rule I's
  * narrow interface for the recording half. Only the verification playback
  * goes through [CalibrationAudio.playPreMixed] exclusively.
+ *
+ * Route-aware via [AudioRouteMonitor]: the displayed slider value tracks
+ * whichever route is *currently* detected, live — not just whatever was
+ * detected when the screen first opened. If the route changes while this
+ * screen is on screen (plugging in headphones mid-session, say), the
+ * slider reloads to that route's own stored calibration (or a sensible
+ * default if none exists yet) instead of silently continuing to show a
+ * value that belonged to a different route. This is the plan's own
+ * example of what live route-change notification was for — see
+ * `docs/handoff/PHASE-03.md`. **Not verified on a physical device yet**
+ * (see [AudioRouteMonitor]'s own doc comment) — compiles and type-checks,
+ * but the actual on-device behavior of the underlying
+ * `AudioDeviceCallback` hasn't been exercised.
  */
 @Composable
 fun ManualCalibrationScreen(engine: AudioEngine, onDone: () -> Unit) {
@@ -78,12 +93,26 @@ fun ManualCalibrationScreen(engine: AudioEngine, onDone: () -> Unit) {
     var statusText by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val calibrationAudio: CalibrationAudio = remember(engine) { RealCalibrationAudio(engine) }
+    val routeMonitor = remember(context) { AudioRouteMonitor(context) }
 
-    LaunchedEffect(Unit) {
-        val detected = AudioRouteDetector(context).currentInputRoute()
-        route = detected
-        CalibrationStore(context).load(detected.routeKey)?.let { stored ->
-            offsetMs = (stored.offsetFrames / kSampleRateHz * 1000.0).toFloat()
+    DisposableEffect(routeMonitor) {
+        routeMonitor.start()
+        onDispose { routeMonitor.stop() }
+    }
+
+    LaunchedEffect(routeMonitor) {
+        var previousRouteKey: String? = null
+        routeMonitor.currentRoute.collect { detected ->
+            route = detected
+            val stored = CalibrationStore(context).load(detected.routeKey)
+            offsetMs = stored?.let { (it.offsetFrames / kSampleRateHz * 1000.0).toFloat() } ?: 80f
+            // previousRouteKey is null only on the very first emission (the
+            // screen's initial load) -- only a REAL change gets a status
+            // message, not the ordinary "here's what we found" first load.
+            if (previousRouteKey != null && previousRouteKey != detected.routeKey) {
+                statusText = "Route changed to \"${detected.label}\" — reloaded calibration for this route."
+            }
+            previousRouteKey = detected.routeKey
         }
     }
 
