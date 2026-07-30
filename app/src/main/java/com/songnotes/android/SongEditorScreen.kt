@@ -434,7 +434,7 @@ private fun LineRow(
                 onValueChange = { chordsField = it; onChordsChange(it.text) },
                 textStyle = chordStyle.copy(color = ChordColor),
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next, autoCorrectEnabled = false),
                 keyboardActions = KeyboardActions(onNext = { lyricsFocus.requestFocus() }),
                 modifier = Modifier
                     .fillMaxWidth()
