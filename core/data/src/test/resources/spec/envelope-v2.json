@@ -1,0 +1,44 @@
+{
+  "passphrase": "correct horse battery staple",
+  "recoveryCode": "ABCDE-FGHJK-LMNPQ-RSTUV-WXYZ2",
+  "expectedDekBase64": "B3XClBiwXESoWpm2p21Y8YVvt8FmANadqb8AVV+cfJE=",
+  "envelope": {
+    "v": 2,
+    "dekId": "a86607843d8b2b37",
+    "alg": "AES-256-GCM",
+    "wraps": [
+      {
+        "id": "pass",
+        "type": "passphrase",
+        "kdf": {
+          "name": "Argon2id",
+          "memorySize": 65536,
+          "iterations": 3,
+          "parallelism": 1,
+          "hashLength": 32,
+          "salt": "w7pHOu6cmnC5VwcMA4C8Bw=="
+        },
+        "iv": "MOe1eg/pr9FbhIBA",
+        "ct": "ccmtgs9HG6FQmv4TmlvQyH73IDC3sW4vQz5ALCX5MOUOR7E6jp7HkCgrwH2TT36T"
+      },
+      {
+        "id": "recovery",
+        "type": "recovery-code",
+        "kdf": {
+          "name": "Argon2id",
+          "memorySize": 65536,
+          "iterations": 3,
+          "parallelism": 1,
+          "hashLength": 32,
+          "salt": "TSFkT8kJKTnDVkWDA8gG0g=="
+        },
+        "iv": "igfN8YunuLVp+a6u",
+        "ct": "97UO79RuOYSRhQPdn1W6NCKIgqkCrOWw1K5DcOfL+Y2jxdkmC5SYRjutCKq+qswA"
+      }
+    ],
+    "verifier": {
+      "iv": "/xVFK3Rcg5op5ws6",
+      "ct": "UnH5Z0u1kwYY5FJPudYxfiRUifxpahSN3V3gPtKuRoxzEFoAToo="
+    }
+  }
+}

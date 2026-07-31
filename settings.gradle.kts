@@ -19,3 +19,4 @@ rootProject.name = "SongNotes-Android"
 include(":app")
 include(":core:audio")
 include(":core:domain")
+include(":core:data")
