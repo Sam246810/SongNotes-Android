@@ -56,6 +56,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.songnotes.core.data.SongRepository
 import com.songnotes.core.domain.Song
 import com.songnotes.core.domain.SongLine
 import com.songnotes.core.domain.SongMeta
@@ -163,11 +164,20 @@ private fun findSplitIndex(text: String, style: TextStyle, maxWidthPx: Int, meas
 @Composable
 fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     val context = LocalContext.current
-    val storage = remember { SongStorage(context) }
-    val loadedSong = remember { storage.load(songId) ?: emptySong(songId) }
-    var title by remember { mutableStateOf(loadedSong.title) }
-    var meta by remember { mutableStateOf(loadedSong.meta) }
-    var lines by remember { mutableStateOf(songToEditorLines(loadedSong)) }
+    val repo = remember { SongRepository(context) }
+
+    // Room's load is suspend, unlike the old SongStorage's synchronous file read —
+    // nothing below renders until it resolves, same "loading state gates the real
+    // UI" pattern as everywhere else Compose talks to a database.
+    var loadedSong by remember { mutableStateOf<Song?>(null) }
+    LaunchedEffect(songId) {
+        loadedSong = repo.getById(songId) ?: emptySong(songId)
+    }
+    val loaded = loadedSong ?: return
+
+    var title by remember { mutableStateOf(loaded.title) }
+    var meta by remember { mutableStateOf(loaded.meta) }
+    var lines by remember { mutableStateOf(songToEditorLines(loaded)) }
     var pendingFocus by remember { mutableStateOf<PendingFocus?>(null) }
     var showImport by remember { mutableStateOf(false) }
     var fontScale by remember { mutableStateOf(1f) }
@@ -183,14 +193,14 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
         title = title,
         meta = meta,
         lines = lines.map { SongLine(id = it.id, lyrics = it.lyrics, chords = chordsLineToAnchors(it.chords)) },
-        createdAt = loadedSong.createdAt,
+        createdAt = loaded.createdAt,
         updatedAt = System.currentTimeMillis(),
     )
 
     fun persist() {
         scope.launch {
-            delay(400) // debounce — avoid a disk write on every keystroke
-            storage.save(currentSong())
+            delay(400) // debounce — avoid a DB write on every keystroke
+            repo.upsert(currentSong())
         }
     }
 
@@ -281,8 +291,10 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
             horizontalArrangement = Arrangement.End,
         ) {
             TextButton(onClick = {
-                storage.save(currentSong()) // flush immediately — don't lose the last debounced edit
-                onDone()
+                scope.launch {
+                    repo.upsert(currentSong()) // flush immediately — don't lose the last debounced edit
+                    onDone()
+                }
             }) { Text("Done", fontWeight = FontWeight.Bold, color = ChordColor) }
         }
         BasicTextField(

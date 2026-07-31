@@ -18,15 +18,20 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.songnotes.core.data.SongRepository
 import com.songnotes.core.domain.Song
+import java.util.UUID
+import kotlinx.coroutines.launch
 
 /**
  * Phase 5.5's entry screen: every locally-saved [Song], newest-edited
@@ -34,22 +39,32 @@ import com.songnotes.core.domain.Song
  * immediately — no separate "create" dialog, since an empty title/lyrics
  * is a perfectly valid starting state the editor already handles (the
  * user names it by just typing a title, same as any notes app).
+ *
+ * Phase 6: backed by [SongRepository] (Room + SQLCipher) instead of the
+ * original [SongStorage] (plain JSON files) — [songs] is fed by
+ * [SongRepository.observeAll]'s [kotlinx.coroutines.flow.Flow], so create/
+ * delete no longer need an explicit `refresh()`; Room's own change
+ * notification re-emits the list automatically.
  */
 @Composable
 fun SongListScreen(onOpenSong: (songId: String) -> Unit, onDone: () -> Unit) {
     val context = LocalContext.current
-    val storage = remember { SongStorage(context) }
-    var songs by remember { mutableStateOf(storage.list()) }
+    val repo = remember { SongRepository(context) }
+    val scope = rememberCoroutineScope()
+    var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
 
-    fun refresh() {
-        songs = storage.list()
+    LaunchedEffect(Unit) {
+        migrateFromSongStorageIfNeeded(context, repo)
+        repo.observeAll().collect { songs = it }
     }
 
     fun createSong() {
-        val now = System.currentTimeMillis()
-        val song = Song(id = storage.newSongId(), title = "", createdAt = now, updatedAt = now)
-        storage.save(song)
-        onOpenSong(song.id)
+        scope.launch {
+            val now = System.currentTimeMillis()
+            val song = Song(id = UUID.randomUUID().toString(), title = "", createdAt = now, updatedAt = now)
+            repo.upsert(song)
+            onOpenSong(song.id)
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
@@ -78,10 +93,7 @@ fun SongListScreen(onOpenSong: (songId: String) -> Unit, onDone: () -> Unit) {
                     SongRow(
                         song = song,
                         onOpen = { onOpenSong(song.id) },
-                        onDelete = {
-                            storage.delete(song.id)
-                            refresh()
-                        },
+                        onDelete = { scope.launch { repo.delete(song) } },
                     )
                     HorizontalDivider()
                 }
@@ -117,4 +129,19 @@ private fun SongRow(song: Song, onOpen: () -> Unit, onDelete: () -> Unit) {
             }
         }
     }
+}
+
+/**
+ * One-time (per app-start) import of any songs still sitting in the pre-
+ * Phase-6 [SongStorage] (plain JSON files under `filesDir/songs/`) into the
+ * new [SongRepository] (Room + SQLCipher). Idempotent via [SongRepository.upsert]
+ * matching on song id, so running this on every launch is harmless — no
+ * separate "have we migrated yet" flag needed at this scale. Old JSON files
+ * are deliberately left in place rather than deleted: they're inert once
+ * migrated (nothing reads them again), and leaving them is a strictly safer
+ * default than a delete bug quietly destroying the only copy of a song.
+ */
+private suspend fun migrateFromSongStorageIfNeeded(context: android.content.Context, repo: SongRepository) {
+    val legacySongs = SongStorage(context).list()
+    for (song in legacySongs) repo.upsert(song)
 }

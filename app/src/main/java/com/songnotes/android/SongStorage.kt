@@ -11,16 +11,17 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Persists [Song]s as one JSON file per song under `filesDir/songs/<id>.json` —
- * same "small scoped storage class, no front-loaded data layer" precedent
- * as [com.songnotes.core.audio.CalibrationStore] and
- * [com.songnotes.core.audio.MultitrackProjectStorage], just for song
- * documents instead of calibration numbers or audio clips. Deliberately
- * plain, unencrypted local JSON — matches Phase 5.5's own scope ("local
- * only, no audio, no sync"). Room + SQLCipher (Phase 6) will replace this
- * storage mechanism, not the [Song] shape itself, which is already wire-
- * format-v2-compatible (see `Song.kt`'s doc comment) specifically so that
- * migration is a storage-layer swap, not a data-model rewrite.
+ * Phase 5.5's original storage: one plain, unencrypted JSON file per song
+ * under `filesDir/songs/<id>.json`. Phase 6 replaced this as the live
+ * storage mechanism with `com.songnotes.core.data.SongRepository` (Room +
+ * SQLCipher, encrypted at rest, verified on-device — see
+ * `docs/handoff/PHASE-06.md`) — `SongListScreen.kt`'s own
+ * `SongEditorScreen`/`SongListScreen` no longer construct this class
+ * directly. It survives only as the source side of a one-time import
+ * (`migrateFromSongStorageIfNeeded` in `SongListScreen.kt`): any songs still
+ * sitting in these old JSON files from before a device upgraded past Phase 6
+ * get read once and upserted into the new encrypted database. Never delete
+ * this class while that migration path still exists.
  */
 class SongStorage(context: Context) {
     private val songsDir = File(context.filesDir, "songs").also { it.mkdirs() }

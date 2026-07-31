@@ -1,10 +1,11 @@
 # Phase 6 — Data layer + crypto
 
-**Status (2026-07-31): Second pass done — Room + SQLCipher + Keystore-wrapped DB
-key, verified on a physical device with genuine at-rest encryption confirmed
-(not just "the API didn't throw"). Not yet wired into `:app`'s live song list/
-editor screens (still on the pre-Phase-6 `SongStorage.kt` JSON files) — see
-"What's left" below.**
+**Status (2026-07-31): Third pass done — `:app`'s live song list/editor screens
+now run on Room + SQLCipher (not `SongStorage.kt`'s old JSON files), including a
+one-time migration of any pre-Phase-6 songs, all verified on a physical device.
+Remaining gaps (account-DEK Keystore/BiometricPrompt device wrap, Room
+migrations infra, 16 KB alignment) are Phase 7/11 territory or low-urgency at
+this scale — see "What's left" below.**
 
 Scoped deliberately: the plan's own crypto-format decisions (envelope v2's
 `wraps` list, `dekId`, `verifier`; Argon2id replacing PBKDF2) are the highest-risk,
@@ -235,13 +236,59 @@ methodology (Espresso/`AndroidJUnitRunner`) as a tangent — worth reconsidering
 once there's enough device-dependent surface area (Room migrations, Keystore
 edge cases) that manual `adb`-driven smoke tests stop scaling.
 
+## Third pass — wired `:app`'s live screens onto Room + SQLCipher (2026-07-31)
+
+**`SongListScreen.kt`/`SongEditorScreen.kt` now construct `SongRepository`
+instead of `SongStorage`** — the encrypted data layer built and verified
+standalone in the second pass is now what the actual song list and editor run
+on, not just a smoke-test section. Both call sites had synchronous,
+blocking-file-read assumptions baked in (`SongEditorScreen`'s
+`remember { storage.load(songId) }` at composition time, `SongListScreen`'s
+imperative `storage.list()` + manual `refresh()` after every write) that
+don't hold for Room's suspend-based API — restructured rather than papered
+over:
+
+- **`SongEditorScreen`** now loads via `LaunchedEffect(songId) { loadedSong =
+  repo.getById(songId) ?: emptySong(songId) }` into a nullable `mutableStateOf`,
+  with `val loaded = loadedSong ?: return` gating everything else — nothing
+  renders until the async load resolves, standard Compose loading-state
+  pattern. Both write call sites (`persist()`'s debounced autosave, "Done"'s
+  immediate flush) now call `repo.upsert(...)` inside `scope.launch { }`
+  instead of a direct blocking `storage.save(...)` call.
+- **`SongListScreen`** now sources `songs` from `repo.observeAll()` (a
+  `Flow<List<Song>>`) collected in a `LaunchedEffect` — Room's own change
+  notification re-emits the list automatically on every insert/update/delete,
+  so the old manual `refresh()` calls after create/delete are gone entirely,
+  not just redirected.
+- **`migrateFromSongStorageIfNeeded`** (new, in `SongListScreen.kt`): reads
+  every song still sitting in the old `SongStorage` JSON files and
+  `repo.upsert`s each one, run once per `SongListScreen` composition via
+  `LaunchedEffect(Unit)`. Idempotent (upsert matches by id), so running it on
+  every launch is harmless — no separate "have we migrated" flag needed at
+  this scale. Old JSON files are deliberately left in place rather than
+  deleted: inert once migrated, and leaving them is strictly safer than a
+  delete bug destroying the only copy of a song. `SongStorage.kt` itself is
+  kept (doc comment updated to explain its new role) purely as the read side
+  of this one-time import — nothing else constructs it anymore.
+
+**Verified on the physical device**, exercising the actual UI rather than a
+diagnostics smoke-test button: created a real song ("Room Test Song" /
+"Testing Room Persistence") through the normal editor flow, confirmed it
+appeared in the list immediately (no manual refresh), force-stopped and
+relaunched the app, confirmed both title and lyrics survived — then grepped
+the raw `.db`/`.db-wal` files directly for that exact plaintext and found
+nothing, confirming real user-entered content is encrypted at rest, not just
+the earlier smoke test's synthetic marker string. Separately verified the
+migration path specifically (not exercised by the second pass, since no
+legacy data existed at the time): hand-planted a legacy JSON file via `adb
+run-as`, relaunched, confirmed the song appeared correctly migrated into the
+encrypted database, and confirmed *that* content was equally unrecoverable
+from the raw DB bytes. Deleted both test songs afterward and removed the
+planted legacy JSON file; the song list and `files/songs/` directory are
+empty again.
+
 ## What's left (this phase, deliberately deferred)
 
-- **`:app`'s `SongListScreen`/`SongEditorScreen` still use `SongStorage.kt`**
-  (plain JSON files), not the new `SongRepository`/Room+SQLCipher. The
-  encrypted data layer exists and is verified standalone but the live app
-  hasn't been switched over — a deliberate, separate follow-up rather than a
-  risky big-bang swap in the same pass that built the DB itself.
 - **Android Keystore + `BiometricPrompt` *account DEK* device wrap** — not
   started. This is what envelope v2's `wraps[]` list was specifically shaped
   to accommodate (a device wrap is just another list entry), distinct from
