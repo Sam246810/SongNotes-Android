@@ -5,6 +5,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,6 +37,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
+import com.songnotes.core.data.DeviceWrap
+import com.songnotes.core.data.checkDekVerifier
+import com.songnotes.core.data.createAccountKeys
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.audio.AudioRouteDetector
 import com.songnotes.core.audio.Calibration
@@ -51,10 +57,13 @@ import com.songnotes.core.domain.ChordAnchor
 import com.songnotes.core.domain.Song
 import com.songnotes.core.domain.SongLine
 import com.songnotes.core.domain.SongMeta
+import javax.crypto.Cipher
+import kotlin.coroutines.resumeWithException
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.ByteBuffer
@@ -150,6 +159,7 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         CalibrationDspSmokeTestSection()
         OnsetDetectionSmokeTestSection()
         EncryptedDbSmokeTestSection()
+        DeviceWrapSmokeTestSection()
         EngineCalibrationCaptureSection(engine)
         CalibrationSessionSection(engine)
         VerificationPlaybackSmokeTestSection(engine)
@@ -1451,6 +1461,132 @@ private fun indexOfBytes(haystack: ByteArray, needle: ByteArray): Int {
         return i
     }
     return -1
+}
+
+@Composable
+private fun DeviceWrapSmokeTestSection() {
+    var resultText by remember { mutableStateOf<String?>(null) }
+    var isRunning by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val activity = LocalContext.current as FragmentActivity
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Device wrap smoke test (Phase 6 Keystore + BiometricPrompt)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Builds a real account-key envelope in memory, adds a \"device\" wrap " +
+            "to it by encrypting the DEK under a biometric-gated Android Keystore " +
+            "key (prompts once), then unlocks that same wrap (prompts again) and " +
+            "confirms the recovered DEK is byte-identical to the original and " +
+            "passes the envelope's own verifier check. Needs a fingerprint/face " +
+            "enrolled on this device — two real prompts, not adb-scriptable.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isRunning,
+        onClick = {
+            isRunning = true
+            resultText = null
+            scope.launch {
+                resultText = try {
+                    runDeviceWrapSmokeTest(activity)
+                } catch (e: Exception) {
+                    "FAIL — ${e::class.simpleName}: ${e.message}"
+                }
+                isRunning = false
+            }
+        },
+    ) {
+        Text(if (isRunning) "Running..." else "Run smoke test")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+private suspend fun runDeviceWrapSmokeTest(activity: FragmentActivity): String {
+    val canAuthenticate = BiometricManager.from(activity)
+        .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+    if (canAuthenticate != BiometricManager.BIOMETRIC_SUCCESS) {
+        return "FAIL — BiometricManager.canAuthenticate() = $canAuthenticate " +
+            "(expected BIOMETRIC_SUCCESS=${BiometricManager.BIOMETRIC_SUCCESS}) — " +
+            "no usable fingerprint/face enrolled on this device"
+    }
+
+    val keys = createAccountKeys("throwaway-passphrase-for-device-wrap-smoke-test")
+
+    val encryptCipher = DeviceWrap.buildEncryptCipher()
+    val authorizedEncryptCipher = authenticateBiometric(
+        activity, BiometricPrompt.CryptoObject(encryptCipher), "Register device wrap (1/2)",
+    )
+    val deviceWrap = DeviceWrap.wrapDekWithAuthorizedCipher(authorizedEncryptCipher, keys.dek)
+    val envelopeWithDeviceWrap = keys.envelope.copy(wraps = keys.envelope.wraps + deviceWrap)
+
+    val storedWrap = envelopeWithDeviceWrap.wraps.first { it.type == DeviceWrap.WRAP_TYPE }
+    val decryptCipher = DeviceWrap.buildDecryptCipher(storedWrap.iv)
+    val authorizedDecryptCipher = authenticateBiometric(
+        activity, BiometricPrompt.CryptoObject(decryptCipher), "Unlock via device wrap (2/2)",
+    )
+    val recoveredDek = DeviceWrap.unwrapDekWithAuthorizedCipher(authorizedDecryptCipher, storedWrap)
+
+    val dekMatchesOk = recoveredDek.contentEquals(keys.dek)
+    val verifierOk = checkDekVerifier(recoveredDek, envelopeWithDeviceWrap.verifier)
+    val pass = dekMatchesOk && verifierOk
+    return buildString {
+        appendLine(if (pass) "PASS — Keystore + BiometricPrompt device wrap verified" else "FAIL — see values below")
+        appendLine("recovered DEK matches the original DEK exactly (ok=$dekMatchesOk)")
+        append("recovered DEK passes the envelope's own verifier check (ok=$verifierOk)")
+    }
+}
+
+/**
+ * Bridges `BiometricPrompt`'s callback API into a suspend call. Resumes with
+ * the now-authorized `CryptoObject`'s cipher on success; throws (cancels the
+ * coroutine) on any error or explicit user cancellation, including
+ * `errorCode == ERROR_NO_BIOMETRICS`/`ERROR_HW_UNAVAILABLE` if enrollment was
+ * removed between the `canAuthenticate()` check and this call.
+ */
+private suspend fun authenticateBiometric(
+    activity: FragmentActivity,
+    cryptoObject: BiometricPrompt.CryptoObject,
+    title: String,
+): Cipher = suspendCancellableCoroutine { continuation ->
+    val executor = ContextCompat.getMainExecutor(activity)
+    val prompt = BiometricPrompt(
+        activity,
+        executor,
+        object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                val cipher = result.cryptoObject?.cipher
+                if (cipher != null) {
+                    continuation.resume(cipher) { _, _, _ -> }
+                } else {
+                    continuation.resumeWithException(IllegalStateException("BiometricPrompt succeeded with no cipher"))
+                }
+            }
+
+            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                continuation.resumeWithException(IllegalStateException("BiometricPrompt error $errorCode: $errString"))
+            }
+
+            override fun onAuthenticationFailed() {
+                // A single failed attempt (e.g. unrecognized finger) — BiometricPrompt keeps
+                // its own dialog open for retries, so do NOT resume/cancel the coroutine here.
+            }
+        },
+    )
+    val promptInfo = BiometricPrompt.PromptInfo.Builder()
+        .setTitle(title)
+        .setSubtitle("SongNotes device wrap smoke test")
+        .setNegativeButtonText("Cancel")
+        .build()
+    prompt.authenticate(promptInfo, cryptoObject)
 }
 
 @Composable

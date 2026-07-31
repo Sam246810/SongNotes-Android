@@ -43,7 +43,8 @@ fun unlockWithRecoveryCode(envelope: EnvelopeV2, recoveryCode: String): ByteArra
 
 private fun unlockWithType(envelope: EnvelopeV2, type: String, secret: String): ByteArray {
     val wrap = envelope.wraps.find { it.type == type } ?: error("No \"$type\" wrap in this envelope")
-    val kek = deriveKEK(secret, wrap.kdf)
+    val kdf = requireNotNull(wrap.kdf) { "\"$type\" wrap has no kdf -- not a passphrase/recovery-code wrap" }
+    val kek = deriveKEK(secret, kdf)
     val dek = unwrapContentKey(kek, wrap.iv, wrap.ct)
     check(checkDekVerifier(dek, envelope.verifier)) {
         // Correct KDF inputs unwrapped *a* key (GCM tag matched), but it isn't the DEK this

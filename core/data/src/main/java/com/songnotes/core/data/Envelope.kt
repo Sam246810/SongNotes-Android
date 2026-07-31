@@ -30,19 +30,28 @@ private const val IV_BYTES = 12 // 96-bit, matches envelope.js's IV_BYTES
 private const val GCM_TAG_BITS = 128
 const val DEK_VERIFIER_PLAINTEXT = "songnotes-dek-check-v2"
 
-data class WrapEntry(val id: String, val type: String, val kdf: KdfParams, val iv: ByteArray, val ct: ByteArray) {
-    fun toJson(): JSONObject = JSONObject()
-        .put("id", id)
-        .put("type", type)
-        .put("kdf", kdf.toJson())
-        .put("iv", Base64.getEncoder().encodeToString(iv))
-        .put("ct", Base64.getEncoder().encodeToString(ct))
+/**
+ * [kdf] is null for a `"device"`-type wrap (see `DeviceWrap.kt`) -- there's no
+ * human secret being stretched, so no KDF params to record. The KEK for that
+ * wrap type is an Android Keystore-resident key referenced by alias instead,
+ * gated by biometric auth rather than derived from anything.
+ */
+data class WrapEntry(val id: String, val type: String, val kdf: KdfParams?, val iv: ByteArray, val ct: ByteArray) {
+    fun toJson(): JSONObject {
+        val json = JSONObject()
+            .put("id", id)
+            .put("type", type)
+            .put("iv", Base64.getEncoder().encodeToString(iv))
+            .put("ct", Base64.getEncoder().encodeToString(ct))
+        kdf?.let { json.put("kdf", it.toJson()) }
+        return json
+    }
 
     companion object {
         fun fromJson(json: JSONObject): WrapEntry = WrapEntry(
             id = json.getString("id"),
             type = json.getString("type"),
-            kdf = KdfParams.fromJson(json.getJSONObject("kdf")),
+            kdf = json.optJSONObject("kdf")?.let { KdfParams.fromJson(it) },
             iv = Base64.getDecoder().decode(json.getString("iv")),
             ct = Base64.getDecoder().decode(json.getString("ct")),
         )

@@ -1,11 +1,11 @@
 # Phase 6 — Data layer + crypto
 
-**Status (2026-07-31): Third pass done — `:app`'s live song list/editor screens
-now run on Room + SQLCipher (not `SongStorage.kt`'s old JSON files), including a
-one-time migration of any pre-Phase-6 songs, all verified on a physical device.
-Remaining gaps (account-DEK Keystore/BiometricPrompt device wrap, Room
-migrations infra, 16 KB alignment) are Phase 7/11 territory or low-urgency at
-this scale — see "What's left" below.**
+**Status (2026-07-31): Every item in the plan's own Phase 6 scope line ("Room +
+SQLCipher, Argon2id, envelope v2, Keystore device wrap + BiometricPrompt") is
+now built and verified on a physical device — including a real fingerprint
+round trip. Remaining gaps (Room migrations infra, 16 KB alignment,
+`dekId`-on-row stamping) are either low-urgency at this scale or explicitly
+Phase 11 territory per the plan itself — see "What's left" below.**
 
 Scoped deliberately: the plan's own crypto-format decisions (envelope v2's
 `wraps` list, `dekId`, `verifier`; Argon2id replacing PBKDF2) are the highest-risk,
@@ -287,20 +287,98 @@ from the raw DB bytes. Deleted both test songs afterward and removed the
 planted legacy JSON file; the song list and `files/songs/` directory are
 empty again.
 
+## Fourth pass — Keystore device wrap + BiometricPrompt for the account DEK (2026-07-31)
+
+The last unbuilt item in the plan's own Phase 6 scope line: a `"device"` entry
+in envelope v2's `wraps[]` list (see `Envelope.kt`'s doc comment), unlocking
+the account DEK with a fingerprint/face instead of typing the account
+passphrase — distinct from the second pass's `KeystoreDbKeyProvider` (that key
+gates local storage and must open non-interactively on app start; this one
+gates the account DEK and is deliberately re-prompted every single use, no
+grace period).
+
+**What shipped**:
+
+- **`WrapEntry.kdf` is now nullable** (`Envelope.kt`) — a device wrap has no
+  KDF params to record, since there's no human secret being stretched; the KEK
+  is an Android Keystore-resident key referenced by alias instead. `toJson()`
+  omits the `"kdf"` key entirely when null (not `"kdf": null`) rather than
+  inventing a placeholder shape; `fromJson()` uses `optJSONObject` so parsing
+  an existing passphrase/recovery-code wrap is unaffected. New
+  `WrapEntryTest.kt` pins this down directly (JSON round-trip for all three
+  wrap types together in one envelope) since it's real, JVM-testable
+  regression risk that the on-device smoke test alone wouldn't catch if it
+  silently broke passphrase/recovery-code parsing.
+- **`DeviceWrap.kt`** (new, `:core:data`): generates/retrieves a Keystore AES-256-GCM
+  key (alias `songnotes.account_dek_device_wrap`,
+  `setUserAuthenticationRequired(true)` +
+  `setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG)` — a 0-second
+  validity window, so it re-prompts every use rather than allowing a grace
+  period after one unlock). Exposes `buildEncryptCipher()`/
+  `buildDecryptCipher(iv)` (return a `Cipher` ready to be wrapped in a
+  `BiometricPrompt.CryptoObject` by the caller) and
+  `wrapDekWithAuthorizedCipher`/`unwrapDekWithAuthorizedCipher` (take a
+  *post-authorization* cipher and actually move DEK bytes through it).
+  Deliberately has zero Activity/Fragment/UI dependency — `BiometricPrompt`
+  itself is UI-layer and lives entirely in `:app`, matching this module's
+  existing "no UI dependency" boundary.
+- **`MainActivity` now extends `FragmentActivity`** instead of the usual bare
+  `ComponentActivity` Compose apps default to — `BiometricPrompt` needs one to
+  host its internal dialog fragment. `FragmentActivity` extends
+  `ComponentActivity`, so `setContent {}` and everything else already there is
+  unaffected.
+- **`DiagnosticsScreen.kt`'s new `DeviceWrapSmokeTestSection`**: builds a real
+  in-memory account-key envelope (`createAccountKeys` with a throwaway
+  passphrase), checks `BiometricManager.canAuthenticate()` first (fails
+  loudly with the actual status code if nothing's enrolled, rather than
+  letting a confusing low-level Keystore exception surface), then runs the
+  whole round trip through two real `BiometricPrompt` dialogs: register (wrap
+  the DEK under a freshly-authorized encrypt cipher, append the resulting
+  `WrapEntry` to the envelope) and unlock (decrypt cipher against that wrap's
+  stored IV, authorize again, unwrap). Reports whether the recovered DEK is
+  byte-identical to the original *and* independently passes the envelope's
+  own `checkDekVerifier` — two separate confirmations, not one. A private
+  `authenticateBiometric` suspend function bridges `BiometricPrompt`'s
+  callback API into a coroutine via `suspendCancellableCoroutine`.
+
+**Verified on the physical device with real biometric hardware** (the user
+confirmed a fingerprint was already enrolled before this pass started, since
+verifying this specifically can't be adb-scripted — no `adb shell input` event
+can simulate a real fingerprint sensor read on physical hardware, unlike every
+other on-device check in this project): ran the smoke test, the phone showed a
+genuine system fingerprint prompt titled "Register device wrap (1/2)", the
+user scanned their fingerprint, a second prompt ("Unlock via device wrap
+(2/2)") followed, the user scanned again, and the result came back:
+
+```
+PASS — Keystore + BiometricPrompt device wrap verified
+recovered DEK matches the original DEK exactly (ok=true)
+recovered DEK passes the envelope's own verifier check (ok=true)
+```
+
+This is the first feature in the whole project verified with a real biometric
+input rather than an `adb`-scripted tap — every prior on-device smoke test in
+this project (audio, calibration, Room/SQLCipher) could be driven end-to-end
+via `adb shell input`; this one genuinely could not, and needed the user's own
+hands at the actual moment of verification.
+
 ## What's left (this phase, deliberately deferred)
 
-- **Android Keystore + `BiometricPrompt` *account DEK* device wrap** — not
-  started. This is what envelope v2's `wraps[]` list was specifically shaped
-  to accommodate (a device wrap is just another list entry), distinct from
-  this pass's DB-at-rest key (see "What shipped" above) — no device-wrap code
-  for the account DEK exists yet.
 - **`dekId` not yet stamped on any row** — `SongEntity` has no `dekId` column
   yet since nothing in the Android app encrypts song content with the account
-  DEK yet (only local SQLCipher-at-rest encryption exists so far). Deferred
-  until the app actually writes DEK-encrypted content.
+  DEK yet (only local SQLCipher-at-rest encryption exists so far, plus the
+  fourth pass's in-memory-only device-wrap smoke test — no envelope from
+  either has ever been persisted). Deferred until the app actually writes
+  DEK-encrypted content.
 - **No Room migrations yet** — only ever been version 1, `exportSchema =
   false`. Add real schema export + a migration test once the schema changes
   for the first time.
+- **The device wrap isn't wired into any real account/sign-in flow** —
+  there's no sign-up/sign-in UI in the Android app at all yet (that's Phase
+  7's "Auth + Supabase sync"); this pass built and verified the underlying
+  capability (envelope shape + Keystore/BiometricPrompt round trip) the same
+  way Room+SQLCipher and envelope v2 were each built and verified
+  standalone before being wired into anything user-facing.
 - **16 KB page alignment for `libsqlcipher.so`** — confirmed gap, explicitly
   Phase 11 scope per the plan (see above). Not fixed this pass.
 - **Sync (Tier 0 rev/optimistic-concurrency, tombstones) and schema v2** —

@@ -1,8 +1,8 @@
 package com.songnotes.android
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.fragment.app.FragmentActivity
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -20,7 +20,11 @@ import com.songnotes.core.audio.AudioEngine
 
 private enum class Screen { Diagnostics, Wizard, Manual, TapAlong, Scratchpad, Songs, SongEditor }
 
-class MainActivity : ComponentActivity() {
+// FragmentActivity, not the usual bare ComponentActivity Compose apps default
+// to -- BiometricPrompt (see DiagnosticsScreen.kt's device-wrap smoke test)
+// needs one to host its internal dialog fragment. FragmentActivity extends
+// ComponentActivity, so setContent {} and everything else here is unaffected.
+class MainActivity : FragmentActivity() {
 
     private val audioEngine = AudioEngine()
 
