@@ -34,11 +34,21 @@ android {
     buildFeatures {
         compose = true
     }
+
+    packaging {
+        resources {
+            // bcprov-jdk18on (Argon2id, via :core:data) and jspecify both ship a
+            // multi-release-JAR stub at this exact path -- functionally identical
+            // no-op manifests, safe to just pick one rather than fail the merge.
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
+    }
 }
 
 dependencies {
     implementation(project(":core:audio"))
     implementation(project(":core:domain"))
+    implementation(project(":core:data"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)

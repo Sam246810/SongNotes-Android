@@ -46,6 +46,11 @@ import com.songnotes.core.audio.EngineCapabilities
 import com.songnotes.core.audio.EngineState
 import com.songnotes.core.audio.MultitrackProject
 import com.songnotes.core.audio.RealCalibrationAudio
+import com.songnotes.core.data.SongRepository
+import com.songnotes.core.domain.ChordAnchor
+import com.songnotes.core.domain.Song
+import com.songnotes.core.domain.SongLine
+import com.songnotes.core.domain.SongMeta
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -144,6 +149,7 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         RecordPlaybackSection(engine)
         CalibrationDspSmokeTestSection()
         OnsetDetectionSmokeTestSection()
+        EncryptedDbSmokeTestSection()
         EngineCalibrationCaptureSection(engine)
         CalibrationSessionSection(engine)
         VerificationPlaybackSmokeTestSection(engine)
@@ -1355,6 +1361,96 @@ private fun runOnsetDetectionSmokeTest(): String {
         appendLine("pure silence returns no onsets (ok=$silenceOk)")
         append("too-few-matches returns null (ok=$tooFewOk)")
     }
+}
+
+@Composable
+private fun EncryptedDbSmokeTestSection() {
+    var resultText by remember { mutableStateOf<String?>(null) }
+    var isRunning by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Encrypted DB smoke test (Phase 6 Room + SQLCipher + Keystore)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Opens the SQLCipher-encrypted Room database (creating + wrapping a " +
+            "random DB key via Android Keystore if needed), round-trips a test " +
+            "song through it, then reads the RAW .db file bytes directly to " +
+            "confirm the plaintext lyric marker is NOT recoverable without the " +
+            "key -- proving actual at-rest encryption, not just that the API works.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isRunning,
+        onClick = {
+            isRunning = true
+            resultText = null
+            scope.launch {
+                val result = withContext(Dispatchers.IO) { runEncryptedDbSmokeTest(context) }
+                resultText = result
+                isRunning = false
+            }
+        },
+    ) {
+        Text(if (isRunning) "Running..." else "Run smoke test")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+private suspend fun runEncryptedDbSmokeTest(context: android.content.Context): String {
+    val marker = "ENCRYPTED_DB_SMOKE_TEST_MARKER_${System.currentTimeMillis()}"
+    val testSong = Song(
+        id = "diagnostics-smoke-test-${System.currentTimeMillis()}",
+        title = marker,
+        meta = SongMeta(bpm = 120, key = "G", tuning = "Standard", capo = 2),
+        lines = listOf(SongLine(id = "line-1", lyrics = marker, chords = listOf(ChordAnchor(0, "G")))),
+        createdAt = System.currentTimeMillis(),
+        updatedAt = System.currentTimeMillis(),
+    )
+
+    val repo = SongRepository(context)
+    try {
+        repo.upsert(testSong)
+        val readBack = repo.getById(testSong.id)
+        val roundTripOk = readBack == testSong
+
+        val dbFile = context.getDatabasePath("songs.db")
+        val rawBytes = dbFile.readBytes()
+        val markerBytes = marker.toByteArray(Charsets.UTF_8)
+        val plaintextFoundInRawFile = indexOfBytes(rawBytes, markerBytes) >= 0
+        val encryptedAtRestOk = !plaintextFoundInRawFile
+
+        val pass = roundTripOk && encryptedAtRestOk
+        return buildString {
+            appendLine(if (pass) "PASS — Room+SQLCipher+Keystore verified" else "FAIL — see values below")
+            appendLine("round-trip through Room matches the original Song (ok=$roundTripOk)")
+            appendLine("raw .db file (${rawBytes.size} bytes) does NOT contain the plaintext marker (ok=$encryptedAtRestOk)")
+            append("db file: ${dbFile.absolutePath}")
+        }
+    } finally {
+        repo.delete(testSong)
+    }
+}
+
+/** Naive byte-substring search — good enough for a one-shot diagnostics check, not a hot path. */
+private fun indexOfBytes(haystack: ByteArray, needle: ByteArray): Int {
+    if (needle.isEmpty() || needle.size > haystack.size) return -1
+    outer@ for (i in 0..haystack.size - needle.size) {
+        for (j in needle.indices) {
+            if (haystack[i + j] != needle[j]) continue@outer
+        }
+        return i
+    }
+    return -1
 }
 
 @Composable

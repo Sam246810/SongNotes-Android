@@ -1,8 +1,10 @@
 # Phase 6 — Data layer + crypto
 
-**Status (2026-07-30): First pass done — envelope v2 + Argon2id, with committed
-cross-implementation test vectors. Room, SQLCipher, and Android Keystore
-integration are NOT started; see "What's left" below.**
+**Status (2026-07-31): Second pass done — Room + SQLCipher + Keystore-wrapped DB
+key, verified on a physical device with genuine at-rest encryption confirmed
+(not just "the API didn't throw"). Not yet wired into `:app`'s live song list/
+editor screens (still on the pre-Phase-6 `SongStorage.kt` JSON files) — see
+"What's left" below.**
 
 Scoped deliberately: the plan's own crypto-format decisions (envelope v2's
 `wraps` list, `dekId`, `verifier`; Argon2id replacing PBKDF2) are the highest-risk,
@@ -114,21 +116,146 @@ of `envelope['passphrase']` — a copy-paste mismatch against the v2 wrap `id`
 failing with a clear "No 'pass' entry in this v1 envelope" error — exactly the
 kind of bug a real test (not just code review) exists to catch.
 
+## Fixture nondeterminism bug (found right before the second pass)
+
+Before starting Room/SQLCipher work, running the full JS suite again showed
+`spec/envelope-v2.json` as modified with no source change of mine — `git diff`
+confirmed a brand new random envelope (different `dekId`, salts, ciphertext,
+DEK) had been silently written. Unlike every other golden fixture in this
+repo, `createAccountKeys` isn't a pure function of its inputs — it generates
+real random salts/IVs/DEK, same as production — so the original
+always-regenerate-and-overwrite generator would have drifted the committed
+fixture out of sync with the frozen copy in `:core:data` on **every single**
+`npm test` / `gradlew test` run, on both sides, without either suite's own
+tests failing to notice (each side only checked its own current copy still
+round-tripped, never that the two committed copies still matched each other).
+Fixed on both sides (JS: `generate-golden-fixtures.test.js`; Kotlin:
+`EnvelopeV2GoldenFixtureTest.kt`) to bootstrap the fixture once if missing,
+then re-verify the *existing* committed file round-trips on every subsequent
+run instead of overwriting it. Confirmed idempotent by re-running each suite
+twice and checking `git status` showed no diff the second time.
+
+Also wired `migrateWrapIfNeeded` into `AuthProvider.jsx`'s actual `signIn`
+flow (previously implemented and tested in isolation, but nothing called it)
+— a stale PBKDF2 passphrase wrap now rewraps onto Argon2id automatically on
+the next successful login, best-effort or effect on the sign-in outcome
+itself (the DEK is already established before the migration attempt runs).
+
+## Second pass — Room + SQLCipher + Keystore-wrapped DB key (2026-07-31)
+
+**`:core:data` converted from pure-JVM to an Android library module**
+(`android-library` + `kotlin-android` plugins, replacing `kotlin-jvm`) — Room,
+SQLCipher, and Android Keystore all need the Android framework, unlike the
+first pass's crypto-only content (`Kdf.kt`/`Envelope.kt`/`AccountKeys.kt`),
+which has zero `android.*` imports and still runs as plain local JVM unit
+tests under the new setup, unchanged. Matches the plan's own module layout,
+which names `:core:data` for "Room + SQLCipher, supabase-kt, crypto, sync
+engine" together, not split across modules. Main sources moved from
+`src/main/kotlin` to `src/main/java` to match `:core:audio`'s own established
+convention for `android-library` modules in this repo (test sources stay
+under `src/test/kotlin`, also matching precedent).
+
+**What shipped**:
+
+- **`SongEntity`/`SongDao`/`SongDatabase`** — one row per song (mirroring
+  `:app`'s pre-Phase-6 `SongStorage.kt`'s one-JSON-file-per-song granularity),
+  `meta` fields flattened into real columns, `lines` (with nested per-chord
+  anchors) stored as a single JSON blob via `org.json` — lines are always
+  read/written as a whole song, never queried independently, so normalizing
+  them into a child table would add join complexity with no query benefit.
+  `SongEntity.toDomain()`/`fromDomain()` map directly to/from `:core:domain`'s
+  existing `Song`/`SongLine`/`ChordAnchor` — `:core:data` now depends on
+  `:core:domain` — rather than duplicating those data classes.
+- **`KeystoreDbKeyProvider`** — generates a random 256-bit DB key on first run,
+  wraps it (AES-GCM) with an `AndroidKeyStore`-resident AES key (alias
+  `songnotes.db_key_wrap`, no biometric gating), and persists only the wrapped
+  bytes to a small file under `filesDir`. Deliberately **not** the account
+  DEK, and deliberately **not** biometric-gated — per the plan, "keyed by a
+  random DB key wrapped in Keystore, not by the DEK, so the DB opens before
+  unlock": a locked-out or not-yet-signed-in user can still open the app and
+  see their (DEK-encrypted, so still individually unreadable) song list,
+  rather than the whole local database being inaccessible until a passphrase
+  is typed. This is a separate, unrelated key from the account-key envelope's
+  `wraps[]` list from the first pass — the plan's *other* "Keystore device
+  wrap + BiometricPrompt" item is a future `wraps[]` entry unlocking the
+  *account DEK* via biometrics, not this DB-at-rest key.
+- **`SongDatabase.open(context, dbKey)`** — swaps Room's default SQLite driver
+  for SQLCipher's via `net.sqlcipher.database.SupportFactory`, same
+  `@Entity`/`@Dao`/`@Database` API surface, transparently encrypted storage
+  underneath rather than a bolted-on encryption layer.
+- **`SongRepository`** — thin facade tying the above together
+  (`observeAll(): Flow<List<Song>>`, `getById`, `upsert`, `delete`). Not yet
+  wired into `:app`'s live `SongListScreen`/`SongEditorScreen` — see "What's
+  left" — exists so the encrypted database could be built and verified as a
+  standalone piece first, without risking the live app's already-working
+  editor mid-swap.
+- **A resource-merge conflict** (`bcprov-jdk18on` and `jspecify` both ship an
+  identical stub `META-INF/versions/9/OSGI-INF/MANIFEST.MF` path) broke
+  `:app:installDebug` the first time `:core:data` was wired into `:app` as a
+  real dependency — fixed with a `packaging { resources { excludes += ... } }`
+  block in `app/build.gradle.kts`, safe since both are functionally-identical
+  no-op stub manifests.
+
+**Verified on the physical device (SM-F956W, 2026-07-31)** via a new
+`EncryptedDbSmokeTestSection` in `DiagnosticsScreen.kt` (same pattern as every
+other on-device smoke test in this project): opens/creates the encrypted DB
+(exercising real Keystore key generation + wrap on first run), upserts a test
+`Song` with a distinctive plaintext marker string as its title/lyrics,
+confirms the read-back matches exactly, **then reads the raw `.db` file bytes
+directly off disk and confirms the plaintext marker is NOT found anywhere in
+them** — proving genuine encryption at rest, not just that the Room API
+didn't throw. Ran twice in a row (fresh key creation, then persisted-key
+reuse) — both PASS, confirming the wrapped DB key file round-trips through
+the Keystore correctly across app restarts, not just within a single process.
+Test song deleted in a `finally` block after each run either way.
+
+**One real, already-anticipated gap surfaced by this pass, not fixed**: the
+device's own "Android App Compatibility" debug-build warning dialog now also
+flags `lib/arm64-v8a/libsqlcipher.so` as not 16 KB-page-aligned (`LOAD segment
+not aligned`), alongside the pre-existing warnings for `liboboe.so`/
+`libc++_shared.so`/`libsongnotes_audio.so`. Checked Maven Central: 4.5.4 (the
+version pinned here) is already `net.zetetic:android-database-sqlcipher`'s
+latest release, so this isn't a version bump away — it's a genuine upstream
+gap in the current SQLCipher prebuilt. Exactly the risk `docs/PLAN.md`'s own
+"Module layout" section predicted by name before any of this phase started
+("Every `.so` must build with `-Wl,-z,max-page-size=16384`... SQLCipher's
+prebuilt is the most likely to bite") and explicitly assigns to **Phase 11**
+("add Google's `check_elf_alignment.sh` to CI on day one"), not this one — the
+app still installs, runs, and encrypts correctly on this device today; this
+only becomes a hard blocker on an Android 15+ device with strict 16 KB page
+enforcement, which is Phase 11's problem to solve before a real release.
+
+**One minor testability gap, not addressed**: `:core:data` has no
+`android-library`-style instrumented (`androidTest`) test suite — this
+project has never had one anywhere, and verification instead used the same
+"add a `DiagnosticsScreen` smoke-test section, drive it via `adb`" pattern
+already established for every other Phase 0–5 on-device feature. That
+precedent was deliberately followed rather than introducing a new test
+methodology (Espresso/`AndroidJUnitRunner`) as a tangent — worth reconsidering
+once there's enough device-dependent surface area (Room migrations, Keystore
+edge cases) that manual `adb`-driven smoke tests stop scaling.
+
 ## What's left (this phase, deliberately deferred)
 
-- **Room + SQLCipher** — not started. The plan's `:core:data` module now exists
-  and holds the crypto slice; Room/SQLCipher will need the `android-library`
-  plugin (or a further module split) and instrumented tests, neither of which
-  this pass added since nothing yet needs them.
-- **Android Keystore + `BiometricPrompt` device wrap** — not started. This is
-  what envelope v2's `wraps[]` list was specifically shaped to accommodate (a
-  device wrap is just another list entry), but no device-wrap code exists yet.
-- **`dekId` not yet stamped on any row** — there are no encrypted rows in the
-  Android data layer yet to stamp it on. Deferred until Room exists.
-- **`migrateWrapIfNeeded` (web) not wired into `AuthProvider.jsx`'s sign-in
-  flow** — implemented and tested in isolation, but the live login path doesn't
-  call it yet, so an existing PBKDF2 wrap won't actually upgrade to Argon2id on
-  a real user's next login until this is wired up.
+- **`:app`'s `SongListScreen`/`SongEditorScreen` still use `SongStorage.kt`**
+  (plain JSON files), not the new `SongRepository`/Room+SQLCipher. The
+  encrypted data layer exists and is verified standalone but the live app
+  hasn't been switched over — a deliberate, separate follow-up rather than a
+  risky big-bang swap in the same pass that built the DB itself.
+- **Android Keystore + `BiometricPrompt` *account DEK* device wrap** — not
+  started. This is what envelope v2's `wraps[]` list was specifically shaped
+  to accommodate (a device wrap is just another list entry), distinct from
+  this pass's DB-at-rest key (see "What shipped" above) — no device-wrap code
+  for the account DEK exists yet.
+- **`dekId` not yet stamped on any row** — `SongEntity` has no `dekId` column
+  yet since nothing in the Android app encrypts song content with the account
+  DEK yet (only local SQLCipher-at-rest encryption exists so far). Deferred
+  until the app actually writes DEK-encrypted content.
+- **No Room migrations yet** — only ever been version 1, `exportSchema =
+  false`. Add real schema export + a migration test once the schema changes
+  for the first time.
+- **16 KB page alignment for `libsqlcipher.so`** — confirmed gap, explicitly
+  Phase 11 scope per the plan (see above). Not fixed this pass.
 - **Sync (Tier 0 rev/optimistic-concurrency, tombstones) and schema v2** —
   entirely separate plan items (Phase 7), untouched this pass.
 - **Wire format v2 (`bpm`/`capo` as numbers, per-chord anchors)** — already done
