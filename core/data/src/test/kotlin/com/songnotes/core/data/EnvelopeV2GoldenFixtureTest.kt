@@ -21,11 +21,18 @@ import org.junit.Test
  * 2. [writesAndroidEnvelopeForWebToDecrypt] builds an equally-real envelope with
  *    this module's own `createAccountKeys`, sanity-checks it unlocks correctly
  *    right here, and writes it to `spec/envelope-v2-from-android.json` (both this
- *    repo's own test-resources copy, so re-running this test is self-contained,
- *    and the desktop repo's `spec/` directory, so its own reverse-direction test
- *    in `generate-golden-fixtures.test.js` picks it up) -- same "write a fixture
- *    as a side effect of a test run, then commit it" convention the JS side
- *    already established for the chord/lyrics fixtures.
+ *    repo's own test-resources copy and the desktop repo's `spec/` directory, so
+ *    its own reverse-direction test in `generate-golden-fixtures.test.js` picks
+ *    it up) -- same "write a fixture as a side effect of a test run, then commit
+ *    it" convention the JS side already established for the chord/lyrics
+ *    fixtures.
+ *
+ *    Unlike those, though, `createAccountKeys` is NOT a pure function of its
+ *    inputs -- real random salts/IVs/DEK, same as production -- so this only
+ *    WRITES once, when the fixture doesn't exist yet. Once committed, re-running
+ *    this test re-verifies the EXISTING fixture still round-trips instead of
+ *    silently overwriting it with fresh randomness every run, which would drift
+ *    it out of sync with the desktop repo's copy on every single `gradlew test`.
  */
 class EnvelopeV2GoldenFixtureTest {
 
@@ -45,7 +52,21 @@ class EnvelopeV2GoldenFixtureTest {
     }
 
     @Test
-    fun `writes an Android-built envelope for the web app to decrypt`() {
+    fun `writes (once) or re-verifies an Android-built envelope for the web app to decrypt`() {
+        val ownCopy = File("src/test/resources/spec/envelope-v2-from-android.json")
+        if (ownCopy.exists()) {
+            // Already committed: verify it still round-trips with the current crypto
+            // code, rather than overwriting it with a fresh random envelope.
+            val json = JSONTokener(ownCopy.readText(Charsets.UTF_8)).nextValue() as JSONObject
+            val passphrase = json.getString("passphrase")
+            val recoveryCode = json.getString("recoveryCode")
+            val expectedDek = Base64.getDecoder().decode(json.getString("expectedDekBase64"))
+            val envelope = EnvelopeV2.fromJson(json.getJSONObject("envelope"))
+            assertArrayEquals(expectedDek, unlockWithPassphrase(envelope, passphrase))
+            assertArrayEquals(expectedDek, unlockWithRecoveryCode(envelope, recoveryCode))
+            return
+        }
+
         val passphrase = "kotlin correct horse battery staple"
         val recoveryCode = "KLMNP-QRSTU-VWXYZ-23456-789AB"
         val keys = createAccountKeys(passphrase, recoveryCode)
@@ -62,7 +83,7 @@ class EnvelopeV2GoldenFixtureTest {
             .put("envelope", keys.envelope.toJson())
         val text = fixture.toString(2) + "\n"
 
-        writeIfParentExists(File("src/test/resources/spec/envelope-v2-from-android.json"), text)
+        writeIfParentExists(ownCopy, text)
         // Also drop a copy directly into the desktop repo's spec/ dir, if it's checked
         // out as a sibling of this repo (the layout every prior fixture-porting pass in
         // this session has assumed) -- matches "committed to BOTH repos" from the plan.
