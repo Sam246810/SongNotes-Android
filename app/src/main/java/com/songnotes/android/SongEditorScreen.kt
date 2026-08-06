@@ -3,7 +3,9 @@ package com.songnotes.android
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -57,12 +60,16 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.songnotes.core.data.SongRepository
+import com.songnotes.core.domain.ChordVoicing
 import com.songnotes.core.domain.Song
 import com.songnotes.core.domain.SongLine
 import com.songnotes.core.domain.SongMeta
 import com.songnotes.core.domain.alignChordsWithLyrics
 import com.songnotes.core.domain.anchorsToChordsLine
 import com.songnotes.core.domain.chordsLineToAnchors
+import com.songnotes.core.domain.formatFretsForInput
+import com.songnotes.core.domain.lookupChord
+import com.songnotes.core.domain.parseFretsInput
 import com.songnotes.core.domain.parseLyricsText
 import com.songnotes.core.domain.tokenizeChordLine
 import com.songnotes.core.domain.transposeChordsLine
@@ -178,8 +185,10 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     var title by remember { mutableStateOf(loaded.title) }
     var meta by remember { mutableStateOf(loaded.meta) }
     var lines by remember { mutableStateOf(songToEditorLines(loaded)) }
+    var customChords by remember { mutableStateOf(loaded.customChords) }
     var pendingFocus by remember { mutableStateOf<PendingFocus?>(null) }
     var showImport by remember { mutableStateOf(false) }
+    var activeChordName by remember { mutableStateOf<String?>(null) }
     var fontScale by remember { mutableStateOf(1f) }
     var linesAreaWidthPx by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
@@ -193,9 +202,20 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
         title = title,
         meta = meta,
         lines = lines.map { SongLine(id = it.id, lyrics = it.lyrics, chords = chordsLineToAnchors(it.chords)) },
+        customChords = customChords,
         createdAt = loaded.createdAt,
         updatedAt = System.currentTimeMillis(),
     )
+
+    fun saveVoicing(chordName: String, voicing: ChordVoicing) {
+        customChords = customChords + (chordName to voicing)
+        scope.launch { repo.upsert(currentSong()) }
+    }
+
+    fun resetVoicing(chordName: String) {
+        customChords = customChords - chordName
+        scope.launch { repo.upsert(currentSong()) }
+    }
 
     fun persist() {
         scope.launch {
@@ -276,6 +296,7 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
         return
     }
 
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -308,7 +329,9 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
                 inner()
             },
         )
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(12.dp))
+        SongMetaBar(meta = meta, onUpdateMeta = { updated -> meta = updated; persist() })
+        Spacer(Modifier.height(12.dp))
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -344,6 +367,8 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
                     line = line,
                     chordStyle = chordStyle,
                     lyricStyle = lyricStyle,
+                    customChords = customChords,
+                    onTapChord = { name -> activeChordName = name },
                     pendingFocus = pendingFocus,
                     onConsumedPendingFocus = { pendingFocus = null },
                     onChordsChange = { updated -> updateLine(line.id) { it.copy(chords = updated) } },
@@ -370,6 +395,18 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
             }
         }
     }
+
+    activeChordName?.let { name ->
+        ChordVoicingPanel(
+            chordName = name,
+            voicing = lookupChord(name, customChords),
+            isCustom = customChords.containsKey(name),
+            onSave = { voicing -> saveVoicing(name, voicing) },
+            onReset = { resetVoicing(name) },
+            onDismiss = { activeChordName = null },
+        )
+    }
+    }
 }
 
 private fun emptySong(id: String) = Song(id = id, title = "", createdAt = 0L, updatedAt = 0L)
@@ -390,6 +427,8 @@ private fun LineRow(
     line: EditorLine,
     chordStyle: TextStyle,
     lyricStyle: TextStyle,
+    customChords: Map<String, ChordVoicing>,
+    onTapChord: (String) -> Unit,
     pendingFocus: PendingFocus?,
     onConsumedPendingFocus: () -> Unit,
     onChordsChange: (String) -> Unit,
@@ -477,7 +516,13 @@ private fun LineRow(
                 },
             )
         } else {
-            ChordTokenRow(text = line.chords, style = chordStyle, onClick = { chordEditMode = true })
+            ChordTokenRow(
+                text = line.chords,
+                style = chordStyle,
+                customChords = customChords,
+                onClick = { chordEditMode = true },
+                onTapChord = onTapChord,
+            )
         }
 
         BasicTextField(
@@ -515,8 +560,14 @@ private fun LineRow(
 }
 
 @Composable
-private fun ChordTokenRow(text: String, style: TextStyle, onClick: () -> Unit) {
-    val tokens = remember(text) { tokenizeChordLine(text) }
+private fun ChordTokenRow(
+    text: String,
+    style: TextStyle,
+    customChords: Map<String, ChordVoicing>,
+    onClick: () -> Unit,
+    onTapChord: (String) -> Unit,
+) {
+    val tokens = remember(text, customChords) { tokenizeChordLine(text, customChords) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -539,7 +590,178 @@ private fun ChordTokenRow(text: String, style: TextStyle, onClick: () -> Unit) {
                         },
                         textDecoration = if (!tok.isWhitespace && !tok.looksLikeChord) TextDecoration.Underline else null,
                     ),
+                    // Whitespace tokens have no chordName and stay unclickable so a
+                    // tap there still falls through to the Row's onClick (raw edit mode).
+                    modifier = if (!tok.isWhitespace) {
+                        Modifier.clickable(onClick = { onTapChord(tok.chordName ?: tok.text) })
+                    } else {
+                        Modifier
+                    },
                 )
+            }
+        }
+    }
+}
+
+/**
+ * A small reference strip -- BPM/Key/Tuning/Capo, all optional free-text
+ * fields, matching the web app's `SongMetaBar.jsx` exactly (same 4 fields,
+ * same placeholders, no validation beyond BPM/Capo staying numeric since
+ * [SongMeta.bpm]/[SongMeta.capo] are typed `Int` here rather than the JS
+ * side's untyped string). Transpose stays in the existing button row above
+ * rather than duplicating it here -- this bar is reference fields only.
+ */
+@Composable
+private fun SongMetaBar(meta: SongMeta, onUpdateMeta: (SongMeta) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        MetaField(
+            label = "BPM",
+            value = if (meta.bpm == 0) "" else meta.bpm.toString(),
+            onValueChange = { onUpdateMeta(meta.copy(bpm = it.filter(Char::isDigit).toIntOrNull() ?: 0)) },
+            placeholder = "—",
+            modifier = Modifier.weight(1f),
+        )
+        MetaField(
+            label = "Key",
+            value = meta.key,
+            onValueChange = { onUpdateMeta(meta.copy(key = it)) },
+            placeholder = "—",
+            modifier = Modifier.weight(1f),
+        )
+        MetaField(
+            label = "Tuning",
+            value = meta.tuning,
+            onValueChange = { onUpdateMeta(meta.copy(tuning = it)) },
+            placeholder = "Standard",
+            modifier = Modifier.weight(1.3f),
+        )
+        MetaField(
+            label = "Capo",
+            value = if (meta.capo == 0) "" else meta.capo.toString(),
+            onValueChange = { onUpdateMeta(meta.copy(capo = it.filter(Char::isDigit).toIntOrNull() ?: 0)) },
+            placeholder = "—",
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun MetaField(label: String, value: String, onValueChange: (String) -> Unit, placeholder: String, modifier: Modifier = Modifier) {
+    Column(modifier = modifier) {
+        Text(label, style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextMuted, letterSpacing = 0.6.sp))
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            textStyle = TextStyle(fontSize = 13.sp, color = LyricColor),
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+            decorationBox = { inner ->
+                if (value.isEmpty()) Text(placeholder, style = TextStyle(fontSize = 13.sp, color = TextMuted))
+                inner()
+            },
+        )
+        HorizontalDivider(color = PaperLine, thickness = 1.dp)
+    }
+}
+
+/**
+ * Bottom-anchored overlay showing a tapped chord's diagram, with an inline
+ * voicing editor -- Compose port of `ChordDiagram.jsx`'s popup, minus the
+ * hover-anchored positioning (a touch UI has no hover; a full-width bottom
+ * panel is the mobile-appropriate equivalent, dismissible by tapping the
+ * scrim or the Close button).
+ */
+@Composable
+private fun ChordVoicingPanel(
+    chordName: String,
+    voicing: ChordVoicing?,
+    isCustom: Boolean,
+    onSave: (ChordVoicing) -> Unit,
+    onReset: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var editing by remember(chordName) { mutableStateOf(false) }
+    var draft by remember(chordName) { mutableStateOf("") }
+    var error by remember(chordName) { mutableStateOf<String?>(null) }
+
+    fun startEditing() {
+        draft = voicing?.let { formatFretsForInput(it.frets) } ?: ""
+        error = null
+        editing = true
+    }
+
+    fun handleSave() {
+        val parsed = parseFretsInput(draft)
+        if (parsed == null) {
+            error = "Enter 6 values (0–24 or x), e.g. \"x 3 2 0 1 0\""
+            return
+        }
+        onSave(ChordVoicing(frets = parsed.frets, baseFret = parsed.baseFret))
+        editing = false
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.35f))
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onDismiss),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {} // absorb taps -- don't dismiss through the panel itself
+                .background(ParchmentBg, RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                .navigationBarsPadding() // otherwise the bottom button sits under the system nav bar and is untappable
+                .padding(20.dp),
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(chordName, style = MaterialTheme.typography.headlineSmall, color = LyricColor, fontWeight = FontWeight.Bold)
+                TextButton(onClick = onDismiss) { Text("Close", color = TextMuted) }
+            }
+            Spacer(Modifier.height(12.dp))
+
+            if (editing) {
+                BasicTextField(
+                    value = draft,
+                    onValueChange = { draft = it; error = null },
+                    textStyle = baseChordTextStyle.copy(color = ChordColor, fontSize = 16.sp),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(8.dp)).padding(12.dp),
+                    decorationBox = { inner ->
+                        if (draft.isEmpty()) Text("x 3 2 0 1 0", style = baseChordTextStyle.copy(color = TextMuted, fontSize = 16.sp))
+                        inner()
+                    },
+                )
+                Text(
+                    "low E → high E, 0 = open, x = muted",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+                error?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 4.dp))
+                }
+                Row(modifier = Modifier.padding(top = 12.dp)) {
+                    TextButton(onClick = { handleSave() }) { Text("Save", color = ChordColor, fontWeight = FontWeight.Bold) }
+                    TextButton(onClick = { editing = false; error = null }) { Text("Cancel", color = TextMuted) }
+                    if (isCustom) {
+                        TextButton(onClick = { onReset(); editing = false }) { Text("Reset", color = TextMuted) }
+                    }
+                }
+            } else if (voicing == null) {
+                Text("no chord chart for this chord yet >.<", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = { startEditing() }) { Text("+ Add voicing", color = ChordColor, fontWeight = FontWeight.Bold) }
+            } else {
+                ChordDiagram(voicing = voicing)
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = { startEditing() }) {
+                    Text(if (isCustom) "Edit voicing" else "Suggest a different voicing", color = ChordColor)
+                }
             }
         }
     }

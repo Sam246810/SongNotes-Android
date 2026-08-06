@@ -2,6 +2,8 @@ package com.songnotes.core.data
 
 import android.os.Build
 import com.songnotes.core.domain.ChordAnchor
+import com.songnotes.core.domain.ChordBarre
+import com.songnotes.core.domain.ChordVoicing
 import com.songnotes.core.domain.Song
 import com.songnotes.core.domain.SongLine
 import com.songnotes.core.domain.SongMeta
@@ -28,7 +30,15 @@ import org.json.JSONObject
  * tuning, capo, customChords?, createdAt, updatedAt}` -- `lines[].chords` is
  * already `:core:domain`'s native `ChordAnchor` shape, so unlike the web app
  * (which converts from its own padded-string model), no conversion is needed
- * on this side at all.
+ * on this side at all. Since Phase 8, `customChords` is likewise pushed/pulled
+ * straight from/to [Song.customChords] -- no special preservation logic needed
+ * (an earlier Phase 7 version of this class had to fetch-and-preserve the
+ * remote row's customChords before every push, since Android's domain model
+ * didn't carry the field at all yet; now that it does, the same
+ * optimistic-concurrency check that protects every other field of [Song] from
+ * a lost update protects this one too, since a local entity's customChords is
+ * only ever stale if its `rev` is too -- which `updateWithRevCheck` already
+ * catches).
  */
 class SyncEngine(
     private val dao: SongDao,
@@ -41,8 +51,7 @@ class SyncEngine(
 
     private suspend fun pushPending(userId: String, dek: ByteArray) {
         for (entity in dao.getPendingSync()) {
-            val preservedCustomChords = entity.remoteRev?.let { fetchCustomChords(entity.id, dek) }
-            val row = buildRow(entity, userId, dek, preservedCustomChords)
+            val row = buildRow(entity, userId, dek)
 
             if (entity.remoteRev == null) {
                 val inserted = adapter.insert(row)
@@ -77,24 +86,18 @@ class SyncEngine(
         }
     }
 
-    /** Reads the current remote row's `customChords` (if any) so a push from a device with no customChords UI never destroys it. */
-    private suspend fun fetchCustomChords(id: String, dek: ByteArray): JSONObject? {
-        val remote = adapter.getById(id) ?: return null
-        val contentJson = JSONObject(decryptContentJson(dek, remote.content.toContentEnvelope()))
-        return contentJson.optJSONObject("customChords")
-    }
-
-    private fun buildRow(entity: SongEntity, userId: String, dek: ByteArray, preservedCustomChords: JSONObject?): SongRow {
+    private fun buildRow(entity: SongEntity, userId: String, dek: ByteArray): SongRow {
+        val domain = entity.toDomain()
         val contentJson = JSONObject()
             .put("title", entity.title)
-            .put("lines", linesToJson(entity.toDomain().lines))
+            .put("lines", linesToJson(domain.lines))
             .put("bpm", entity.bpm)
             .put("key", entity.key)
             .put("tuning", entity.tuning)
             .put("capo", entity.capo)
             .put("createdAt", toIso(entity.createdAt))
             .put("updatedAt", toIso(entity.updatedAt))
-        if (preservedCustomChords != null) contentJson.put("customChords", preservedCustomChords)
+        if (domain.customChords.isNotEmpty()) contentJson.put("customChords", customChordsToJson(domain.customChords))
 
         val envelope = encryptContentJson(dek, contentJson.toString())
         return SongRow(
@@ -133,6 +136,36 @@ class SyncEngine(
         dao.upsert(conflictEntity)
     }
 
+    private fun customChordsToJson(customChords: Map<String, ChordVoicing>): JSONObject {
+        val obj = JSONObject()
+        for ((name, voicing) in customChords) {
+            val voicingJson = JSONObject()
+                .put("frets", JSONArray(voicing.frets))
+                .put("baseFret", voicing.baseFret)
+            voicing.barre?.let {
+                voicingJson.put("barre", JSONObject().put("fret", it.fret).put("fromString", it.fromString).put("toString", it.toString))
+            }
+            obj.put(name, voicingJson)
+        }
+        return obj
+    }
+
+    private fun customChordsFromJson(json: JSONObject?): Map<String, ChordVoicing> {
+        if (json == null) return emptyMap()
+        val result = LinkedHashMap<String, ChordVoicing>()
+        for (name in json.keys()) {
+            val voicingJson = json.getJSONObject(name)
+            val fretsJson = voicingJson.getJSONArray("frets")
+            val frets = (0 until fretsJson.length()).map { fretsJson.getInt(it) }
+            val barreJson = voicingJson.optJSONObject("barre")
+            val barre = barreJson?.let {
+                ChordBarre(fret = it.getInt("fret"), fromString = it.getInt("fromString"), toString = it.getInt("toString"))
+            }
+            result[name] = ChordVoicing(frets = frets, baseFret = voicingJson.getInt("baseFret"), barre = barre)
+        }
+        return result
+    }
+
     private fun linesToJson(lines: List<SongLine>): JSONArray {
         val arr = JSONArray()
         for (line in lines) {
@@ -164,6 +197,7 @@ class SyncEngine(
                 capo = json.optInt("capo", 0),
             ),
             lines = lines,
+            customChords = customChordsFromJson(json.optJSONObject("customChords")),
             createdAt = parseIso(json.getString("createdAt")),
             updatedAt = parseIso(json.getString("updatedAt")),
         )

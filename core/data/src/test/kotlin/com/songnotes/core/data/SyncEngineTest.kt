@@ -64,12 +64,15 @@ class SyncEngineTest {
         dek = ByteArray(32).also { SecureRandom().nextBytes(it) }
     }
 
-    private fun localSong(id: String = "song-1", title: String = "My Song", rev: Int = 1, pendingSync: Boolean = true, remoteRev: Int? = null): SongEntity =
+    private fun localSong(
+        id: String = "song-1", title: String = "My Song", rev: Int = 1, pendingSync: Boolean = true,
+        remoteRev: Int? = null, customChordsJson: String = "{}",
+    ): SongEntity =
         SongEntity(
             id = id, title = title, bpm = 0, key = "", tuning = "", capo = 0,
             linesJson = """[{"id":"line-1","lyrics":"hello","chords":[{"i":0,"c":"G"}]}]""",
             createdAt = 1000L, updatedAt = 2000L, rev = rev, deletedAt = null,
-            pendingSync = pendingSync, remoteRev = remoteRev,
+            pendingSync = pendingSync, remoteRev = remoteRev, customChordsJson = customChordsJson,
         )
 
     private fun decryptContent(row: SongRow): JSONObject {
@@ -125,26 +128,40 @@ class SyncEngineTest {
     }
 
     @Test
-    fun `push preserves an existing remote song's customChords even though the local entity never modeled it`() = runBlocking {
-        val remoteContentWithCustomChords = JSONObject()
-            .put("title", "Has Custom Voicing")
-            .put("lines", org.json.JSONArray())
-            .put("bpm", 0).put("key", "").put("tuning", "").put("capo", 0)
-            .put("customChords", JSONObject().put("G", JSONObject().put("baseFret", 1)))
-            .put("createdAt", "2026-01-01T00:00:00.000Z").put("updatedAt", "2026-01-01T00:00:00.000Z")
-        val envelope = encryptContentJson(dek, remoteContentWithCustomChords.toString())
-        adapter.rows["song-1"] = SongRow(
-            id = "song-1", user_id = userId, encrypted = true, content = envelope.toJsonElement(),
-            is_locked = false, rev = 1, deleted_at = null,
-            created_at = "2026-01-01T00:00:00.000Z", updated_at = "2026-01-01T00:00:00.000Z",
-        )
-        dao.upsert(localSong(rev = 2, remoteRev = 1, title = "Has Custom Voicing"))
+    fun `push includes the local entity's own customChords, barre and all`() = runBlocking {
+        val customChordsJson = """{"G":{"frets":[3,5,5,4,3,3],"baseFret":3,"barre":{"fret":3,"fromString":0,"toString":5}}}"""
+        dao.upsert(localSong(title = "Has Custom Voicing", customChordsJson = customChordsJson))
 
         engine.sync(userId, dek)
 
         val pushedContent = decryptContent(adapter.rows["song-1"]!!)
         assertTrue(pushedContent.has("customChords"))
-        assertEquals(1, pushedContent.getJSONObject("customChords").getJSONObject("G").getInt("baseFret"))
+        val g = pushedContent.getJSONObject("customChords").getJSONObject("G")
+        assertEquals(3, g.getInt("baseFret"))
+        assertEquals(3, g.getJSONObject("barre").getInt("fret"))
+    }
+
+    @Test
+    fun `pull applies a remote song's customChords onto the local entity`() = runBlocking {
+        val content = JSONObject()
+            .put("title", "Has Custom Voicing")
+            .put("lines", org.json.JSONArray())
+            .put("bpm", 0).put("key", "").put("tuning", "").put("capo", 0)
+            .put("customChords", JSONObject().put("Cadd11", JSONObject().put("frets", org.json.JSONArray(listOf(-1, 3, 3, 0, 1, 1))).put("baseFret", 1)))
+            .put("createdAt", "2026-01-01T00:00:00.000Z").put("updatedAt", "2026-01-01T00:00:00.000Z")
+        val envelope = encryptContentJson(dek, content.toString())
+        adapter.rows["song-1"] = SongRow(
+            id = "song-1", user_id = userId, encrypted = true, content = envelope.toJsonElement(),
+            is_locked = false, rev = 1, deleted_at = null,
+            created_at = "2026-01-01T00:00:00.000Z", updated_at = "2026-01-01T00:00:00.000Z",
+        )
+
+        engine.sync(userId, dek)
+
+        val pulled = dao.rows["song-1"]!!.toDomain()
+        val voicing = pulled.customChords["Cadd11"]!!
+        assertEquals(1, voicing.baseFret)
+        assertEquals(listOf(-1, 3, 3, 0, 1, 1), voicing.frets)
     }
 
     @Test

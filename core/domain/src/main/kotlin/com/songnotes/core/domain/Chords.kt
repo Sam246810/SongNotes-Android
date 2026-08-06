@@ -17,11 +17,14 @@ package com.songnotes.core.domain
  * rule, which would otherwise strip `maj` first and leave a meaningless
  * `#7`), so the Kotlin version preserves that exact ordering.
  *
- * [CHORD_DB_KEYS] is intentionally just the **key set** ported here, not
- * the full voicing/fret data (`frets`/`baseFret`/`barre`) — nothing in
- * this phase's scope (chord-name normalization and transposition) needs
- * the actual fretboard shapes; those belong to chord-diagram rendering,
- * which is Phase 8 ("Editor UI") territory.
+ * [CHORD_DB_KEYS] was, for Phase 5, intentionally just the **key set** —
+ * nothing in that phase's scope (chord-name normalization and transposition)
+ * needed the actual fretboard shapes. Phase 8 ("Editor UI") now needs those
+ * for real, so [CHORD_DB] (full `frets`/`baseFret`/`barre` per chord) and
+ * [lookupChord] are ported below too, verified against `spec/chord-db.json`/
+ * `spec/lookup-chord.json` by `ChordDbGoldenFixtureTest`. [CHORD_DB_KEYS]
+ * stays as its own binding (equal to `CHORD_DB.keys`) since existing callers
+ * ([tokenizeChordLine]) only ever needed membership, not the voicing data.
  */
 
 private val ENHARMONIC: Map<String, String> = mapOf(
@@ -85,20 +88,133 @@ fun normalizeChordName(raw: String?): String {
     return ENHARMONIC[name] ?: name
 }
 
-/** Just the recognized chord names — see this file's own doc comment for why no voicing data. */
-val CHORD_DB_KEYS: Set<String> = setOf(
-    "C", "D", "E", "F", "G", "A", "B", "Bb", "Eb", "Ab", "Db", "F#", "Gb", "C#", "G#", "A#", "D#",
-    "Am", "Bm", "Cm", "Dm", "Em", "Fm", "Gm", "Bbm", "F#m", "Gbm", "C#m", "Dbm", "G#m", "Abm", "D#m",
-    "C7", "D7", "E7", "F7", "G7", "A7", "B7", "Bb7",
-    "Cmaj7", "Dmaj7", "Emaj7", "Fmaj7", "Gmaj7", "Amaj7",
-    "Am7", "Bm7", "Cm7", "Dm7", "Em7", "Fm7", "Gm7",
-    "Asus2", "Asus4", "Dsus2", "Dsus4", "Esus4", "Gsus4",
-    "Cadd9", "Gadd9", "Dadd9",
-    "Bdim", "Adim", "Edim",
-    "C6", "D6", "G6", "A6",
-    "Caug", "Cdim7",
-    "A5", "E5", "G5", "D5",
+/** A barre position, 0-indexed string numbers (lowE=0), matching the web app's `chords.js` shape exactly. */
+data class ChordBarre(val fret: Int, val fromString: Int, val toString: Int)
+
+/**
+ * One chord voicing: [frets] is `[lowE, A, D, G, B, highE]`, `-1` = muted,
+ * `0` = open, `N` = absolute fret number. [baseFret] is the first fret of
+ * the 4-fret display window. [barre] is only ever present on [CHORD_DB]
+ * entries — never on a song's own `customChords` (the web app's UI has no
+ * barre editor, only the 6-value fret-string editor [parseFretsInput]
+ * parses).
+ */
+data class ChordVoicing(val frets: List<Int>, val baseFret: Int, val barre: ChordBarre? = null)
+
+/**
+ * Ported from the web app's `src/utils/chords.js` `CHORD_DB` — hand-transcribed
+ * (it's data, not a function, so there's no "run the real implementation"
+ * fixture strategy to apply the way [normalizeChordName]'s port uses), then
+ * verified byte-for-byte against `spec/chord-db.json` (a literal dump of the
+ * real JS object, not hand-typed) by `ChordDbGoldenFixtureTest` — so a
+ * transcription slip here fails a fast JVM test instead of silently
+ * shipping a wrong fretboard diagram.
+ */
+val CHORD_DB: Map<String, ChordVoicing> = mapOf(
+    // === MAJOR ===
+    "C" to ChordVoicing(listOf(-1, 3, 2, 0, 1, 0), 1),
+    "D" to ChordVoicing(listOf(-1, -1, 0, 2, 3, 2), 1),
+    "E" to ChordVoicing(listOf(0, 2, 2, 1, 0, 0), 1),
+    "F" to ChordVoicing(listOf(1, 3, 3, 2, 1, 1), 1, ChordBarre(1, 0, 5)),
+    "G" to ChordVoicing(listOf(3, 2, 0, 0, 0, 3), 1),
+    "A" to ChordVoicing(listOf(-1, 0, 2, 2, 2, 0), 1),
+    "B" to ChordVoicing(listOf(-1, 2, 4, 4, 4, 2), 2, ChordBarre(2, 1, 5)),
+    "Bb" to ChordVoicing(listOf(-1, 1, 3, 3, 3, 1), 1, ChordBarre(1, 1, 5)),
+    "Eb" to ChordVoicing(listOf(-1, -1, 1, 3, 4, 3), 1),
+    "Ab" to ChordVoicing(listOf(4, 6, 6, 5, 4, 4), 4, ChordBarre(4, 0, 5)),
+    "Db" to ChordVoicing(listOf(-1, 4, 6, 6, 6, 4), 4, ChordBarre(4, 1, 5)),
+    "F#" to ChordVoicing(listOf(2, 4, 4, 3, 2, 2), 2, ChordBarre(2, 0, 5)),
+    "Gb" to ChordVoicing(listOf(2, 4, 4, 3, 2, 2), 2, ChordBarre(2, 0, 5)),
+    "C#" to ChordVoicing(listOf(-1, 4, 6, 6, 6, 4), 4, ChordBarre(4, 1, 5)),
+    "G#" to ChordVoicing(listOf(4, 6, 6, 5, 4, 4), 4, ChordBarre(4, 0, 5)),
+    "A#" to ChordVoicing(listOf(-1, 1, 3, 3, 3, 1), 1, ChordBarre(1, 1, 5)),
+    "D#" to ChordVoicing(listOf(-1, -1, 1, 3, 4, 3), 1),
+    // === MINOR ===
+    "Am" to ChordVoicing(listOf(-1, 0, 2, 2, 1, 0), 1),
+    "Bm" to ChordVoicing(listOf(-1, 2, 4, 4, 3, 2), 2, ChordBarre(2, 1, 5)),
+    "Cm" to ChordVoicing(listOf(-1, 3, 5, 5, 4, 3), 3, ChordBarre(3, 1, 5)),
+    "Dm" to ChordVoicing(listOf(-1, -1, 0, 2, 3, 1), 1),
+    "Em" to ChordVoicing(listOf(0, 2, 2, 0, 0, 0), 1),
+    "Fm" to ChordVoicing(listOf(1, 3, 3, 1, 1, 1), 1, ChordBarre(1, 0, 5)),
+    "Gm" to ChordVoicing(listOf(3, 5, 5, 3, 3, 3), 3, ChordBarre(3, 0, 5)),
+    "Bbm" to ChordVoicing(listOf(-1, 1, 3, 3, 2, 1), 1, ChordBarre(1, 1, 5)),
+    "F#m" to ChordVoicing(listOf(2, 4, 4, 2, 2, 2), 2, ChordBarre(2, 0, 5)),
+    "Gbm" to ChordVoicing(listOf(2, 4, 4, 2, 2, 2), 2, ChordBarre(2, 0, 5)),
+    "C#m" to ChordVoicing(listOf(-1, 4, 6, 6, 5, 4), 4, ChordBarre(4, 1, 5)),
+    "Dbm" to ChordVoicing(listOf(-1, 4, 6, 6, 5, 4), 4, ChordBarre(4, 1, 5)),
+    "G#m" to ChordVoicing(listOf(4, 6, 6, 4, 4, 4), 4, ChordBarre(4, 0, 5)),
+    "Abm" to ChordVoicing(listOf(4, 6, 6, 4, 4, 4), 4, ChordBarre(4, 0, 5)),
+    "D#m" to ChordVoicing(listOf(-1, 6, 8, 8, 7, 6), 6, ChordBarre(6, 1, 5)),
+    // === DOMINANT 7 ===
+    "C7" to ChordVoicing(listOf(-1, 3, 2, 3, 1, 0), 1),
+    "D7" to ChordVoicing(listOf(-1, -1, 0, 2, 1, 2), 1),
+    "E7" to ChordVoicing(listOf(0, 2, 0, 1, 0, 0), 1),
+    "F7" to ChordVoicing(listOf(1, 3, 1, 2, 1, 1), 1, ChordBarre(1, 0, 5)),
+    "G7" to ChordVoicing(listOf(3, 2, 0, 0, 0, 1), 1),
+    "A7" to ChordVoicing(listOf(-1, 0, 2, 0, 2, 0), 1),
+    "B7" to ChordVoicing(listOf(-1, 2, 1, 2, 0, 2), 1),
+    "Bb7" to ChordVoicing(listOf(-1, 1, 3, 1, 3, 1), 1, ChordBarre(1, 1, 5)),
+    // === MAJOR 7 ===
+    "Cmaj7" to ChordVoicing(listOf(-1, 3, 2, 0, 0, 0), 1),
+    "Dmaj7" to ChordVoicing(listOf(-1, -1, 0, 2, 2, 2), 1),
+    "Emaj7" to ChordVoicing(listOf(0, 2, 1, 1, 0, 0), 1),
+    "Fmaj7" to ChordVoicing(listOf(-1, -1, 3, 2, 1, 0), 1),
+    "Gmaj7" to ChordVoicing(listOf(3, 2, 0, 0, 0, 2), 1),
+    "Amaj7" to ChordVoicing(listOf(-1, 0, 2, 1, 2, 0), 1),
+    // === MINOR 7 ===
+    "Am7" to ChordVoicing(listOf(-1, 0, 2, 0, 1, 0), 1),
+    "Bm7" to ChordVoicing(listOf(-1, 2, 4, 2, 3, 2), 2, ChordBarre(2, 1, 5)),
+    "Cm7" to ChordVoicing(listOf(-1, 3, 5, 3, 4, 3), 3, ChordBarre(3, 1, 5)),
+    "Dm7" to ChordVoicing(listOf(-1, -1, 0, 2, 1, 1), 1),
+    "Em7" to ChordVoicing(listOf(0, 2, 0, 0, 0, 0), 1),
+    "Fm7" to ChordVoicing(listOf(1, 3, 1, 1, 1, 1), 1, ChordBarre(1, 0, 5)),
+    "Gm7" to ChordVoicing(listOf(3, 5, 3, 3, 3, 3), 3, ChordBarre(3, 0, 5)),
+    // === SUS ===
+    "Asus2" to ChordVoicing(listOf(-1, 0, 2, 2, 0, 0), 1),
+    "Asus4" to ChordVoicing(listOf(-1, 0, 2, 2, 3, 0), 1),
+    "Dsus2" to ChordVoicing(listOf(-1, -1, 0, 2, 3, 0), 1),
+    "Dsus4" to ChordVoicing(listOf(-1, -1, 0, 2, 3, 3), 1),
+    "Esus4" to ChordVoicing(listOf(0, 2, 2, 2, 0, 0), 1),
+    "Gsus4" to ChordVoicing(listOf(3, 3, 0, 0, 1, 3), 1),
+    // === ADD ===
+    "Cadd9" to ChordVoicing(listOf(-1, 3, 2, 0, 3, 3), 1),
+    "Gadd9" to ChordVoicing(listOf(3, 2, 0, 2, 0, 3), 1),
+    "Dadd9" to ChordVoicing(listOf(-1, -1, 0, 2, 3, 0), 1),
+    // === DIM ===
+    "Bdim" to ChordVoicing(listOf(-1, 2, 3, 4, -1, -1), 1),
+    "Adim" to ChordVoicing(listOf(-1, 0, 1, 2, -1, -1), 1),
+    "Edim" to ChordVoicing(listOf(0, 1, 2, 3, -1, -1), 1),
+    // === SIXTH ===
+    "C6" to ChordVoicing(listOf(-1, 0, 2, 2, 1, 3), 1),
+    "D6" to ChordVoicing(listOf(-1, -1, 0, 2, 0, 2), 1),
+    "G6" to ChordVoicing(listOf(3, 2, 0, 0, 0, 0), 1),
+    "A6" to ChordVoicing(listOf(-1, 0, 2, 2, 2, 2), 1),
+    // === AUGMENTED ===
+    "Caug" to ChordVoicing(listOf(-1, 3, 2, 1, 1, -1), 1),
+    // === DIMINISHED 7 ===
+    "Cdim7" to ChordVoicing(listOf(2, -1, 1, 2, 1, -1), 1),
+    // === POWER ===
+    "A5" to ChordVoicing(listOf(-1, 0, 2, 2, -1, -1), 1),
+    "E5" to ChordVoicing(listOf(0, 2, 2, -1, -1, -1), 1),
+    "G5" to ChordVoicing(listOf(3, 5, 5, -1, -1, -1), 3),
+    "D5" to ChordVoicing(listOf(-1, -1, 0, 2, 3, -1), 1),
 )
+
+/**
+ * Look up a raw chord name. `customChords` (a song's own user-entered
+ * voicings, keyed by normalized chord name) takes priority over [CHORD_DB],
+ * so a user can override a built-in voicing they think is wrong, not just
+ * fill in a gap. Ported from `lookupChord` in the web app's `chords.js`.
+ */
+fun lookupChord(raw: String?, customChords: Map<String, ChordVoicing>? = null): ChordVoicing? {
+    val name = normalizeChordName(raw)
+    if (name.isEmpty()) return null
+    customChords?.get(name)?.let { return it }
+    return CHORD_DB[name]
+}
+
+/** Just the recognized chord names — see this file's own doc comment for why no voicing data. */
+val CHORD_DB_KEYS: Set<String> = CHORD_DB.keys
 
 /**
  * One token of a chord-track line — ported from `tokenizeChordLine`'s

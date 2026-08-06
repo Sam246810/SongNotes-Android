@@ -3,6 +3,8 @@ package com.songnotes.core.data
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 import com.songnotes.core.domain.ChordAnchor
+import com.songnotes.core.domain.ChordBarre
+import com.songnotes.core.domain.ChordVoicing
 import com.songnotes.core.domain.Song
 import com.songnotes.core.domain.SongLine
 import com.songnotes.core.domain.SongMeta
@@ -56,12 +58,15 @@ data class SongEntity(
     val deletedAt: Long? = null,
     val pendingSync: Boolean = false,
     val remoteRev: Int? = null,
+    /** [Song.customChords], JSON-encoded the same way [linesJson] is -- always read/written whole, never queried. */
+    val customChordsJson: String = "{}",
 ) {
     fun toDomain(): Song = Song(
         id = id,
         title = title,
         meta = SongMeta(bpm = bpm, key = key, tuning = tuning, capo = capo),
         lines = parseLinesJson(linesJson),
+        customChords = parseCustomChordsJson(customChordsJson),
         createdAt = createdAt,
         updatedAt = updatedAt,
     )
@@ -82,9 +87,40 @@ data class SongEntity(
             tuning = song.meta.tuning,
             capo = song.meta.capo,
             linesJson = linesToJson(song.lines),
+            customChordsJson = customChordsToJson(song.customChords),
             createdAt = song.createdAt,
             updatedAt = song.updatedAt,
         )
+
+        private fun customChordsToJson(customChords: Map<String, ChordVoicing>): String {
+            val obj = JSONObject()
+            for ((name, voicing) in customChords) {
+                val voicingJson = JSONObject()
+                    .put("frets", JSONArray(voicing.frets))
+                    .put("baseFret", voicing.baseFret)
+                voicing.barre?.let {
+                    voicingJson.put("barre", JSONObject().put("fret", it.fret).put("fromString", it.fromString).put("toString", it.toString))
+                }
+                obj.put(name, voicingJson)
+            }
+            return obj.toString()
+        }
+
+        private fun parseCustomChordsJson(json: String): Map<String, ChordVoicing> {
+            val obj = JSONObject(json)
+            val result = LinkedHashMap<String, ChordVoicing>()
+            for (name in obj.keys()) {
+                val voicingJson = obj.getJSONObject(name)
+                val fretsJson = voicingJson.getJSONArray("frets")
+                val frets = (0 until fretsJson.length()).map { fretsJson.getInt(it) }
+                val barreJson = voicingJson.optJSONObject("barre")
+                val barre = barreJson?.let {
+                    ChordBarre(fret = it.getInt("fret"), fromString = it.getInt("fromString"), toString = it.getInt("toString"))
+                }
+                result[name] = ChordVoicing(frets = frets, baseFret = voicingJson.getInt("baseFret"), barre = barre)
+            }
+            return result
+        }
 
         private fun linesToJson(lines: List<SongLine>): String {
             val arr = JSONArray()

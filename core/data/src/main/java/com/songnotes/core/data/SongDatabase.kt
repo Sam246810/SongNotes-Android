@@ -41,7 +41,14 @@ private val MIGRATION_1_2 = object : Migration(1, 2) {
     }
 }
 
-@Database(entities = [SongEntity::class], version = 2, exportSchema = false)
+/** v2 -> v3 (Phase 8): adds `customChordsJson` for [Song.customChords]. Existing rows default to `"{}"` -- no song has any custom voicings until Phase 8's editor lets someone add one. */
+private val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE songs ADD COLUMN customChordsJson TEXT NOT NULL DEFAULT '{}'")
+    }
+}
+
+@Database(entities = [SongEntity::class], version = 3, exportSchema = false)
 abstract class SongDatabase : RoomDatabase() {
     abstract fun songDao(): SongDao
 
@@ -67,7 +74,7 @@ abstract class SongDatabase : RoomDatabase() {
                 DB_NAME,
             )
                 .openHelperFactory(SupportFactory(dbKey))
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
         }
     }

@@ -9,12 +9,10 @@ package com.songnotes.core.domain
  * `docs/PLAN.md`'s own locked-in decision: "Chord binding: Per-chord
  * anchors `{i, c}` — not the padded parallel string."
  *
- * [customChords] (wire-format §4's user-authored voicing overrides) is
- * deliberately not modeled yet — nothing in Phase 5.5 renders a chord
- * diagram, that's Phase 8, so there's nothing yet that would read it. Add
- * it when Phase 8 needs it, same "front-load only when a phase's own
- * criterion needs it" judgment call already applied elsewhere in this
- * project.
+ * [Song.customChords] (wire-format §4's user-authored voicing overrides) is
+ * now modeled, added for Phase 8 ("Editor UI") once a chord diagram exists
+ * to read it — same "front-load only when a phase's own criterion needs it"
+ * judgment call already applied elsewhere in this project.
  */
 
 /** One chord placed at character index [i] of a [SongLine]'s `lyrics`, wire-format §4. */
@@ -36,6 +34,8 @@ data class Song(
     val title: String,
     val meta: SongMeta = SongMeta(),
     val lines: List<SongLine> = emptyList(),
+    /** User-authored voicing overrides, keyed by normalized chord name — see [lookupChord]. */
+    val customChords: Map<String, ChordVoicing> = emptyMap(),
     val createdAt: Long,
     val updatedAt: Long,
 )
