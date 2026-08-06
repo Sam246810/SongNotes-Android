@@ -172,6 +172,26 @@ class SyncEngineTest {
     }
 
     @Test
+    fun `pull parses Postgrest's real offset timestamp format for a tombstone, not just the Z-suffixed form this code writes itself`() = runBlocking {
+        // Regression test: Postgrest returns timestamptz columns as "+00:00"-offset
+        // text (e.g. "2026-08-06T22:43:22.991+00:00"), not the "Z"-suffixed form
+        // toIso() writes for outgoing rows. A prior parseIso() implementation used a
+        // SimpleDateFormat pattern with a hardcoded literal 'Z', which rejected this
+        // real shape outright -- every pull touching a tombstone silently retried
+        // forever on-device (found via live testing, not this suite -- see
+        // docs/handoff/PHASE-07.md). This fixture uses the exact format Postgrest
+        // sends so this class of bug can't reach a live device again undetected.
+        dao.upsert(localSong(rev = 1, remoteRev = 1, pendingSync = false))
+        adapter.rows["song-1"] = buildRemoteRow("song-1", rev = 2, deletedAtIso = "2026-02-01T00:00:00.991+00:00")
+
+        engine.sync(userId, dek)
+
+        val local = dao.rows["song-1"]!!
+        assertNotNull(local.deletedAt)
+        assertEquals(2, local.rev)
+    }
+
+    @Test
     fun `pull does not clobber a local row that is already at least as new`() = runBlocking {
         dao.upsert(localSong(rev = 5, remoteRev = 5, pendingSync = false, title = "Local Is Newer"))
         adapter.rows["song-1"] = buildRemoteRow("song-1", rev = 3, title = "Stale Remote")
