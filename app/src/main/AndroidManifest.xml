@@ -4,6 +4,10 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Phase 7: Supabase auth/sync (SupabaseAuthRepository, SyncEngine) needs real
+         network access; nothing before this phase made any network calls. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Normal permission, no runtime request needed — for Rule D's
          haptic cueing during calibration (visual + haptic only, no
          audible click competing with the sweep/mic). -->

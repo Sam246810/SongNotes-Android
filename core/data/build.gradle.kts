@@ -1,3 +1,5 @@
+import java.util.Properties
+
 // Android library, not pure-JVM like :core:domain -- Room + SQLCipher + Android
 // Keystore all need the Android framework, unlike this module's original crypto-only
 // content (Kdf.kt/Envelope.kt/AccountKeys.kt), which has zero android.* imports and
@@ -8,7 +10,21 @@ plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.kotlin.serialization)
 }
+
+// Same Supabase project as the desktop web app's .env.local (VITE_SUPABASE_URL /
+// VITE_SUPABASE_ANON_KEY) -- read from local.properties (gitignored), never
+// committed, matching the web app's own gitignored-local-file convention. Falls
+// back to empty strings (not a build failure) so the rest of the app still
+// builds/runs for anyone who hasn't set these up yet -- Phase 7's Supabase
+// features simply won't have anything to talk to until they are.
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+val supabaseUrl: String = localProperties.getProperty("supabase.url", "")
+val supabaseAnonKey: String = localProperties.getProperty("supabase.anonKey", "")
 
 android {
     namespace = "com.songnotes.core.data"
@@ -16,9 +32,12 @@ android {
 
     defaultConfig {
         minSdk = 30
-        // Room schema files aren't checked in yet -- no shipped release to migrate
-        // FROM, so there's nothing for a migration test to diff against. Add
-        // exportSchema/schemas-dir once a real migration is written.
+        buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
+        buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     compileOptions {
@@ -55,6 +74,27 @@ dependencies {
     // practice: not a separate encryption layer bolted on top of Room, but the
     // SQLite implementation underneath it being an encrypting one.
     implementation(libs.sqlcipher.android)
+
+    // Auth + Postgrest against the SAME Supabase project/schema the desktop web
+    // app already uses (see docs/handoff/PHASE-07.md) -- email+password, matching
+    // the web app's existing auth exactly rather than introducing Google Sign-In/
+    // Credential Manager, which would need external OAuth infra this repo has no
+    // way to set up. ktor-client-okhttp is the HTTP engine supabase-kt needs on
+    // Android; kotlinx-serialization is how Postgrest (de)serializes rows.
+    //
+    // `api`, not `implementation`, for the supabase-kt pieces: SupabaseAuthRepository's
+    // own public constructor takes a `SupabaseClient` default parameter, so :app
+    // needs that type on its compile classpath too, not just this module's own.
+    api(platform(libs.supabase.bom))
+    api(libs.supabase.postgrest)
+    api(libs.supabase.auth)
+    implementation(libs.ktor.client.okhttp)
+    api(libs.kotlinx.serialization.json)
+
+    // Outbox push + incremental pull run as a WorkManager CoroutineWorker --
+    // lives here, not :app, since it's part of the "sync engine" the plan's own
+    // module layout puts in :core:data alongside Room/SQLCipher/crypto.
+    implementation(libs.androidx.work.runtime.ktx)
 
     testImplementation(libs.junit)
     testImplementation(libs.androidx.room.testing)

@@ -1,10 +1,12 @@
 # Phase 7 — Auth + Supabase sync
 
-**Status (2026-07-31): First pass done — Tier 0 sync fix (rev-based optimistic
-concurrency, tombstones, conflict copies) shipped in the desktop web app, per
-the plan's own explicit priority ("fix the data-loss bug before the product
-UI"). Android auth/sync (Credential Manager, supabase-kt, outbox +
-`SyncWorker`) NOT started — see "What's left" below.**
+**Status (2026-08-06): Done — Tier 0 sync fix shipped in the desktop web app
+(2026-07-31 pass), followed by full Android auth/sync (email+password via
+supabase-kt, Room sync columns + migration, `SyncEngine`/`SyncWorker`,
+sign-in/sign-up UI) built and verified end-to-end against the real Supabase
+project on a physical device, cross-checked against the web app. See "Android
+auth + sync" below for what shipped, two real bugs found by that live
+verification, and what's still deliberately deferred.**
 
 Scoped deliberately, same reasoning as every prior phase's first pass: the
 plan calls out the Tier 0 sync fix as the thing to do *first* in this phase,
@@ -129,25 +131,138 @@ hand on it regardless). Real-world verification (two actual browser sessions
 racing a conflict, or a real cross-device delete) is still open until that
 SQL has been applied and someone drives it end-to-end.
 
-## What's left (this phase, deliberately deferred)
+## Android auth + sync (2026-08-06 pass)
 
-- **The migration SQL hasn't been run against the live Supabase project
-  yet** — the user needs to paste the updated `supabase/schema.sql` into
-  their Supabase SQL Editor. Until then, the new `rev`/`deleted_at` columns
-  don't exist server-side and this code will fail against the real backend
-  (only the fake-adapter test suite has exercised it so far).
-- **Tier 1 (per-line 3-way merge)** — explicitly deferred by the plan itself
-  ("comes after the product UI"), not attempted this pass.
-- **Android auth (Credential Manager → `signInWithIdToken`)** — not started.
-  The Android app has zero Supabase/auth integration today (no
-  `supabase-kt` dependency, no sign-in screen, nothing) — Phase 6's Keystore
-  device wrap was built and verified standalone specifically *because*
-  there's no real account flow yet to wire it into.
-- **Android `supabase-kt` + outbox + `SyncWorker`** — not started. This is
-  the Android-side consumer of the exact `rev`/`deleted_at` sync model this
-  pass just established server-side; building it against a schema that
-  doesn't match what's live would be premature.
-- **`dekId` stamped on rows** — still not done (carried over from Phase 6's
-  own "What's left"); this phase's sync work didn't add it either, since
-  nothing yet needs to distinguish "encrypted under a previous key" from
-  "decrypt threw."
+**Auth**: `core/data/.../SupabaseAuthRepository.kt` — plain email+password via
+supabase-kt's `Auth`/`Postgrest` plugins, deliberately matching the web app's
+own `AuthProvider.jsx` flow exactly (same Supabase project, same `user_keys`
+table, same envelope v2 format) rather than Google Sign-In/Credential
+Manager, since the web app has no OAuth provider configured and matching its
+existing method is what actually keeps both clients on the same backend.
+supabase-kt pinned to **3.0.0** (not latest) — newer releases need a Kotlin
+compiler version incompatible with this project's Kotlin 2.0.21 pin; verified
+by decompiling the actual `.aar`/`.jar` via `javap` to confirm the real
+package is `io.github.jan.supabase`, not the commonly-guessed
+`io.github.jan-tennert.supabase`.
+
+**Sync**: `core/data/.../SyncEngine.kt` (push pending + incremental pull,
+plain suspend functions against a `SongsRemoteAdapter` interface so it's
+testable with `FakeSongsAdapter`/`FakeSongDao`, no real network needed) +
+`SongSyncWorker.kt` (thin `CoroutineWorker` wrapper). `SongEntity` gained
+`rev`/`deletedAt`/`pendingSync`/`remoteRev` columns via Room migration 1→2
+(raw `ALTER TABLE`, `exportSchema = false` — Room's KSP schema-bundle export
+hits an `AbstractMethodError` against this project's pinned
+kotlinx-serialization version, the same class of "too new for Kotlin 2.0.21"
+conflict as the supabase-kt pin above; verified live on-device instead).
+Chords are pushed/pulled as `:core:domain`'s native anchor shape directly —
+no conversion needed on the Android side, unlike the web app (see "Wire
+format" below).
+
+**Manual "Sync now" button** (`MainActivity.kt`, Diagnostics screen, visible
+when signed in): there is currently **no periodic background sync and
+nothing triggers a sync after a local edit** — `enqueueOneTime()` is only
+ever called right after sign-in/sign-up. Without a manual trigger, verifying
+a push or pull required signing out and back in for every single change,
+which is both slow and defeats the point of testing incremental sync. This
+button is a real, permanent affordance (not just a test hook) until periodic
+sync exists.
+
+### Two real bugs found by live device verification (not code review)
+
+Both were caught only because this pass insisted on testing against the real
+Supabase project on a physical device and cross-checking the live web app,
+rather than stopping at the fake-adapter unit tests.
+
+1. **`signUp()` silently overwrote a real account's encryption envelope.**
+   `client.auth.signUpWith(Email)` can resolve `currentUserId` successfully
+   even for an *already-registered* email, if a Supabase Auth session for
+   that user was already active (e.g. a `signIn` had just succeeded moments
+   earlier before throwing on an unrelated envelope-parse error, and the
+   user then retried via the Sign Up tab). The original code treated any
+   resolved `currentUserId` as license to mint a fresh DEK and overwrite
+   `user_keys.envelope` — no check for whether a row already existed. This
+   happened for real during this pass's own on-device testing and
+   permanently orphaned the test account's existing songs. **Fixed**:
+   `signUp()` now throws (`check(!hasStoredUserKeys(userId))`) before
+   creating any keys if a `user_keys` row already exists; `signIn()` fetches
+   the raw row first and only attempts `EnvelopeV2.fromJson` inside the
+   definitely-non-null branch, so a parse failure can never be
+   misinterpreted as "no envelope, safe to create one." No unit test covers
+   this specific fix — `SupabaseAuthRepository` isn't structured for
+   fake-based testing the way `SyncEngine` is (would need mocking the whole
+   `Auth` plugin); a real, acknowledged gap.
+2. **`SyncEngine.parseIso()` couldn't parse Postgrest's own timestamp
+   format.** It used `SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")` with
+   a hardcoded literal `'Z'`, but Postgrest returns `timestamptz` columns
+   as `+00:00`-offset text (e.g. `"2026-08-06T22:43:22.991+00:00"`), which
+   that pattern rejects outright. Every `pull()` that touched a
+   `deleted_at`/`created_at`/`updated_at` value threw and the whole worker
+   silently retried forever (`Result.retry()` with no logging, so this was
+   invisible until `Log.e` was added specifically to chase it down) —
+   concretely, a delete made on the web app never actually reached the
+   Android device. **Fixed**: switched to `java.time`
+   (`OffsetDateTime.parse(iso).toInstant()`), which accepts both `Z` and
+   `+00:00` — safe since `minSdk = 30` needs no desugaring. `SongSyncWorker`
+   keeps the `Log.e` on sync failure permanently; a silent `Result.retry()`
+   with no logging is exactly how this bug went undetected in the first
+   place.
+
+**Verified end-to-end on a physical device** against the real Supabase
+project (`cryokinetic2468@gmail.com`, a dedicated test account): sign-in →
+create a song on Android → "Sync now" → confirmed the song appears correctly
+on the web app (same title, decrypts correctly) → deleted it on the web app →
+"Sync now" on Android → confirmed the tombstone pulled and the song
+disappeared from the Android list. Both push and pull, both directions,
+against the real backend, not just the fake-adapter test suite.
+
+**A separate, unrelated incident during this same verification pass**: the
+Supabase free-tier project had auto-paused from inactivity, which produced a
+different, easily-confused error ("`signUpWith(Email)` succeeded but no
+current user") — initially misdiagnosed as an email-confirmation-gating
+issue before being correctly identified as the project simply being paused.
+Unpausing it via the Supabase dashboard resolved it; no code was at fault.
+
+## What's left (deliberately deferred)
+
+- **Periodic/automatic background sync** — there is only the manual "Sync
+  now" button and the one-shot sync on sign-in/sign-up. No `PeriodicWorkRequest`,
+  no sync-after-local-edit trigger.
+- **No background DEK unlock** — `SongSyncWorker` no-ops successfully if
+  `KeySession` has no DEK established (i.e. the app process was killed since
+  the user last signed in). A true background sync would need Phase 6's
+  Keystore device-wrap wired into a background-safe unlock flow, which
+  doesn't exist yet.
+- **Kotlin has no v1-envelope reader** — `EnvelopeV2.fromJson` throws on
+  anything but a v2 envelope, by design (Phase 6's own scoping decision,
+  reaffirmed explicitly during this pass rather than building v1 compat:
+  "no need to protect legacy accounts as nothing is live"). Any account
+  whose envelope predates v2 cannot sign in from Android.
+- **Full `WIRE-FORMAT-v2.md` alignment is partial.** This pass aligned only
+  the chords representation (anchors, not the web app's old padded-string
+  form — see "Wire format" below); the doc's `dekId` column, DB-side rev-bump
+  trigger, and `v`/`id`/`meta`-wrapped content-JSON shape were not
+  implemented on either client. Both clients still use the simpler
+  client-computed-rev scheme and flat content-JSON shape this Tier 0 pass
+  originally built.
+- **Tier 1 (per-line 3-way merge)** — still explicitly deferred by the plan
+  itself.
+- **`dekId` stamped on rows** — still not done (carried over from Phase 6).
+
+## Wire format: chords as anchors, not the padded editing string
+
+Discovered while building the Android sync path: `:core:domain`'s `Song`
+model stores each line's chords as `ChordAnchor(i, c)` list (the shape
+`WIRE-FORMAT-v2.md` specifies), but the web app's `songsRepository.js` was
+still storing `line.chords` as the same fixed-width padded string its editor
+uses internally — a representation with no defined behavior once lyrics
+differ in length from what the chords were originally padded against (e.g.
+edited on a different device/font). Rather than have Android either read a
+format it doesn't understand or duplicate the web app's padding logic, the
+web app was converted to store anchors too:
+`src/utils/chordAnchors.js` (`chordsLineToAnchors`/`anchorsToChordsLine`,
+line-for-line port of `ChordAnchors.kt`) plugs into
+`songsRepository.js`'s `_buildRow`/read path, with a guard
+(`Array.isArray(l.chords) ? anchorsToChordsLine(...) : l.chords`) to keep
+reading pre-existing encrypted rows still in the old padded-string shape.
+Both clients now read/write the exact same anchor shape with zero
+conversion needed on the Android side.

@@ -20,6 +20,26 @@ import org.json.JSONObject
  * (not folded into the blob) since a later pass filtering/sorting by, say, `key`
  * or `bpm` is plausible and those should be real indexable columns when that
  * happens, unlike the lines.
+ *
+ * [rev]/[deletedAt] (schema v2, Phase 7) mirror the remote `songs` table's own
+ * `rev`/`deleted_at` columns exactly -- this row's last known position in the
+ * same optimistic-concurrency scheme the desktop web app already uses (see
+ * `docs/handoff/PHASE-07.md`), so [SupabaseSongsAdapter.updateWithRevCheck] can
+ * be called with the value already sitting on this row, no separate lookup.
+ * [pendingSync] marks a row with a local edit not yet confirmed pushed --
+ * deliberately a single flag per row rather than the plan's literal "sync_queue"
+ * table: with one outstanding local edit possible per song at a time (the UI
+ * always edits the CURRENT row in place, same as the web app's own debounce-
+ * per-song-id map, not an event log), a queue table would track information a
+ * boolean already captures, for no real benefit at this scale.
+ *
+ * [remoteRev] is null until the first successful push confirms this song
+ * actually exists on the server -- what tells [SyncWorker] whether to `insert`
+ * (never pushed before) or `updateWithRevCheck` (exists remotely at this rev)
+ * for a given pending row, without needing to infer it from a failed insert's
+ * error response (a real Postgres constraint-violation exception is not a
+ * reasonable substitute for tracked state on the routine "this song already
+ * exists" path).
  */
 @Entity(tableName = "songs")
 data class SongEntity(
@@ -32,6 +52,10 @@ data class SongEntity(
     val linesJson: String,
     val createdAt: Long,
     val updatedAt: Long,
+    val rev: Int = 1,
+    val deletedAt: Long? = null,
+    val pendingSync: Boolean = false,
+    val remoteRev: Int? = null,
 ) {
     fun toDomain(): Song = Song(
         id = id,
@@ -43,6 +67,13 @@ data class SongEntity(
     )
 
     companion object {
+        /**
+         * Builds a row from a domain [Song] with fresh sync bookkeeping (`rev = 1`,
+         * not pending). Callers updating an EXISTING song should read the current
+         * row first and increment its `rev`/set `pendingSync = true` themselves
+         * (see `SongRepository.upsert`) -- this alone is only correct for a
+         * genuinely new song.
+         */
         fun fromDomain(song: Song): SongEntity = SongEntity(
             id = song.id,
             title = song.title,

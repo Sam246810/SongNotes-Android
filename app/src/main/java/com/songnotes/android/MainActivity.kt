@@ -3,8 +3,11 @@ package com.songnotes.android
 import android.os.Bundle
 import androidx.activity.compose.setContent
 import androidx.fragment.app.FragmentActivity
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -13,12 +16,16 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.songnotes.core.audio.AudioEngine
+import com.songnotes.core.data.SongSyncWorker
+import com.songnotes.core.data.SupabaseAuthRepository
+import kotlinx.coroutines.launch
 
-private enum class Screen { Diagnostics, Wizard, Manual, TapAlong, Scratchpad, Songs, SongEditor }
+private enum class Screen { Diagnostics, Wizard, Manual, TapAlong, Scratchpad, Songs, SongEditor, Auth }
 
 // FragmentActivity, not the usual bare ComponentActivity Compose apps default
 // to -- BiometricPrompt (see DiagnosticsScreen.kt's device-wrap smoke test)
@@ -58,7 +65,48 @@ class MainActivity : FragmentActivity() {
                             TapAlongCalibrationScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
                         Screen.Scratchpad ->
                             ScratchpadScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
+                        Screen.Auth -> AuthScreen(onDone = { screen = Screen.Diagnostics })
                         Screen.Diagnostics -> Column(modifier = Modifier.fillMaxSize()) {
+                            // Re-read on every recomposition of this branch (not remembered) --
+                            // navigating back here after AuthScreen's onDone() is exactly when
+                            // this needs to reflect a just-changed sign-in state.
+                            val authRepo = remember { SupabaseAuthRepository() }
+                            val authScope = rememberCoroutineScope()
+                            // Sign-in refreshes this row naturally (navigating to Screen.Auth and
+                            // back via onDone() recomposes this whole branch); sign-out doesn't
+                            // change `screen`, so it needs its own explicit recomposition trigger.
+                            var authVersion by remember { mutableStateOf(0) }
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(24.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                @Suppress("UNUSED_EXPRESSION") authVersion
+                                Text(authRepo.currentUserEmail?.let { "Signed in as $it" } ?: "Not signed in")
+                                Button(onClick = {
+                                    if (authRepo.isSignedIn) {
+                                        authScope.launch {
+                                            authRepo.signOut()
+                                            authVersion++
+                                        }
+                                    } else {
+                                        screen = Screen.Auth
+                                    }
+                                }) {
+                                    Text(if (authRepo.isSignedIn) "Sign out" else "Sign in / Sign up")
+                                }
+                            }
+                            if (authRepo.isSignedIn) {
+                                // Manual trigger -- there's no periodic background sync yet (see
+                                // SongSyncWorker's doc comment), and nothing currently enqueues a
+                                // sync after a local edit, only right after sign-in. This is the
+                                // only way to push a just-saved edit without signing out and back in.
+                                Button(
+                                    onClick = { SongSyncWorker.enqueueOneTime(applicationContext) },
+                                    modifier = Modifier.padding(horizontal = 24.dp),
+                                ) {
+                                    Text("Sync now")
+                                }
+                            }
                             Button(
                                 onClick = { screen = Screen.Songs },
                                 modifier = Modifier.padding(24.dp),

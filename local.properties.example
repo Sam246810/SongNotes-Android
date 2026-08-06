@@ -2,3 +2,11 @@
 # Android Studio writes this automatically on first sync — you usually don't
 # need to create it by hand.
 sdk.dir=/path/to/Android/sdk
+
+# Same Supabase project as the desktop web app's .env.local (VITE_SUPABASE_URL /
+# VITE_SUPABASE_ANON_KEY) -- Phase 7 syncs against the exact same backend/schema.
+# The anon key is public-by-design (Row Level Security is what actually scopes
+# access), but it still lives here rather than in source, matching the web app's
+# own gitignored-local-file convention.
+supabase.url=https://your-project.supabase.co
+supabase.anonKey=your-anon-key
