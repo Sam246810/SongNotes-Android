@@ -60,13 +60,26 @@ data class MultitrackProject(val tracks: List<MultitrackTrackSpec> = emptyList()
      * territory (dragging a clip's left edge) can update startFrame and the
      * trim window together as one atomic change instead of two separate
      * project mutations.
+     *
+     * The transformed clip is re-spliced into the track via
+     * [AudioEngine.punchIn] rather than just replacing it in place — two
+     * clips on the same track must never overlap during playback (they'd
+     * sum together, same as an un-spliced overdub would), so dragging or
+     * trimming a clip on top of a neighbor has to trim/drop the neighbor's
+     * overlapped region exactly the way recording over it already does via
+     * [withPunchIn], not leave both clips there.
      */
     fun withClipTransform(
+        engine: AudioEngine,
         trackIndex: Int,
         clipIndex: Int,
         transform: (MultitrackClipSpec) -> MultitrackClipSpec,
-    ): MultitrackProject = updateTrack(trackIndex) { track ->
-        track.copy(clips = track.clips.mapIndexed { i, c -> if (i == clipIndex) transform(c) else c })
+    ): MultitrackProject {
+        val track = tracks[trackIndex]
+        val transformedClip = transform(track.clips[clipIndex])
+        val remainingClips = track.clips.filterIndexed { i, _ -> i != clipIndex }
+        val splicedClips = engine.punchIn(remainingClips, transformedClip)
+        return updateTrack(trackIndex) { it.copy(clips = splicedClips) }
     }
 
     /**

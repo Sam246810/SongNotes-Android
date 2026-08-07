@@ -87,6 +87,7 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     var selectedTrackIndex by remember { mutableStateOf<Int?>(null) }
     var bpmText by remember { mutableStateOf("80") }
     var isRecording by remember { mutableStateOf(false) }
+    var scrubFrame by remember { mutableStateOf(0L) }
     var isPlaying by remember { mutableStateOf(false) }
     var isExporting by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
@@ -158,7 +159,7 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
         context.startForegroundService(Intent(context, RecordingForegroundService::class.java))
         val armed = project.armOverdub(
             engine, takeFile.absolutePath, bpm, beatsPerBar = 4, countInBeats = 4,
-            targetIndex = targetIndex, backingTracksStartFrame = 0L,
+            targetIndex = targetIndex, backingTracksStartFrame = scrubFrame,
             calibrationOffsetFrames = calibrationOffsetFrames,
         )
         if (!armed) {
@@ -184,7 +185,7 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
             }
             val takeSamples = FloatArray(takeBytes.size / 4)
             ByteBuffer.wrap(takeBytes).order(ByteOrder.nativeOrder()).asFloatBuffer().get(takeSamples)
-            val newClip = MultitrackClipSpec(buffer = takeSamples, startFrame = 0L)
+            val newClip = MultitrackClipSpec(buffer = takeSamples, startFrame = scrubFrame)
             project = project.withPunchIn(engine, targetIndex, newClip)
             persist(project)
             statusMessage = "Recorded %.1fs onto track %d.".format(
@@ -274,12 +275,18 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
             tracks = project.tracks,
             totalFrames = project.totalFrames,
             playbackFrame = if (isPlaying) engineState.playbackFrame.toLong() else null,
+            scrubFrame = scrubFrame,
+            onScrubChange = { scrubFrame = it },
             enabled = !isRecording && !isPlaying,
             onClipChange = { trackIndex, clipIndex, transform ->
-                project = project.withClipTransform(trackIndex, clipIndex, transform)
+                project = project.withClipTransform(engine, trackIndex, clipIndex, transform)
                 persist(project)
             },
             modifier = Modifier.fillMaxWidth(),
+        )
+        Text(
+            "Punch-in point: %.1fs".format(scrubFrame / kSampleRate.toDouble()),
+            style = MaterialTheme.typography.bodySmall,
         )
         Spacer(Modifier.height(16.dp))
 

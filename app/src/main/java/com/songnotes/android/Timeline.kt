@@ -2,6 +2,7 @@ package com.songnotes.android
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -33,19 +35,26 @@ import com.songnotes.core.audio.MultitrackTrackSpec
 
 private val ClipColor = Color(0xFF6EE7B7)
 private val PlayheadColor = Color(0xFFF87171)
+private val ScrubColor = Color(0xFF60A5FA)
 private val TrimHandleColor = Color(0xFFB45309)
 private val TrackRowHeight = 56.dp
 private val TrackRowSpacing = 4.dp
 private val TrimHandleWidth = 12.dp
 private val MinClipWidth = 8.dp
+private val RulerHeight = 20.dp
 
 /** No-op default for [Timeline]'s edit callback — read-only callers don't need to pass one. */
 private val NoOpClipChange: (Int, Int, (MultitrackClipSpec) -> MultitrackClipSpec) -> Unit = { _, _, _ -> }
 
 /**
- * Project timeline: one horizontal row per track, each clip drawn as a
- * [Waveform] positioned and sized against [totalFrames], with a playhead
- * line overlaid at [playbackFrame] (null hides it — nothing is playing).
+ * Project timeline: a tappable ruler above one horizontal row per track,
+ * each clip drawn as a [Waveform] positioned and sized against
+ * [totalFrames]. A single position marker line spans the ruler and every
+ * track row: red at [playbackFrame] while something is playing, otherwise
+ * blue at [scrubFrame] — the project frame the NEXT punch-in recording
+ * will land at (see [ScrubRuler] and `ScratchpadScreen.beginRecording`,
+ * which passes this same frame as `armOverdub`'s `backingTracksStartFrame`
+ * so the backing tracks and the new take agree on where "now" is).
  * Peak pyramids are built once per clip buffer, remembered keyed on the
  * buffer array's identity, so scrolling/recomposing this screen doesn't
  * re-run [AudioEngine.buildPeakPyramid] for clips that haven't changed.
@@ -67,6 +76,8 @@ fun Timeline(
     tracks: List<MultitrackTrackSpec>,
     totalFrames: Long,
     playbackFrame: Long?,
+    scrubFrame: Long = 0L,
+    onScrubChange: (Long) -> Unit = {},
     enabled: Boolean = true,
     onClipChange: (trackIndex: Int, clipIndex: Int, transform: (MultitrackClipSpec) -> MultitrackClipSpec) -> Unit = NoOpClipChange,
     modifier: Modifier = Modifier,
@@ -76,32 +87,90 @@ fun Timeline(
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
         val widthPx = with(LocalDensity.current) { maxWidth.toPx() }
 
-        Box {
-            Column(verticalArrangement = Arrangement.spacedBy(TrackRowSpacing)) {
-                tracks.forEachIndexed { trackIndex, track ->
-                    TimelineTrackRow(
-                        engine = engine,
-                        trackIndex = trackIndex,
-                        track = track,
-                        totalFrames = totalFrames,
-                        widthPx = widthPx,
-                        enabled = enabled,
-                        onClipChange = onClipChange,
-                    )
-                }
-            }
+        Column {
+            ScrubRuler(
+                totalFrames = totalFrames,
+                scrubFrame = scrubFrame,
+                widthPx = widthPx,
+                enabled = enabled,
+                onScrubChange = onScrubChange,
+            )
+            Spacer(Modifier.height(TrackRowSpacing))
 
-            if (playbackFrame != null) {
-                val fraction = (playbackFrame.toFloat() / totalFrames.toFloat()).coerceIn(0f, 1f)
+            Box {
+                Column(verticalArrangement = Arrangement.spacedBy(TrackRowSpacing)) {
+                    tracks.forEachIndexed { trackIndex, track ->
+                        TimelineTrackRow(
+                            engine = engine,
+                            trackIndex = trackIndex,
+                            track = track,
+                            totalFrames = totalFrames,
+                            widthPx = widthPx,
+                            enabled = enabled,
+                            onClipChange = onClipChange,
+                        )
+                    }
+                }
+
+                val markerFrame = playbackFrame ?: scrubFrame
+                val markerColor = if (playbackFrame != null) PlayheadColor else ScrubColor
+                val fraction = (markerFrame.toFloat() / totalFrames.toFloat()).coerceIn(0f, 1f)
                 Box(
                     modifier = Modifier
                         .offset { IntOffset((widthPx * fraction).toInt(), 0) }
                         .width(2.dp)
                         .height(TrackRowHeight * tracks.size + TrackRowSpacing * (tracks.size - 1))
-                        .background(PlayheadColor),
+                        .background(markerColor),
                 )
             }
         }
+    }
+}
+
+/**
+ * Thin tappable strip above the track rows — tapping anywhere sets
+ * [onScrubChange] to the frame under the tap, clamped to `[0, totalFrames]`.
+ * Kept as its own gesture surface (rather than layering a tap detector onto
+ * the track rows themselves) so it never has to arbitrate against a clip's
+ * own drag/trim gestures underneath the same touch point.
+ */
+@Composable
+private fun ScrubRuler(
+    totalFrames: Long,
+    scrubFrame: Long,
+    widthPx: Float,
+    enabled: Boolean,
+    onScrubChange: (Long) -> Unit,
+) {
+    val framesPerPx = totalFrames.toFloat() / widthPx
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(RulerHeight)
+            .clip(RoundedCornerShape(4.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .then(
+                if (enabled) {
+                    Modifier.pointerInput(totalFrames) {
+                        detectTapGestures(
+                            onTap = { offset ->
+                                onScrubChange((offset.x * framesPerPx).toLong().coerceIn(0L, totalFrames))
+                            },
+                        )
+                    }
+                } else {
+                    Modifier
+                },
+            ),
+    ) {
+        val fraction = (scrubFrame.toFloat() / totalFrames.toFloat()).coerceIn(0f, 1f)
+        Box(
+            modifier = Modifier
+                .offset { IntOffset((widthPx * fraction).toInt() - 4, 0) }
+                .width(8.dp)
+                .fillMaxHeight()
+                .background(ScrubColor),
+        )
     }
 }
 
