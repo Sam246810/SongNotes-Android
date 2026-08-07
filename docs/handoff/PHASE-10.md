@@ -1,18 +1,24 @@
 # Phase 10 — Scratchpad product UI
 
-**Status (2026-07-30): front-loaded from its nominal position in the
-plan's phase table, now with real persistence** — Phase 4's internals
-(real-time multitrack playback, real overdub recording, punch-in
-splicing, WAV export, the JVM reference mixer, and `MultitrackProject` as
-the state to drive all of it) were built and verified first, per explicit
-instruction to keep UI work scoped to "only when the internals need it."
-With every one of those verified end-to-end on device, a first real UI
-became the natural next step rather than more diagnostics-screen
-plumbing. Persistence was added in the same pass, on the judgment call
-that a scratchpad which loses everything on close isn't really usable —
-see "Persistence shipped" below. **Deliberately minimal otherwise** — this
-is "does the engine work reachable from actual UI," not a DAW-grade
-editor. See "What's left" for the real gaps.
+**Status (2026-08-07): timeline, waveform, clip drag/trim, and scrub-to-punch-in
+all shipped and on-device verified** — closes out the plan's Phase 10 line
+item (minus a few explicitly-deferred UI-polish items, see "What's left").
+Built in two passes: the initial Scratchpad screen + persistence
+(2026-07-30, described below), then the timeline/waveform/drag-trim/scrub
+work (2026-08-07) once a peak-pyramid C++ DSP primitive existed to render
+waveforms efficiently at any zoom level.
+
+Phase 4's internals (real-time multitrack playback, real overdub
+recording, punch-in splicing, WAV export, the JVM reference mixer, and
+`MultitrackProject` as the state to drive all of it) were built and
+verified first, per explicit instruction to keep UI work scoped to "only
+when the internals need it." With every one of those verified end-to-end
+on device, a first real UI became the natural next step rather than more
+diagnostics-screen plumbing. Persistence was added in the same pass, on
+the judgment call that a scratchpad which loses everything on close isn't
+really usable — see "Persistence shipped" below. **Deliberately minimal
+otherwise** — this is "does the engine work reachable from actual UI," not
+a DAW-grade editor. See "What's left" for the real gaps.
 
 ## What shipped
 
@@ -32,10 +38,12 @@ plan's own "don't front-load" note).
   track (a real re-punch, not just always-append). Drives
   `MultitrackProject.armOverdub`/`withPunchIn` directly — every other
   track in the project becomes an audible backing track during capture,
-  same real-time mixing verified in Phase 4. **Punch-in always starts at
-  project frame 0** — the whole song plays as the backing track for every
-  take. There's no timeline/scrub UI yet to pick an arbitrary punch-in
-  point, so this was the honest scope for this pass (see "What's left").
+  same real-time mixing verified in Phase 4. **(As of 2026-07-30) punch-in
+  always starts at project frame 0** — the whole song plays as the backing
+  track for every take. There's no timeline/scrub UI yet to pick an
+  arbitrary punch-in point, so this was the honest scope for this pass.
+  *Closed 2026-08-07 — see "Timeline, waveform, clip drag/trim,
+  scrub-to-punch-in" below.*
   Reuses the existing `RECORD_AUDIO` permission flow, `RecordingForegroundService`,
   and `AudioRouteDetector`/`CalibrationStore`-based Rule C calibration
   offset lookup — all established patterns from `DiagnosticsScreen.kt`,
@@ -113,28 +121,165 @@ correctly** (`172032 / 1309440` frames, matching the original recording's
 length exactly) — not just that the metadata round-tripped, but that the
 actual audio samples did too. Zero crashes across the whole sequence.
 
+## Timeline, waveform, clip drag/trim, scrub-to-punch-in (2026-08-07)
+
+**`dsp/peak_pyramid.h`/`.cpp`** (new, `:core:audio`'s C++) —
+`buildPeakPyramid` computes a multi-resolution min/max waveform: level 0
+chunks the raw buffer into `baseSamplesPerPeak`-sample peaks, each level
+after that combines adjacent pairs from the level below (doubling
+`samplesPerPeak`), stopping once a level would have fewer than
+`minPeaksPerLevel` peaks. `selectLevelForZoom` picks the coarsest level
+whose `samplesPerPeak` still fits a caller's samples-per-pixel budget, so
+rendering never walks more samples than there are pixels for regardless of
+zoom. 9 GoogleTest cases written and registered in `host/CMakeLists.txt`
+alongside `dsp/piano_voice.cpp`'s tests — like those, compile-checked
+clean (all 3 ABIs, `-Wall -Wextra`, zero warnings) via
+`buildCMakeDebug`, never actually executed (no desktop C++ compiler on
+this machine; same documented limitation as every earlier phase's host
+tests). Judged lower cross-language risk than piano's floating-point
+envelope math (this is integer chunking/comparison logic), so — unlike
+piano's bit-exact on-device cross-validation — no separate
+Kotlin-vs-C++ agreement check was built for this one.
+
+Marshaled across JNI as a self-describing flat `FloatArray`
+(`nativeBuildPeakPyramid` in `jni_bridge.cpp`) rather than constructing
+nested Kotlin objects from native code: `[numLevels, (samplesPerPeak,
+peakCount, min0, max0, min1, max1, ...) per level]`, decoded by
+`AudioEngine.buildPeakPyramid` into `PeakLevel`/`PeakPyramid` data classes
+(`AudioEngine.kt`). Stateless — no engine handle needed, same shape as
+`renderPianoVoiceNative`.
+
+**`Waveform.kt`** (new) — pure-rendering Compose `Canvas` composable,
+same pattern as `ChordDiagram.kt` (Phase 8): layout math lives in
+`DrawScope` extension functions, the composable itself just measures and
+draws. Takes a pre-built `PeakPyramid` plus a clip's
+`bufferOffsetFrames`/`lengthFrames` trim window (mirroring
+`MultitrackClipSpec`'s own field names) and draws min/max bars for
+exactly that trimmed view, picking the zoom-appropriate pyramid level via
+`PeakPyramid.selectLevelForZoom`.
+
+**`Timeline.kt`** (new) — one row per track, each clip drawn as a
+`Waveform` positioned/sized against the project's `totalFrames`, plus a
+tappable scrub ruler above the rows and a single position-marker line
+(red while playing, at the live playback frame; blue otherwise, at the
+scrub/punch-in frame) spanning the ruler and every track row. Peak
+pyramids are built once per clip buffer (`remember(clip.buffer)`), not on
+every recomposition. Wired into `ScratchpadScreen` right below the track
+summary text, above the per-track gain/mute/solo rows.
+
+Each clip supports two touch gestures when the timeline isn't disabled
+(disabled during recording/playback, same as the rest of the screen's
+controls):
+- **Whole-clip drag** (anywhere in the clip's waveform) moves its
+  `startFrame`.
+- **Trim handles** at each edge (`TrimHandle` composable, a narrow
+  draggable strip) resize it — the left handle moves
+  `bufferOffsetFrames`/`startFrame` together so the untrimmed audio's
+  timeline position doesn't jump, and shrinks `lengthFrames`; the right
+  handle only changes `lengthFrames`.
+
+Both gestures are live-previewed locally (`dragPx`/`leftTrimPx`/`rightTrimPx`
+state in `TimelineClip`) during the touch and only committed on release —
+same "no callback per pixel of drag" reasoning already established for
+the gain slider elsewhere in this screen.
+
+**Scrub-to-punch-in**: a `scrubFrame` state var in `ScratchpadScreen`,
+settable by tapping `Timeline`'s ruler. `beginRecording()` now passes it
+as `armOverdub`'s `backingTracksStartFrame`, and the committed take's
+`MultitrackClipSpec.startFrame` uses the same value — both were previously
+hardcoded to `0L`, which was Phase 10's originally-documented "always
+starts at project frame 0" gap (see the old "What's left" below, now
+closed).
+
+**Same-track overlap invariant**: partway through building clip drag/trim,
+explicit user direction clarified that two clips on one track must never
+overlap during playback — recording over an existing clip should replace
+it, not sum with it, and the same rule applies to dragging/trimming.
+`MultitrackProject.withClipTransform` (the mutation hook both gestures
+call) doesn't just splice the transformed clip into its track's list in
+place; it re-runs it through `AudioEngine.punchIn` — the exact same
+splicing primitive `withPunchIn` already uses for recording — against the
+track's *other* clips, so a drag/trim that lands on top of a neighbor
+trims or drops the neighbor's overlapped region instead of leaving both
+clips there.
+
+### Verified on device (2026-08-07)
+
+Built and installed the updated APK on a physical device (`RFCX70MEMRX`),
+drove it via `adb shell input tap`/`swipe` + `uiautomator dump` +
+screenshots, same workflow every phase has used:
+
+1. **Waveform rendering**: recorded a real ~23s take onto a fresh track —
+   the timeline row showed the actual recorded audio's min/max peaks, not
+   a placeholder.
+2. **Playhead**: hit Play, screenshotted mid-playback — the marker line
+   sat at the correct fractional position for the reported engine state
+   (`152160 / 1124918` ≈ 13.5%, matching its on-screen x position).
+3. **Whole-clip drag**: dragged a clip right — project total grew from
+   23.4s to 27.8s, matching the drag distance; no crash.
+4. **Right trim**: dragged the right handle left — total shrank from
+   27.8s to 22.7s; no crash.
+5. **Left trim**: dragged the left handle right — total stayed at 22.7s
+   (the clip's *end* frame is invariant under a left-trim by design:
+   `startFrame` and `lengthFrames` move by equal and opposite amounts),
+   while the clip visibly shifted right and narrowed. Played the trimmed
+   project back afterward and confirmed the engine actually honors the
+   new `bufferOffsetFrames`/`lengthFrames` — reported playback total
+   frames matched the *trimmed* duration (1090887 frames ≈ 22.7s @
+   48kHz), not the original take's — proving the trim reached the real
+   mixer, not just the timeline's visual.
+6. **Scrub-to-punch-in**: tapped the ruler to set a 12.8s punch-in point,
+   recorded a new take onto a second track, and confirmed the committed
+   clip's `startFrame` + recorded length summed exactly to the new
+   project total (12.8 + 152.3 = 165.1s) — landed at the scrubbed point,
+   not frame 0.
+7. **Same-track overlap splicing**: recorded two short non-overlapping
+   clips onto one track (clip A at 0s, clip B at 19.3s; track total
+   38.7s), then dragged clip B on top of clip A. Track total collapsed to
+   exactly clip B's own length (19.3s) with a single continuous
+   edge-to-edge waveform in the timeline row — no stacked/overlapping
+   region — confirming clip A's overlapped range was spliced away via
+   `punchIn`, not left layered underneath clip B.
+
+`logcat` checked after every step above — **zero crashes, zero
+`AndroidRuntime`/`FATAL EXCEPTION` entries** across the whole sequence.
+
+### Bug hit during this verification (tooling, not app)
+
+Not an app bug: mid-sequence, taps on "Stop recording" repeatedly failed
+to register once the screen had grown tall enough (two tracks + the new
+timeline + ruler + punch-in text) that the button's accessibility bounds
+fell entirely within the 3-button system nav bar's zone at the bottom of
+the screen — a more severe case of the nav-bar tap-target overlap already
+seen in Phase 9. Recovered by scrolling the screen up (`input swipe`)
+before tapping, then re-reading bounds fresh from a `uiautomator dump`
+taken immediately before the tap (not reused from an earlier dump, since
+the fling-scroll was still settling when the first re-tap attempt fired
+too early). No code changed for this — it's a testing-methodology note,
+not a layout bug in the app (a real user scrolling normally wouldn't hit
+this).
+
 ## What's left (not started)
 
-- **No timeline/scrub UI.** Punch-in always starts at project frame 0 —
-  there's no way to record a take starting partway through the song. Real
-  arbitrary-position punch-in needs a playhead/timeline control this pass
-  didn't build.
-- **No clip-level editing.** A track's clips (especially after several
-  punch-ins fragment it) aren't individually visible, movable, or
-  trimmable from the UI — `MultitrackProject`/`AudioEngine` support
-  multi-clip tracks fully (verified in Phase 4), but nothing in this UI
-  exposes that structure to the user yet.
 - **BPM/time signature are effectively fixed.** The BPM field exists, but
   beats-per-bar and count-in beats are hard-coded to 4/4 with a 4-beat
   count-in, matching every other recording flow in this codebase so far —
   no per-project or per-take override.
-- **No visual waveform, no metering, no undo.** All standard DAW-adjacent
-  features, all out of scope for "prove the engine is reachable from real
-  UI."
+- **No metering, no undo.** Standard DAW-adjacent features, out of scope
+  for "prove the engine is reachable from real UI."
+- **No minimized/collapsible transport strip, no theme-in-settings.** The
+  plan's Phase 10 line also mentioned a "minimized transport strip, DAW
+  collapsible to tempo/BPM/start-stop" layout and moving the theme toggle
+  into a settings surface — both pure UI polish with no engine dependency,
+  not attempted this pass.
 - **The metronome click during recording still isn't toggleable** — a
   Phase 4-documented gap ("Known risks" #6 there) that surfaces here too:
   every overdub take plays the count-in/metronome click over the backing
   tracks, with no way to turn it off once past the count-in.
+- **`host/test_peak_pyramid.cpp` has never actually run** — compile-checked
+  as part of the real `.so` build only, same standing limitation as every
+  other host GoogleTest target in this repo (no desktop C++ compiler on
+  this machine).
 
 ## Known risks / things to check first if something breaks
 
