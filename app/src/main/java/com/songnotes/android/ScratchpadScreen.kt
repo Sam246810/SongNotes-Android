@@ -274,6 +274,11 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
             tracks = project.tracks,
             totalFrames = project.totalFrames,
             playbackFrame = if (isPlaying) engineState.playbackFrame.toLong() else null,
+            enabled = !isRecording && !isPlaying,
+            onClipChange = { trackIndex, clipIndex, transform ->
+                project = project.withClipTransform(trackIndex, clipIndex, transform)
+                persist(project)
+            },
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(16.dp))

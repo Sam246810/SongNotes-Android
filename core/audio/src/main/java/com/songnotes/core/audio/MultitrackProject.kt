@@ -52,6 +52,24 @@ data class MultitrackProject(val tracks: List<MultitrackTrackSpec> = emptyList()
         copy(tracks = tracks.mapIndexed { i, t -> if (i == index) transform(t) else t })
 
     /**
+     * Applies [transform] to a single clip — the timeline's drag (moves
+     * [MultitrackClipSpec.startFrame]) and trim (moves
+     * [MultitrackClipSpec.bufferOffsetFrames]/[MultitrackClipSpec.lengthFrames])
+     * gestures both go through this one generic hook rather than dedicated
+     * "move" and "trim" methods, so a drag that crosses into trimming
+     * territory (dragging a clip's left edge) can update startFrame and the
+     * trim window together as one atomic change instead of two separate
+     * project mutations.
+     */
+    fun withClipTransform(
+        trackIndex: Int,
+        clipIndex: Int,
+        transform: (MultitrackClipSpec) -> MultitrackClipSpec,
+    ): MultitrackProject = updateTrack(trackIndex) { track ->
+        track.copy(clips = track.clips.mapIndexed { i, c -> if (i == clipIndex) transform(c) else c })
+    }
+
+    /**
      * Splices [newClip] into track [index]'s existing clip list via
      * [AudioEngine.punchIn] and returns the resulting project. The one
      * method here that touches the engine for something other than
