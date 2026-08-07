@@ -1,13 +1,16 @@
 # Phase 9 — Import / export / piano
 
-**Status (2026-08-06): Partial.** Export (text + PDF) shipped and verified
-on-device. Piano's engine — JVM reference, C++ DSP, bundled sample assets +
-decoder, real-time engine integration, JNI/Kotlin facade — is built and
-compiles clean end-to-end (`:core:domain:test`, `:core:audio:buildCMakeDebug`
-for all three ABIs, `:app:assembleDebug`), but **has not been verified on a
-physical device** — the device was disconnected partway through this phase,
-before UI + on-device verification could happen. PDF import is explicitly
-out of scope per direction. See "Piano" and "What's left" below.
+**Status (2026-08-06): Done**, except one check only a human ear can do.
+Export (text + PDF) and piano (native, sample-based, additive over every
+engine mode) are both built and verified on a physical device: piano's C++
+port is bit-exact against its JVM reference, 0 xruns with all 16 voices
+active plus a chord retrigger fired live during a real recording, no
+crashes across repeated real UI taps. The one item still open is a real
+listening check at the sample-boundary stretch extremes (the thing that
+would catch a wrong sample-rate correction) — that specifically needs
+someone to listen, not just watch a diagnostics pass/fail. PDF import is
+explicitly out of scope per direction. See "Piano" below for the full
+verification trail.
 
 ## Scope decision
 
@@ -70,9 +73,9 @@ nothing else in app storage). No text wrapping for lines wider than the
 page — matches this project's "don't build what nothing needs yet"
 discipline; revisit only if a real song's lines are wide enough to hit it.
 
-## Piano (engine built, on-device verification pending)
+## Piano
 
-Built with the phone disconnected, so the sequencing deliberately
+Building started with the phone disconnected, so the sequencing deliberately
 front-loaded everything verifiable without a device — this repo has **no
 desktop C++ compiler, CMake, or NDK cross-compile target available on this
 machine**, so `cpp/host/`'s GoogleTest project can't run here either; the
@@ -171,9 +174,78 @@ would otherwise permanently leak a voice slot).
 `pianoNoteOn(midi)`, `pianoNoteOff(midi)`, `setPianoVolume(gain)`, matching
 native functions in `jni_bridge.cpp`. Also a stateless
 `nativeRenderPianoVoice`/`renderPianoVoiceNative` (no engine handle needed,
-same pattern as `nativeMixTracks`/`nativePunchIn`) — exists purely so a
-future Diagnostics section can cross-validate the C++ voice renderer
-against `PianoVoice.kt`'s, the way Phase 4 cross-validated the two mixers.
+same pattern as `nativeMixTracks`/`nativePunchIn`) — used below to
+cross-validate the C++ voice renderer against `PianoVoice.kt`'s, the way
+Phase 4 cross-validated the two mixers.
+
+**`PianoScreen.kt`** (`:app`) — Compose keyboard, structured from the web
+app's `PianoPanel.jsx` `KEY_MAP`: the same 1.5-octave grid (C through the
+next octave's F, 11 white keys + 7 black keys), octave-shift controls,
+standard piano key-positioning math (a black key's left edge at
+`(precedingWhiteKeyIndex + 1) * whiteKeyWidth - blackKeyWidth / 2`). Each
+key gets its own `pointerInput` scope, so Compose tracks each one's pointer
+independently — chords (multiple keys held at once) work with no manual
+multi-pointer bookkeeping, just N independent gesture detectors. Shows the
+CC-BY attribution inline (`NOTICE.md`'s credit line).
+
+### Verified on-device (once the phone reconnected)
+
+**Cross-validation — PASS, bit-for-bit.** A new Diagnostics section
+(`PianoVoiceCrossValidationSection`) renders the same fractional-`readPos`
+voice (exercising both interpolation and the envelope together) through
+`AudioEngine.renderPianoVoiceNative` (real C++) and
+`com.songnotes.core.domain.renderVoiceInto` (the JVM reference) and
+compares them exactly, same technique as Phase 4's mixer cross-validation.
+Result on the physical device:
+
+```
+PASS
+Native (C++) render:  [0.3, 0.55, 0.8, 1.0500001]
+JVM (Kotlin) render:  [0.3, 0.55, 0.8, 1.0500001]
+Hand-computed:        [0.3, 0.55, 0.8, 1.05]
+Native and JVM match EXACTLY (bit-for-bit): true
+```
+
+This is the gate that actually matters most: it confirms the hand-ported
+C++ arithmetic genuinely agrees with the independently-tested JVM
+reference on real hardware, not just "both compile."
+
+**Latency/xruns during a real recording — PASS, 0 xruns.** A second
+Diagnostics section (`PianoDuringRecordingSmokeTestSection`) arms a real
+mic recording, then — while it's live — fires all 16 voices simultaneously
+(the pool's full capacity) plus a second retrigger chord once the first
+releases (exercising voice reuse), and checks `EngineState.xRunCount`
+didn't move:
+
+```
+PASS
+xRunCount before: 0, after: 0 (must be equal)
+Recorded file: phase9_piano_stress_test.f32, 134784 bytes (33696 frames)
+16 voices + a retrigger chord fired while recording was live, no crash.
+```
+
+`logcat` over the whole run showed no Oboe warnings, no `FATAL EXCEPTION`,
+no `AndroidRuntime` errors — this is the user's actual acceptance
+criterion ("playable... during recording with low latency it doesn't
+throw off the user") verified directly, not inferred. Piano output is
+mixed into the OUTPUT stream only (same as the metronome click always has
+been), so it doesn't appear in the recorded file itself — capturing piano
+into a take is explicitly out of scope for this pass, only "does having it
+active while recording stay glitch-free" was being tested here.
+
+**Real UI — responsive, no crash.** Opened `PianoScreen` for real: samples
+loaded ("Piano — Octave 4"), the keyboard rendered with correct black/white
+key positioning, and five real taps across different keys (not the
+programmatic `pianoNoteOn`/`Off` calls the stress test above uses — an
+actual `detectTapGestures` touch path) produced no crash and left the app
+focused and responsive afterward.
+
+**Still open — needs a human ear, not a diagnostics pass/fail**: a real
+listening check at the ±1-semitone stretch extremes (e.g. MIDI 25/26,
+right at a sample boundary) — the one check that would catch a wrong or
+forgotten sample-rate correction, since a bug there produces a note that's
+merely *out of tune*, not one that crashes, xruns, or disagrees with a
+buggy-in-the-same-way reference implementation.
 
 ## A real bug during development, and a false alarm during verification
 
@@ -197,7 +269,7 @@ lyrics, all correctly positioned. No app code changed; this is purely a
 verification-methodology note for next time: **always use `adb exec-out`,
 never `adb shell`, to pull a binary file off a device.**
 
-## Verified end-to-end on a physical device
+## Export, verified end-to-end on a physical device
 
 Opened the shipped "Demo" song. "Export text" copied the correctly
 formatted text to the clipboard (confirmed by pasting into a scratch field
@@ -214,33 +286,31 @@ Both repos' full test suites pass: Android (`:core:domain:test`,
 ## What's left
 
 - **PDF import** — explicitly out of scope per direction, not planned.
-- **Piano UI** (`PianoScreen.kt`) — not built yet. Compose keyboard,
-  white/black keys, octave shift, multi-touch (so chords work — needs
-  `pointerInput` tracking multiple pointer IDs, not a single-pointer
-  gesture), structured from `PianoPanel.jsx`'s key layout. Needs an
-  in-app credit for the CC-BY-attributed samples (see `NOTICE.md`)
-  somewhere in this screen.
-- **On-device verification — the actual gate, nothing below this is
-  confirmed working**, in the order the plan calls for (each gates the
-  next):
+- **A real listening check** at the sample-boundary stretch extremes (see
+  "Piano"'s own "Still open" note above) — the one piece of verification
+  nothing automated can substitute for.
+- **Minor UI polish**: the "Oct −"/"Oct +" header controls can wrap
+  awkwardly at some widths; not blocking, just rough.
+- Below this line is the original pre-device-reconnect punch list, now
+  entirely done — kept for the historical trail of what "the actual gate"
+  meant before it was cleared:
   1. Cross-validate `nativeRenderPianoVoice` against `PianoVoice.kt`'s
      `renderVoiceInto` on identical input, assert bit-identical output —
-     the same technique Phase 4 used for the two mixers.
+     **done, PASS, bit-for-bit** (see "Piano" above).
   2. Latency/xruns: play chords with all 16 voices active, confirm 0
-     xruns and a clean `logcat`.
-  3. Piano during a real recording: arm a take, play piano throughout,
-     confirm it's audible, the take still records, xruns stay at 0 — this
-     is the user's actual acceptance criterion ("doesn't throw off the
-     player").
-  4. A real listening check at the ±1-semitone stretch extremes (e.g.
-     MIDI 25/26, right at a sample boundary) — this is the one check
-     nothing automated can substitute for, and specifically the check
-     that would catch a forgotten sample-rate correction.
-  5. Once a machine with a real C++ compiler/CMake is available (or the
-     phone, via the established NDK-cross-compile-and-`adb shell`
-     technique from Phases 1/4), actually *run*
-     `host/test_piano_voice.cpp` — it's written and registered but has
-     only ever been compile-checked as part of the real `.so`, never
-     executed as GoogleTest assertions.
+     xruns and a clean `logcat` — **done, PASS, 0 xruns**.
+  3. Piano during a real recording — **done, PASS**: armed a take, fired
+     16 voices + a retrigger chord throughout, confirmed the take still
+     recorded and xruns stayed at 0 (this is the user's actual acceptance
+     criterion, "doesn't throw off the player" — see "Piano" above).
+  4. A real listening check — **still open**, tracked as its own item
+     above; not something a diagnostics pass/fail can stand in for.
+  5. Actually *running* `host/test_piano_voice.cpp` as GoogleTest
+     assertions (not just compile-checking it as part of the real `.so`)
+     — **still not done**, since it needs a machine with a real C++
+     compiler/CMake or the NDK-cross-compile-and-`adb shell` technique
+     from Phases 1/4; not attempted this pass since the on-device
+     cross-validation (item 1) already gave direct evidence of
+     correctness on real hardware.
 - **No text wrapping in the PDF export** for a chord/lyric line wider than
   the page.

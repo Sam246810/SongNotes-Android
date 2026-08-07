@@ -25,7 +25,7 @@ import com.songnotes.core.data.SongSyncWorker
 import com.songnotes.core.data.SupabaseAuthRepository
 import kotlinx.coroutines.launch
 
-private enum class Screen { Diagnostics, Wizard, Manual, TapAlong, Scratchpad, Songs, SongEditor, Auth }
+private enum class Screen { Diagnostics, Wizard, Manual, TapAlong, Scratchpad, Songs, SongEditor, Auth, Piano }
 
 // FragmentActivity, not the usual bare ComponentActivity Compose apps default
 // to -- BiometricPrompt (see DiagnosticsScreen.kt's device-wrap smoke test)
@@ -66,6 +66,7 @@ class MainActivity : FragmentActivity() {
                         Screen.Scratchpad ->
                             ScratchpadScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
                         Screen.Auth -> AuthScreen(onDone = { screen = Screen.Diagnostics })
+                        Screen.Piano -> PianoScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
                         Screen.Diagnostics -> Column(modifier = Modifier.fillMaxSize()) {
                             // Re-read on every recomposition of this branch (not remembered) --
                             // navigating back here after AuthScreen's onDone() is exactly when
@@ -118,6 +119,12 @@ class MainActivity : FragmentActivity() {
                                 modifier = Modifier.padding(horizontal = 24.dp),
                             ) {
                                 Text("Open scratchpad")
+                            }
+                            Button(
+                                onClick = { screen = Screen.Piano },
+                                modifier = Modifier.padding(horizontal = 24.dp),
+                            ) {
+                                Text("Open piano")
                             }
                             Button(
                                 onClick = { screen = Screen.Wizard },

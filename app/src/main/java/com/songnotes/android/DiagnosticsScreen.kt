@@ -168,6 +168,8 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         OverdubPunchInEndToEndSection(engine)
         WavExportSmokeTestSection(engine)
         JvmReferenceMixerCrossValidationSection(engine)
+        PianoVoiceCrossValidationSection(engine)
+        PianoDuringRecordingSmokeTestSection(engine)
     }
 }
 
@@ -301,6 +303,212 @@ private fun JvmReferenceMixerCrossValidationSection(engine: AudioEngine) {
         },
     ) {
         Text(if (isRunning) "Running..." else "Run cross-validation")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+/**
+ * Phase 9's own version of the cross-validation above, same reasoning:
+ * [AudioEngine.renderPianoVoiceNative] calls the real `dsp::renderVoiceInto`
+ * (C++); `com.songnotes.core.domain.renderVoiceInto` (`PianoVoice.kt`) is
+ * the independent JVM reference, already exhaustively unit-tested on its
+ * own (19/19 passing, no device needed). This section is what only an
+ * on-device run can prove: that the C++ port and the JVM reference agree,
+ * bit-for-bit, on THIS device's actual floating-point arithmetic — the
+ * first time either side of the piano engine has run on a physical device
+ * at all (see docs/handoff/PHASE-09.md).
+ *
+ * Scenario deliberately exercises both pieces of math the two
+ * implementations must agree on: a fractional readPos/rate (so linear
+ * interpolation runs, not just exact-index reads) and an age well past the
+ * decay floor (0.001, constant) so the envelope term is a known constant
+ * rather than something requiring a second hand-computed curve — the
+ * interpolation is what this test is really targeting.
+ */
+@Composable
+private fun PianoVoiceCrossValidationSection(engine: AudioEngine) {
+    var resultText by remember { mutableStateOf<String?>(null) }
+    var isRunning by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    fun runTest(): String {
+        val buffer = floatArrayOf(0f, 100f, 200f, 300f, 400f, 500f, 600f, 700f)
+        val numFrames = 4
+        val startReadPos = 1.5
+        val rate = 1.25
+        val startAgeSeconds = 10.0 // well past the 4.0s decay floor -- envelope is a constant 0.001 for every frame
+        val releaseAgeSeconds = -1.0 // held
+        val sampleRateHz = 48000.0
+        val gain = 2.0f
+
+        // Hand-computed: readPos sequence is 1.5, 2.75, 4.0, 5.25 -- linear
+        // interpolation between buffer[floor] and buffer[floor+1], times the
+        // constant 0.001 envelope, times gain 2.0.
+        val expected = floatArrayOf(0.3f, 0.55f, 0.8f, 1.05f)
+
+        val nativeOut = engine.renderPianoVoiceNative(
+            numFrames, buffer, startReadPos, rate, startAgeSeconds, releaseAgeSeconds, sampleRateHz, gain,
+        )
+        val jvmOut = FloatArray(numFrames)
+        com.songnotes.core.domain.renderVoiceInto(
+            jvmOut, numFrames, buffer, startReadPos, rate, startAgeSeconds,
+            releaseAgeSeconds.takeIf { it >= 0.0 }, sampleRateHz, gain,
+        )
+
+        val nativeMatchesExpected = nativeOut.size == expected.size &&
+            nativeOut.indices.all { abs(nativeOut[it] - expected[it]) < 0.0001f }
+        val jvmMatchesExpected = jvmOut.size == expected.size &&
+            jvmOut.indices.all { abs(jvmOut[it] - expected[it]) < 0.0001f }
+        // The actual point of this section: bit-for-bit, not epsilon --
+        // both implementations use the same math in the same order.
+        val nativeMatchesJvm = nativeOut.size == jvmOut.size &&
+            nativeOut.indices.all { nativeOut[it] == jvmOut[it] }
+
+        val pass = nativeMatchesExpected && jvmMatchesExpected && nativeMatchesJvm
+        return buildString {
+            appendLine(if (pass) "PASS" else "FAIL — see values below")
+            appendLine("Native (C++) render:  ${nativeOut.toList()}")
+            appendLine("JVM (Kotlin) render:  ${jvmOut.toList()}")
+            appendLine("Hand-computed:        ${expected.toList()}")
+            appendLine("Native matches hand-computed expectation: $nativeMatchesExpected")
+            appendLine("JVM matches hand-computed expectation: $jvmMatchesExpected")
+            append("Native and JVM match EXACTLY (bit-for-bit): $nativeMatchesJvm")
+        }
+    }
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Piano voice cross-validation (Phase 9)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Renders the same fractional-readPos voice through both the real C++ renderer " +
+            "(AudioEngine.renderPianoVoiceNative) and the independent JVM reference " +
+            "(:core:domain's com.songnotes.core.domain.renderVoiceInto), and checks they agree exactly.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isRunning,
+        onClick = {
+            isRunning = true
+            resultText = null
+            scope.launch {
+                val result = withContext(Dispatchers.Default) { runTest() }
+                resultText = result
+                isRunning = false
+            }
+        },
+    ) {
+        Text(if (isRunning) "Running..." else "Run cross-validation")
+    }
+
+    resultText?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+/**
+ * The user's actual acceptance criterion for Phase 9 piano: "playable...
+ * during recording with low latency it doesn't throw off the user." Arms a
+ * real mic recording (same `armRecording` path the Phase 2 section above
+ * uses), then — while it's live — fires 16 simultaneous piano notes (the
+ * voice pool's full capacity, see `NativeAudioEngine::kMaxPianoVoices`) plus
+ * a second retrigger chord once the first has released, and checks the
+ * engine's own `xRunCount` didn't move. An xrun is the actual, objective
+ * signal that the added CPU load of piano rendering blew the real-time
+ * budget — audible glitches and xruns are the same underlying failure, this
+ * just doesn't require a human ear to detect it.
+ *
+ * Piano output is never fed into the recording (it's mixed into the OUTPUT
+ * stream only, same as the metronome click always has been) — this section
+ * isn't testing "does piano end up in the take," which is explicitly out of
+ * scope for this pass, only "does having piano active while recording stay
+ * glitch-free."
+ */
+@Composable
+private fun PianoDuringRecordingSmokeTestSection(engine: AudioEngine) {
+    val context = LocalContext.current
+    var resultText by remember { mutableStateOf<String?>(null) }
+    var isRunning by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    suspend fun runTest(): String {
+        val hasPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!hasPermission) {
+            return "SKIPPED — RECORD_AUDIO not granted yet. Grant it via the \"Record & Playback\" " +
+                "section above first, then re-run this."
+        }
+
+        if (!engine.loadPianoSamples(context)) return "FAIL — piano samples failed to load."
+
+        val takeFile = File(context.filesDir, "takes/phase9_piano_stress_test.f32").also { it.parentFile?.mkdirs() }
+        context.startForegroundService(Intent(context, RecordingForegroundService::class.java))
+        val xRunBefore = engine.state().xRunCount
+        val armed = engine.armRecording(takeFile.absolutePath, bpm = 80.0, beatsPerBar = 4, countInBeats = 4)
+        if (!armed) {
+            context.stopService(Intent(context, RecordingForegroundService::class.java))
+            return "FAIL — armRecording() returned false."
+        }
+
+        delay(1200) // let count-in/pre-roll pass before hammering the voice pool
+        val notes = (0 until 16).map { 48 + it } // C3..D#4, 16 consecutive semitones -- fills every voice slot
+        for (midi in notes) engine.pianoNoteOn(midi)
+        delay(500)
+        for (midi in notes) engine.pianoNoteOff(midi)
+        delay(500) // let the release tail (kPianoReleaseSeconds) finish and free the voices
+        for (midi in notes.take(6)) engine.pianoNoteOn(midi) // retrigger chord, exercising voice reuse
+        delay(1000)
+        for (midi in notes.take(6)) engine.pianoNoteOff(midi)
+        delay(500)
+
+        engine.stopRecording()
+        context.stopService(Intent(context, RecordingForegroundService::class.java))
+        delay(200) // let the writer thread finish flushing to disk
+
+        val xRunAfter = engine.state().xRunCount
+        val recordedFrames = takeFile.length() / 4 // mono 32-bit float
+
+        val pass = xRunAfter == xRunBefore && recordedFrames > 0
+        return buildString {
+            appendLine(if (pass) "PASS" else "FAIL — see values below")
+            appendLine("xRunCount before: $xRunBefore, after: $xRunAfter (must be equal)")
+            appendLine("Recorded file: ${takeFile.name}, ${takeFile.length()} bytes ($recordedFrames frames)")
+            append("16 voices + a retrigger chord fired while recording was live, no crash.")
+        }
+    }
+
+    Spacer(Modifier.height(32.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+    Text("Piano during a real recording (Phase 9)", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Arms a real mic recording, then fires 16 simultaneous piano notes (the voice pool's full " +
+            "capacity) plus a retrigger chord while it's live, and checks the xRun count doesn't move.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    Button(
+        enabled = !isRunning,
+        onClick = {
+            isRunning = true
+            resultText = null
+            scope.launch {
+                resultText = runTest()
+                isRunning = false
+            }
+        },
+    ) {
+        Text(if (isRunning) "Running..." else "Run piano+recording test")
     }
 
     resultText?.let {
