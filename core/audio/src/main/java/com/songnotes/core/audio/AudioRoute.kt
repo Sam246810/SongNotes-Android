@@ -15,6 +15,8 @@ data class AudioRoute(
     val routeKey: String,
     val label: String,
     val isBluetooth: Boolean,
+    /** True when this route IS the phone's own mic — the case where a "use phone mic" override has nothing to do. */
+    val isBuiltinMic: Boolean,
 )
 
 /**
@@ -48,15 +50,26 @@ class AudioRouteDetector(context: Context) {
         return toAudioRoute(chosen)
     }
 
+    /**
+     * The phone's own built-in mic's `AudioDeviceInfo.id`, for
+     * [AudioEngine.setPreferredInputDevice] — null if this device somehow
+     * has none (shouldn't happen on a real phone, but a device list is
+     * still just whatever the OS reports right now).
+     */
+    fun builtinMicDeviceId(): Int? =
+        audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }?.id
+
     private fun toAudioRoute(device: AudioDeviceInfo?): AudioRoute {
         if (device == null) {
-            return AudioRoute(routeKey = "unknown", label = "Unknown route", isBluetooth = false)
+            return AudioRoute(routeKey = "unknown", label = "Unknown route", isBluetooth = false, isBuiltinMic = false)
         }
         val productHash = device.productName?.toString()?.hashCode() ?: 0
         return AudioRoute(
             routeKey = "${device.type}_$productHash",
             label = device.productName?.toString()?.takeIf { it.isNotBlank() } ?: typeLabel(device.type),
             isBluetooth = isBluetoothType(device.type),
+            isBuiltinMic = device.type == AudioDeviceInfo.TYPE_BUILTIN_MIC,
         )
     }
 

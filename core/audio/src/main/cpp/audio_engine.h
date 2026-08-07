@@ -178,6 +178,30 @@ public:
     // AUDIO_SESSION_ID_NONE) if no input stream is open.
     int32_t inputSessionId();
 
+    // The input stream's actual device ID (Oboe reports back whatever the
+    // system actually opened it on, which may differ from what was
+    // requested if that device disappeared) — 0 (oboe::kUnspecified) if no
+    // input stream is open. Diagnostics-visible confirmation that
+    // setPreferredInputDevice() below actually took effect, closing the
+    // Phase 3 gap where only the output stream's capabilities were
+    // reportable.
+    int32_t inputDeviceId();
+
+    // Pins the input stream to a specific Android AudioDeviceInfo.id (e.g.
+    // the built-in mic's), overriding the system's default input routing —
+    // used so a user can keep recording on the phone's own mic while a
+    // metronome click plays out to a connected headset/Bluetooth device
+    // that would otherwise also become the default input (stealing the mic
+    // along with it). `oboe::kUnspecified` (0) restores default routing.
+    // Rebuilds the duplex streams immediately if they're already open
+    // (same closeStreamsLocked()/openStreamsLocked() pair
+    // onErrorAfterClose() uses for a route-change recovery); otherwise just
+    // remembers the preference for the next open. The OUTPUT stream is
+    // never pinned — it's left on default routing deliberately, since that
+    // already follows a connected headset/headphones automatically, which
+    // is exactly where the click should play.
+    bool setPreferredInputDevice(int32_t deviceId);
+
 private:
     // Must be called with mRebuildMutex already held.
     bool openStreamsLocked();
@@ -207,6 +231,13 @@ private:
     std::shared_ptr<oboe::AudioStream> mOutputStream;
     std::shared_ptr<oboe::AudioStream> mInputStream;
     std::vector<float> mInputScratch; // sized once at open time; RT thread only touches, never resizes
+
+    // See setPreferredInputDevice()'s doc comment. oboe::kUnspecified (0)
+    // means "system default" — Oboe's own AudioStreamBuilder default, so
+    // applying this unconditionally in openStreamsLocked() is a no-op
+    // until a caller actually sets it. Guarded by mRebuildMutex, same as
+    // the streams themselves.
+    int32_t mPreferredInputDeviceId = oboe::kUnspecified;
 
     double mTestTonePhase = 0.0;
     std::atomic<int32_t> mMode{static_cast<int32_t>(EngineMode::Idle)};

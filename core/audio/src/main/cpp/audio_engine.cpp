@@ -104,6 +104,7 @@ bool NativeAudioEngine::openStreamsLocked() {
         // nothing currently depends on being small. See docs/handoff/
         // PHASE-03.md for the actual before/after numbers.
         ->setSessionId(oboe::SessionId::Allocate)
+        ->setDeviceId(mPreferredInputDeviceId)
         ->setErrorCallback(this);
 
     oboe::Result inResult = inBuilder.openStream(mInputStream);
@@ -1084,6 +1085,43 @@ int32_t NativeAudioEngine::inputSessionId() {
     std::lock_guard<std::mutex> lock(mRebuildMutex);
     return mInputStream ? static_cast<int32_t>(mInputStream->getSessionId())
                          : static_cast<int32_t>(oboe::SessionId::None);
+}
+
+int32_t NativeAudioEngine::inputDeviceId() {
+    std::lock_guard<std::mutex> lock(mRebuildMutex);
+    return mInputStream ? mInputStream->getDeviceId() : static_cast<int32_t>(oboe::kUnspecified);
+}
+
+bool NativeAudioEngine::setPreferredInputDevice(int32_t deviceId) {
+    std::lock_guard<std::mutex> lock(mRebuildMutex);
+    if (mPreferredInputDeviceId == deviceId) return true; // already the active preference — nothing to rebuild
+    mPreferredInputDeviceId = deviceId;
+
+    if (!mOutputStream && !mInputStream) {
+        // Not open yet — openStreamsLocked() will pick this up whenever the
+        // first real open happens (ensureReady()/startTestTone()/etc).
+        return true;
+    }
+
+    // Streams already exist: rebuild them on the new preference right now,
+    // same close/reopen pair onErrorAfterClose() uses for route-change
+    // recovery, including restoring whatever mode was active — a real user
+    // could in principle flip this mid-session even though the UI is
+    // expected to only expose it while idle.
+    const auto modeBefore = static_cast<EngineMode>(mMode.load(std::memory_order_acquire));
+    closeStreamsLocked();
+    if (!openStreamsLocked()) {
+        setLastError("stream rebuild failed after changing preferred input device");
+        return false;
+    }
+    mMode.store(static_cast<int32_t>(modeBefore), std::memory_order_release);
+    if (mOutputStream && modeBefore != EngineMode::Idle) {
+        auto result = mOutputStream->requestStart();
+        if (result != oboe::Result::OK) {
+            setLastError(std::string("post-rebuild requestStart failed: ") + oboe::convertToText(result));
+        }
+    }
+    return true;
 }
 
 } // namespace songnotes

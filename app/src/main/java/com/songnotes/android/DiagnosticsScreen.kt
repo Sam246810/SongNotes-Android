@@ -80,6 +80,10 @@ fun DiagnosticsScreen(engine: AudioEngine) {
     var caps by remember { mutableStateOf(EngineCapabilities.unavailable()) }
 
     val context = LocalContext.current
+    // Read once — for cross-checking caps.inputDeviceId against, not
+    // live-tracked (the device list this reads from doesn't change during
+    // a Diagnostics session in any way that matters here).
+    val builtinMicId = remember { AudioRouteDetector(context).builtinMicDeviceId() }
     var hasRecordPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -149,6 +153,10 @@ fun DiagnosticsScreen(engine: AudioEngine) {
         CapabilityRow("Performance mode", caps.performanceMode)
         CapabilityRow("MMap (fast path)", if (caps.isMMapUsed) "yes" else "no")
         CapabilityRow("XRun count", "${caps.xRunCount}")
+        CapabilityRow(
+            "Input device ID",
+            "${caps.inputDeviceId}" + if (builtinMicId != null && caps.inputDeviceId == builtinMicId) " (phone mic)" else "",
+        )
 
         caps.lastError?.let { error ->
             Spacer(Modifier.height(16.dp))
@@ -682,7 +690,7 @@ private fun OverdubPunchInEndToEndSection(engine: AudioEngine) {
         // Two backing tracks plus an empty target track for the overdub —
         // building this up via MultitrackProject is what every other call
         // site in this file used to do by hand-concatenating lists.
-        var project = MultitrackProject()
+        var project = MultitrackProject(bpm = bpm, beatsPerBar = beatsPerBar)
             .addTrack(
                 com.songnotes.core.audio.MultitrackTrackSpec(
                     clips = listOf(
@@ -707,7 +715,7 @@ private fun OverdubPunchInEndToEndSection(engine: AudioEngine) {
         scope.launch {
             statusText = "Recording (count-in, then ~${recordSeconds.toInt()}s) — backing tracks should be audible..."
             val armed = project.armOverdub(
-                engine, takeFile.absolutePath, bpm, beatsPerBar, countInBeats,
+                engine, takeFile.absolutePath,
                 targetIndex = overdubTrackIndex, backingTracksStartFrame = backingTracksStartFrame,
             )
             if (!armed) {

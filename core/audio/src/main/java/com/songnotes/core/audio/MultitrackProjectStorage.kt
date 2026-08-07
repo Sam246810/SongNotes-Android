@@ -71,7 +71,13 @@ class MultitrackProjectStorage(context: Context) {
                     .put("clips", clipsJson),
             )
         }
-        manifestFile.writeText(JSONObject().put("tracks", tracksJson).toString())
+        manifestFile.writeText(
+            JSONObject()
+                .put("tracks", tracksJson)
+                .put("bpm", project.bpm)
+                .put("beatsPerBar", project.beatsPerBar)
+                .toString(),
+        )
     }
 
     /** Reads the saved project back, or null if [exists] would return false. */
@@ -98,7 +104,14 @@ class MultitrackProjectStorage(context: Context) {
                 soloed = trackJson.getBoolean("soloed"),
             )
         }
-        return MultitrackProject(tracks)
+        // optDouble/optInt fall back to MultitrackProject's own defaults for
+        // a manifest saved before bpm/beatsPerBar existed — old scratchpads
+        // still load instead of failing to parse.
+        return MultitrackProject(
+            tracks = tracks,
+            bpm = root.optDouble("bpm", MultitrackProject().bpm),
+            beatsPerBar = root.optInt("beatsPerBar", MultitrackProject().beatsPerBar),
+        )
     }
 
     /** Deletes the saved project (manifest + every clip file) entirely. */

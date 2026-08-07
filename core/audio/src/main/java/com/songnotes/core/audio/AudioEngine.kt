@@ -87,6 +87,32 @@ class AudioEngine {
         return if (h == 0L) -1 else nativeGetInputSessionId(h)
     }
 
+    /**
+     * The input stream's actual `AudioDeviceInfo.id` — 0 if no input stream
+     * is open yet. Confirms [setPreferredInputDevice] actually took effect
+     * (or reports whatever the system picked by default otherwise), since
+     * Oboe reports back what it really opened on, not just what was asked
+     * for. Diagnostics-only; nothing else in the engine reads this.
+     */
+    fun inputDeviceId(): Int {
+        val h = handle
+        return if (h == 0L) 0 else nativeGetInputDeviceId(h)
+    }
+
+    /**
+     * Pins the input stream to a specific `AudioDeviceInfo.id` (0 restores
+     * default routing) — see [AudioRouteDetector.builtinMicDeviceId] for
+     * the motivating case: forcing input back to the phone's own mic while
+     * a connected headset/Bluetooth device (which would otherwise steal
+     * both input AND output by default) is left free to carry the
+     * metronome click to the user's ears instead. Calls [ensureCreated]
+     * itself (unlike most other calls here) since this is meant to be
+     * settable before a recording session even starts, e.g. from a
+     * Scratchpad-screen toggle applied once when the screen opens.
+     */
+    fun setPreferredInputDevice(deviceId: Int): Boolean =
+        ensureCreated() && nativeSetPreferredInputDevice(handle, deviceId)
+
     fun startTestTone(): Boolean = ensureCreated() && nativeStartTestTone(handle)
 
     fun stopTestTone() {
@@ -375,6 +401,7 @@ class AudioEngine {
             isMMapUsed = nativeIsMMapUsed(h),
             xRunCount = nativeGetXRunCount(h),
             lastError = nativeGetLastError(h).ifEmpty { null },
+            inputDeviceId = nativeGetInputDeviceId(h),
         )
     }
 
@@ -410,6 +437,8 @@ class AudioEngine {
     private external fun nativeDestroy(handle: Long)
     private external fun nativeEnsureReady(handle: Long): Boolean
     private external fun nativeGetInputSessionId(handle: Long): Int
+    private external fun nativeGetInputDeviceId(handle: Long): Int
+    private external fun nativeSetPreferredInputDevice(handle: Long, deviceId: Int): Boolean
     private external fun nativeStartTestTone(handle: Long): Boolean
     private external fun nativeStopTestTone(handle: Long)
     private external fun nativeArmRecording(

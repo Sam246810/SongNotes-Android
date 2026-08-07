@@ -259,12 +259,109 @@ too early). No code changed for this — it's a testing-methodology note,
 not a layout bug in the app (a real user scrolling normally wouldn't hit
 this).
 
+## Configurable time signature + force-phone-mic routing (2026-08-07)
+
+**Time signature.** `beatsPerBar` was already a full runtime parameter all
+the way down through `dsp::renderClickTrack`/the live click scheduler in
+`audio_engine.cpp` (`mBeatIndexInBar % max(1, mBeatsPerBar)` decides
+downbeat vs regular click) — the "4/4 fixed" gap was entirely in the
+Kotlin layer: `MultitrackProject` had no `bpm`/`beatsPerBar` fields at
+all, and every call site hard-coded `beatsPerBar = 4, countInBeats = 4`.
+Closed by:
+
+- `MultitrackProject` (`core/audio`) gains `bpm: Double = 100.0` and
+  `beatsPerBar: Int = 4` fields. `armOverdub` no longer takes them as
+  parameters — it reads its own `bpm`/`beatsPerBar`, with the count-in
+  always exactly one bar (`countInBeats = beatsPerBar`), so changing the
+  meter changes how long the count-in is too, not just the click's
+  accent pattern.
+- `MultitrackProjectStorage`'s manifest persists both fields
+  (`root.optDouble`/`optInt` fall back to `MultitrackProject()`'s own
+  defaults for a manifest saved before this existed — verified on device:
+  an old manifest from earlier in this same session loaded fine with
+  `bpm=100, beatsPerBar=4`, no crash, no parse error).
+- `ScratchpadScreen`'s BPM field now edits `project.bpm` (previously a
+  `remember{}`-only string that reset to `"80"` on every app relaunch —
+  it now actually persists), plus a new beats-per-bar `−`/`+` stepper
+  (clamped 1–12).
+- `Timeline.kt` draws a beat/bar grid over every track row from
+  `bpm`/`beatsPerBar` — bar-start lines heavier than regular-beat lines,
+  mirroring the click's own downbeat/regular distinction exactly
+  (`drawBeatGrid`, same `beatIntervalFrames = round(sampleRate * 60 /
+  bpm)` formula as `dsp::renderClickTrack`). Purely visual — the real
+  scheduling is still the C++ side; this is what "changes reflect in the
+  grid" meant.
+
+**Verified on device**: set `beatsPerBar` to 3 via the stepper, dropped
+BPM to 30 (to make a ~6s count-in easy to catch mid-countdown), and
+recorded — observed `"Counting in: 1"` (a value that could only appear
+with a 3-beat count-in; the old hard-coded path could never show less
+than 4 by counting down from 4), then a clean transition into
+`"Recording onto track 2"`. No crashes.
+
+**Force-phone-mic routing.** The ask: let a user route the metronome
+click to a connected headset/headphones (already Android's automatic
+default output routing once something's plugged in — nothing needed
+there) while still recording on the phone's own built-in mic, for
+headsets/Bluetooth devices that carry their own mic and would otherwise
+also steal input by default. Plain wired headphones with no mic were
+never affected by this gap at all (there's nothing for Android to route
+input to besides the built-in mic in that case).
+
+- **C++** (`audio_engine.h`/`.cpp`): `mPreferredInputDeviceId` member
+  (`oboe::kUnspecified` default — a no-op, same as never calling
+  `setDeviceId` at all), applied unconditionally in `openStreamsLocked()`
+  via `inBuilder.setDeviceId(mPreferredInputDeviceId)`. New
+  `setPreferredInputDevice(deviceId)`: stores the preference, and if
+  streams are already open, rebuilds them immediately via the exact same
+  `closeStreamsLocked()`/`openStreamsLocked()` pair
+  `onErrorAfterClose()` already uses for route-change recovery
+  (mode-preserving, restarts output). New `inputDeviceId()` getter
+  (`mInputStream->getDeviceId()`) reports what the stream actually
+  opened on — Oboe's own answer, not just what was requested. The
+  OUTPUT stream is never pinned; it's deliberately left on default
+  routing, which is what already sends it to a connected
+  headset/headphones.
+- **JNI + Kotlin**: `nativeSetPreferredInputDevice`/`nativeGetInputDeviceId`
+  in `jni_bridge.cpp`; `AudioEngine.setPreferredInputDevice(deviceId):
+  Boolean`/`inputDeviceId(): Int`.
+- `AudioRoute.kt` gains `AudioRoute.isBuiltinMic` and
+  `AudioRouteDetector.builtinMicDeviceId()` (queries
+  `GET_DEVICES_INPUTS` for `TYPE_BUILTIN_MIC`).
+- **`RecordingInputPreference.kt`** (new) — one boolean in its own
+  `SharedPreferences` file (`CalibrationStore`'s "small scoped storage
+  class" pattern), deliberately NOT part of the project manifest: this
+  is a per-device recording preference, not project data.
+- `ScratchpadScreen.kt`: a "Record with the phone's mic — keep hearing
+  the click through <device>" checkbox, shown only when the detected
+  input route isn't already the built-in mic (nothing to override
+  otherwise). Applies the saved preference once at screen-open and again
+  on every toggle.
+- `EngineCapabilities`/`DiagnosticsScreen.kt`: a new "Input device ID"
+  readout row (with a "(phone mic)" suffix when it matches
+  `builtinMicDeviceId()`) — closes a gap the Phase 3 handoff doc had
+  already flagged ("only the output stream's capabilities were
+  reportable") and doubles as the verification hook for this feature.
+
+**Verified on device** (no headset available to physically test the
+"different device than default" case — that specific acoustic scenario
+needs the user's own hardware): confirmed the whole plumbing round-trips
+correctly with a real device ID. `Diagnostics → Input device ID` read
+`22 (phone mic)` baseline (correctly matching `builtinMicDeviceId()`
+with nothing overridden). Then seeded `RecordingInputPreference`'s
+`force_builtin_mic=true` directly via `run-as` (no headset to trigger the
+real toggle with) and confirmed `ScratchpadScreen`'s existing
+apply-on-open effect called `setPreferredInputDevice(22)` and the input
+stream opened pinned to that exact ID — `Input device ID` still read `22
+(phone mic)`, now via explicit pinning rather than default routing.
+Not separately exercised: the "rebuild while streams are already open"
+branch of `setPreferredInputDevice` specifically (it reuses
+`onErrorAfterClose`'s already-proven rebuild pattern, but this session's
+test happened to hit the streams-not-yet-open path instead). No crashes
+throughout.
+
 ## What's left (not started)
 
-- **BPM/time signature are effectively fixed.** The BPM field exists, but
-  beats-per-bar and count-in beats are hard-coded to 4/4 with a 4-beat
-  count-in, matching every other recording flow in this codebase so far —
-  no per-project or per-take override.
 - **No metering, no undo.** Standard DAW-adjacent features, out of scope
   for "prove the engine is reachable from real UI."
 - **No minimized/collapsible transport strip, no theme-in-settings.** The
@@ -321,3 +418,26 @@ this).
    ones** — fine at the scale exercised so far (a couple of tracks,
    under a minute each), but would get slow for a genuinely large
    project. No incremental/delta save exists.
+7. **Force-phone-mic routing has never been tested with a real headset
+   plugged in** — everything verified so far confirms the plumbing
+   (`setPreferredInputDevice` → Oboe → `inputDeviceId()` round-trips
+   correctly), but the actual motivating scenario (headset connected,
+   toggle enabled, click audible through the headset while the phone's
+   own mic still captures the take) needs a physical headset in hand.
+   The toggle's visibility condition (`!currentInputRoute.isBuiltinMic`)
+   and the whole "which device counts as having its own mic" classification
+   in `AudioRoute.isWiredType`/`isBluetoothType` are reasoned from the
+   Android docs, not confirmed against real hardware.
+8. **`CalibrationStore`'s `routeKey` was deliberately left
+   input-device-only, not widened to also key on the output device.**
+   This is intentional, not an oversight: since the input stream is
+   either the system default or explicitly pinned to the *same* physical
+   built-in mic regardless of what the output stream does, the input
+   route (and therefore the calibration offset for it) doesn't actually
+   change when the output moves to a headset — only the acoustic click
+   bleed path does, which calibration was never trying to characterize in
+   the first place (see `docs/PLAN.md`'s Rule D — a calibration take
+   should never contain click bleed at all). If a future change ever
+   makes the OUTPUT device pinnable too (not just the input), revisit
+   this — that could reintroduce a case where one `routeKey` silently
+   covers two different acoustic paths.

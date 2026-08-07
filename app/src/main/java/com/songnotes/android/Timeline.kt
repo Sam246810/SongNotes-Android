@@ -1,5 +1,6 @@
 package com.songnotes.android
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -24,7 +25,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
@@ -32,6 +35,9 @@ import androidx.compose.ui.unit.dp
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.audio.MultitrackClipSpec
 import com.songnotes.core.audio.MultitrackTrackSpec
+import kotlin.math.roundToLong
+
+private const val kSampleRate = 48000
 
 private val ClipColor = Color(0xFF6EE7B7)
 private val PlayheadColor = Color(0xFFF87171)
@@ -59,6 +65,14 @@ private val NoOpClipChange: (Int, Int, (MultitrackClipSpec) -> MultitrackClipSpe
  * buffer array's identity, so scrolling/recomposing this screen doesn't
  * re-run [AudioEngine.buildPeakPyramid] for clips that haven't changed.
  *
+ * A beat/bar grid is drawn over every track row from [bpm]/[beatsPerBar] —
+ * a bar-start line (beat index 0 modulo [beatsPerBar]) heavier than a
+ * regular beat line, the same downbeat-vs-regular distinction the actual
+ * metronome click makes. Purely visual: this is what "the changes [to time
+ * signature] should reflect in the grid" means, not a separate scheduling
+ * source — the real scheduling is `audio_engine.cpp`'s live click drain,
+ * which reads the same [beatsPerBar] value via [MultitrackProject].
+ *
  * When [enabled], each clip supports two touch gestures, both live-previewed
  * locally during the drag and only committed to [onClipChange] on release
  * (same "don't call back on every pixel of drag" reasoning as the gain
@@ -75,6 +89,8 @@ fun Timeline(
     engine: AudioEngine,
     tracks: List<MultitrackTrackSpec>,
     totalFrames: Long,
+    bpm: Double,
+    beatsPerBar: Int,
     playbackFrame: Long?,
     scrubFrame: Long = 0L,
     onScrubChange: (Long) -> Unit = {},
@@ -86,6 +102,8 @@ fun Timeline(
 
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
         val widthPx = with(LocalDensity.current) { maxWidth.toPx() }
+        val beatGridColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+        val barGridColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
 
         Column {
             ScrubRuler(
@@ -112,6 +130,14 @@ fun Timeline(
                     }
                 }
 
+                val rowsHeight = TrackRowHeight * tracks.size + TrackRowSpacing * (tracks.size - 1)
+
+                if (bpm > 0.0) {
+                    Canvas(modifier = Modifier.fillMaxWidth().height(rowsHeight)) {
+                        drawBeatGrid(totalFrames, bpm, beatsPerBar, beatGridColor, barGridColor)
+                    }
+                }
+
                 val markerFrame = playbackFrame ?: scrubFrame
                 val markerColor = if (playbackFrame != null) PlayheadColor else ScrubColor
                 val fraction = (markerFrame.toFloat() / totalFrames.toFloat()).coerceIn(0f, 1f)
@@ -119,11 +145,46 @@ fun Timeline(
                     modifier = Modifier
                         .offset { IntOffset((widthPx * fraction).toInt(), 0) }
                         .width(2.dp)
-                        .height(TrackRowHeight * tracks.size + TrackRowSpacing * (tracks.size - 1))
+                        .height(rowsHeight)
                         .background(markerColor),
                 )
             }
         }
+    }
+}
+
+/**
+ * Vertical line at every beat (bar-start lines heavier), from frame 0 —
+ * mirrors `dsp::renderClickTrack`'s own scheduling exactly:
+ * `beatIntervalFrames = round(sampleRate * 60 / bpm)`, bar start at
+ * `beatIndex % beatsPerBar == 0`. `bpm <= 0` is handled by the caller
+ * (skips drawing entirely, same as the DSP side rendering silence).
+ */
+private fun DrawScope.drawBeatGrid(
+    totalFrames: Long,
+    bpm: Double,
+    beatsPerBar: Int,
+    beatColor: Color,
+    barColor: Color,
+) {
+    val beatIntervalFrames = (kSampleRate * 60.0 / bpm).roundToLong()
+    if (beatIntervalFrames <= 0) return
+    val safeBeatsPerBar = beatsPerBar.coerceAtLeast(1)
+    val widthPx = size.width
+
+    var beatFrame = 0L
+    var beatIndex = 0
+    while (beatFrame < totalFrames) {
+        val x = widthPx * beatFrame.toFloat() / totalFrames.toFloat()
+        val isBarStart = beatIndex % safeBeatsPerBar == 0
+        drawLine(
+            color = if (isBarStart) barColor else beatColor,
+            start = Offset(x, 0f),
+            end = Offset(x, size.height),
+            strokeWidth = if (isBarStart) 2f else 1f,
+        )
+        beatFrame += beatIntervalFrames
+        beatIndex++
     }
 }
 

@@ -17,6 +17,14 @@ data class EngineCapabilities(
     val isMMapUsed: Boolean,
     val xRunCount: Int,
     val lastError: String?,
+    /**
+     * The input stream's actual `AudioDeviceInfo.id` (0/oboe::kUnspecified
+     * if no input stream is open) — the output-only readout above didn't
+     * cover the input side at all until this; see
+     * [AudioEngine.setPreferredInputDevice] for what can move it away from
+     * the system default.
+     */
+    val inputDeviceId: Int = 0,
 ) {
     companion object {
         fun unavailable(reason: String? = null) = EngineCapabilities(
@@ -30,6 +38,7 @@ data class EngineCapabilities(
             isMMapUsed = false,
             xRunCount = 0,
             lastError = reason,
+            inputDeviceId = 0,
         )
     }
 }

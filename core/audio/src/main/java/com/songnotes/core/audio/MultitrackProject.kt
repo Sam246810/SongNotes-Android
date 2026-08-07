@@ -28,7 +28,23 @@ package com.songnotes.core.audio
  * calls [AudioEngine.punchIn] (the one, C++-backed implementation), same
  * reasoning as everywhere else in Phase 4.
  */
-data class MultitrackProject(val tracks: List<MultitrackTrackSpec> = emptyList()) {
+data class MultitrackProject(
+    val tracks: List<MultitrackTrackSpec> = emptyList(),
+    /** Tempo for count-in/metronome scheduling — see [armOverdub]. */
+    val bpm: Double = 100.0,
+    /**
+     * Time signature's beat count, changeable at any time (not baked into
+     * any take — [dsp::renderClickTrack]/the live click scheduler in
+     * `audio_engine.cpp` already take this as a runtime parameter, so
+     * changing it here just changes what the NEXT count-in/recording and
+     * the timeline's grid use). A bar's *downbeat* is beat index 0 modulo
+     * this; the note-value denominator (the "4" in "3/4" vs "6/8") has no
+     * separate representation because the click generator only cares how
+     * many evenly-spaced clicks make up one accent cycle, not how those
+     * clicks are notated.
+     */
+    val beatsPerBar: Int = 4,
+) {
 
     /** The furthest clip end across every track — what a full playback/export run would cover. */
     val totalFrames: Long
@@ -103,26 +119,27 @@ data class MultitrackProject(val tracks: List<MultitrackTrackSpec> = emptyList()
      * track in this project becomes an audible backing track (see
      * [AudioEngine.armRecording]'s `backingTracks` param), synced so the
      * new take lands at [backingTracksStartFrame] on this project's shared
-     * timeline. Does NOT itself commit the resulting take: call
-     * [withPunchIn] with the take's samples once recording stops and the
-     * file's been read back into memory — same manual sequence the
-     * "Overdub + punch-in, end to end" diagnostics flow already proved
-     * works, just no longer needing that call site to hand-build track
-     * lists itself.
+     * timeline. Uses this project's own [bpm]/[beatsPerBar] rather than
+     * taking them as parameters — they're project state now, not a
+     * per-call choice — with the count-in always one full bar
+     * ([beatsPerBar] beats), so changing the meter changes how long the
+     * count-in is too, not just the click's accent pattern. Does NOT
+     * itself commit the resulting take: call [withPunchIn] with the take's
+     * samples once recording stops and the file's been read back into
+     * memory — same manual sequence the "Overdub + punch-in, end to end"
+     * diagnostics flow already proved works, just no longer needing that
+     * call site to hand-build track lists itself.
      */
     fun armOverdub(
         engine: AudioEngine,
         filePath: String,
-        bpm: Double,
-        beatsPerBar: Int,
-        countInBeats: Int,
         targetIndex: Int,
         backingTracksStartFrame: Long = 0L,
         calibrationOffsetFrames: Double = 0.0,
     ): Boolean {
         val backingTracks = tracks.filterIndexed { i, _ -> i != targetIndex }
         return engine.armRecording(
-            filePath, bpm, beatsPerBar, countInBeats, calibrationOffsetFrames, backingTracks,
+            filePath, bpm, beatsPerBar, countInBeats = beatsPerBar, calibrationOffsetFrames, backingTracks,
             backingTracksStartFrame,
         )
     }

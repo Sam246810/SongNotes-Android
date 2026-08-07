@@ -43,12 +43,14 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.songnotes.core.audio.AudioEngine
+import com.songnotes.core.audio.AudioRoute
 import com.songnotes.core.audio.AudioRouteDetector
 import com.songnotes.core.audio.CalibrationStore
 import com.songnotes.core.audio.EngineState
 import com.songnotes.core.audio.MultitrackClipSpec
 import com.songnotes.core.audio.MultitrackProject
 import com.songnotes.core.audio.MultitrackProjectStorage
+import com.songnotes.core.audio.RecordingInputPreference
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -58,6 +60,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val kSampleRate = 48000
+
+/** Whole-number BPM ("120") when it is one, else one decimal place ("120.5") — avoids "80.0" in the text field. */
+private fun formatBpm(bpm: Double): String =
+    if (bpm == bpm.toLong().toDouble()) bpm.toLong().toString() else "%.1f".format(bpm)
 
 /**
  * The plan's "Scratchpad product UI" (nominally Phase 10 territory),
@@ -85,7 +91,11 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     val context = LocalContext.current
     var project by remember { mutableStateOf(MultitrackProject()) }
     var selectedTrackIndex by remember { mutableStateOf<Int?>(null) }
-    var bpmText by remember { mutableStateOf("80") }
+    // Text-field buffer for editing project.bpm — kept in sync with it (see
+    // the LaunchedEffect(Unit) load below), not the source of truth itself,
+    // so bpm actually persists via MultitrackProjectStorage now instead of
+    // resetting to a hardcoded default every time the app reopens.
+    var bpmText by remember { mutableStateOf(formatBpm(project.bpm)) }
     var isRecording by remember { mutableStateOf(false) }
     var scrubFrame by remember { mutableStateOf(0L) }
     var isPlaying by remember { mutableStateOf(false) }
@@ -94,6 +104,9 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     var engineState by remember { mutableStateOf(EngineState.idle()) }
     val scope = rememberCoroutineScope()
     val storage = remember { MultitrackProjectStorage(context) }
+    val inputPreference = remember { RecordingInputPreference(context) }
+    var forceBuiltinMic by remember { mutableStateOf(false) }
+    var currentInputRoute by remember { mutableStateOf<AudioRoute?>(null) }
 
     var hasRecordPermission by remember {
         mutableStateOf(
@@ -111,7 +124,41 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     // project sitting on disk.
     LaunchedEffect(Unit) {
         val loaded = withContext(Dispatchers.Default) { storage.load() }
-        if (loaded != null) project = loaded
+        if (loaded != null) {
+            project = loaded
+            bpmText = formatBpm(loaded.bpm)
+        }
+    }
+
+    // Detects the input route once at screen-open (same point-in-time,
+    // "good enough" check beginRecording()'s calibration-offset lookup
+    // already does — not live-updated if the route changes while this
+    // screen stays open) and re-applies a previously-saved "use phone mic"
+    // choice, so the override doesn't silently reset to default routing
+    // every time the screen is reopened.
+    LaunchedEffect(Unit) {
+        val route = withContext(Dispatchers.Default) { AudioRouteDetector(context).currentInputRoute() }
+        currentInputRoute = route
+        forceBuiltinMic = inputPreference.forceBuiltinMic
+        if (forceBuiltinMic) {
+            val builtinMicId = withContext(Dispatchers.Default) {
+                AudioRouteDetector(context).builtinMicDeviceId()
+            }
+            if (builtinMicId != null) engine.setPreferredInputDevice(builtinMicId)
+        }
+    }
+
+    fun setForceBuiltinMic(enabled: Boolean) {
+        forceBuiltinMic = enabled
+        inputPreference.forceBuiltinMic = enabled
+        scope.launch {
+            val deviceId = if (enabled) {
+                withContext(Dispatchers.Default) { AudioRouteDetector(context).builtinMicDeviceId() } ?: 0
+            } else {
+                0 // oboe::kUnspecified — restores default input routing
+            }
+            engine.setPreferredInputDevice(deviceId)
+        }
     }
 
     // Nothing previously stopped an in-progress recording if the user left
@@ -142,8 +189,7 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     }
 
     fun beginRecording() {
-        val bpm = bpmText.toDoubleOrNull()
-        if (bpm == null || bpm <= 0.0) {
+        if (project.bpm <= 0.0) {
             statusMessage = "Enter a valid BPM before recording."
             return
         }
@@ -158,7 +204,7 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
 
         context.startForegroundService(Intent(context, RecordingForegroundService::class.java))
         val armed = project.armOverdub(
-            engine, takeFile.absolutePath, bpm, beatsPerBar = 4, countInBeats = 4,
+            engine, takeFile.absolutePath,
             targetIndex = targetIndex, backingTracksStartFrame = scrubFrame,
             calibrationOffsetFrames = calibrationOffsetFrames,
         )
@@ -251,14 +297,56 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
         }
         Spacer(Modifier.height(16.dp))
 
-        OutlinedTextField(
-            value = bpmText,
-            onValueChange = { bpmText = it },
-            label = { Text("BPM") },
-            enabled = !isRecording,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = bpmText,
+                onValueChange = { text ->
+                    bpmText = text
+                    val parsed = text.toDoubleOrNull()
+                    if (parsed != null && parsed > 0.0) project = project.copy(bpm = parsed)
+                },
+                label = { Text("BPM") },
+                enabled = !isRecording,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.width(120.dp),
+            )
+            Spacer(Modifier.width(16.dp))
+            Column {
+                Text("Beats per bar", style = MaterialTheme.typography.bodySmall)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Button(
+                        enabled = !isRecording && project.beatsPerBar > 1,
+                        onClick = { project = project.copy(beatsPerBar = project.beatsPerBar - 1) },
+                    ) { Text("−") }
+                    Text(
+                        "${project.beatsPerBar}",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+                    Button(
+                        enabled = !isRecording && project.beatsPerBar < 12,
+                        onClick = { project = project.copy(beatsPerBar = project.beatsPerBar + 1) },
+                    ) { Text("+") }
+                }
+            }
+        }
         Spacer(Modifier.height(16.dp))
+
+        // Only relevant when the currently-connected input route isn't
+        // already the phone's own mic (a wired headset or Bluetooth device
+        // with its own mic) — a plain pair of headphones with no mic never
+        // shows this, since there's nothing for Android to route input to
+        // besides the built-in mic in that case anyway.
+        if (currentInputRoute?.isBuiltinMic == false) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = forceBuiltinMic, onCheckedChange = { setForceBuiltinMic(it) }, enabled = !isRecording)
+                Text(
+                    "Record with the phone's mic — keep hearing the click through ${currentInputRoute?.label}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+        }
 
         Text(
             if (project.tracks.isEmpty()) {
@@ -274,6 +362,8 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
             engine = engine,
             tracks = project.tracks,
             totalFrames = project.totalFrames,
+            bpm = project.bpm,
+            beatsPerBar = project.beatsPerBar,
             playbackFrame = if (isPlaying) engineState.playbackFrame.toLong() else null,
             scrubFrame = scrubFrame,
             onScrubChange = { scrubFrame = it },

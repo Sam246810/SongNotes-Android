@@ -449,6 +449,19 @@ Java_com_songnotes_core_audio_AudioEngine_nativeGetInputSessionId(JNIEnv *, jobj
     return engine ? engine->inputSessionId() : -1;
 }
 
+JNIEXPORT jint JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeGetInputDeviceId(JNIEnv *, jobject, jlong handle) {
+    auto *engine = toEngine(handle);
+    return engine ? engine->inputDeviceId() : 0;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeSetPreferredInputDevice(JNIEnv *, jobject, jlong handle,
+                                                                          jint deviceId) {
+    auto *engine = toEngine(handle);
+    return engine != nullptr && engine->setPreferredInputDevice(deviceId);
+}
+
 // Phase 9 piano. sampleBuffers[i]/sampleRates[i] must correspond to
 // dsp::kPianoSamples[i] — PianoSampleLoader.kt loads PIANO_SAMPLES (its
 // Kotlin mirror of that same table) in order and this is expected to be
