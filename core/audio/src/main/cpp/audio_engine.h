@@ -2,7 +2,9 @@
 
 #include <oboe/Oboe.h>
 
+#include <array>
 #include <atomic>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -10,6 +12,7 @@
 #include <vector>
 
 #include "command.h"
+#include "dsp/piano_voice.h"
 #include "dsp/track_mixer.h"
 #include "engine_state_block.h"
 #include "scene.h"
@@ -122,6 +125,30 @@ public:
     // non-RT thread once the RT-thread producer side is confirmed done.
     std::vector<float> takeCalibrationCapture();
 
+    // Phase 9 piano: (re)publishes the decoded sample bank — `entries[N]`
+    // must correspond to `dsp::kPianoSamples[N]` (PianoSampleLoader.kt's
+    // contract, enforced on the JNI marshaling side, not here). Safe to
+    // call more than once (e.g. a reload); old generations are kept alive
+    // a few publishes past their replacement, same minimal RCU pattern
+    // ScenePublisher uses, so the RT thread can never read a freed bank —
+    // though in practice this is expected to be called exactly once, when
+    // the piano UI first becomes visible.
+    bool loadPianoBank(std::vector<dsp::PianoSampleBankEntry> entries);
+
+    // Enqueues a note-on/note-off exactly like armRecording() enqueues Arm
+    // — through the command queue, not a direct atomic write — because the
+    // RT thread's own mStreamFrameCounter at the instant it drains the
+    // command is what a voice's envelope age is measured from (see
+    // command.h's doc comment). No-ops (returns false) if the queue is
+    // full, which given 64 slots and this being a human tapping a key
+    // would require an absurd flood to ever happen.
+    bool pianoNoteOn(int32_t midiNote);
+    bool pianoNoteOff(int32_t midiNote);
+
+    // Plain atomic write, no command queue — see mPianoMasterGain's own
+    // doc comment for why volume doesn't need frame-accurate scheduling.
+    void setPianoVolume(float gain) { mPianoMasterGain.store(gain, std::memory_order_relaxed); }
+
     EngineStateBlock *stateBlock() { return &mState; }
 
     // oboe::AudioStreamDataCallback
@@ -167,6 +194,14 @@ private:
     void stopRecordingInternal();
     void stopPlaybackInternal();
     void stopCalibrationInternal();
+
+    // RT-thread-only, called from onAudioReady's command-drain step while
+    // handling a PianoNoteOn/PianoNoteOff command — `engineSampleRateHz`
+    // is `stream->getSampleRate()`, threaded through explicitly rather than
+    // re-queried, since these run on the same thread/callback that already
+    // has it.
+    void handlePianoNoteOn(int32_t midi, double engineSampleRateHz);
+    void handlePianoNoteOff(int32_t midi);
 
     std::mutex mRebuildMutex; // guards stream open/close/rebuild; never touched by the RT thread
     std::shared_ptr<oboe::AudioStream> mOutputStream;
@@ -254,6 +289,55 @@ private:
     // buffer (mutually exclusive in time with MultitrackPlaying).
     int64_t mBackingTracksStartFrame = 0;
     int64_t mBackingTracksTotalFrames = 0;
+
+    // Phase 9 piano: additive voice layer, rendered every callback
+    // regardless of `mode` (see onAudioReady's step 3b and
+    // docs/handoff/PHASE-09.md for why this isn't its own EngineMode).
+    //
+    // The bank is loaded once (typically when the piano UI first opens) and
+    // never mutated in place while the engine lives — mPianoBank is an
+    // atomic raw pointer the RT thread reads with one acquire load, exactly
+    // ScenePublisher's pattern, just not routed through Scene itself: every
+    // existing Scene-publishing call site would otherwise have to
+    // remember to carry the bank forward, and forgetting one would
+    // silently kill the piano mid-session. mPianoBankRetired keeps old
+    // generations alive a few loadPianoBank() calls past their
+    // replacement — touched only by whichever thread calls
+    // loadPianoBank() (never the RT thread).
+    std::atomic<const std::vector<dsp::PianoSampleBankEntry> *> mPianoBank{nullptr};
+    std::deque<std::shared_ptr<const std::vector<dsp::PianoSampleBankEntry>>> mPianoBankRetired;
+
+    // Fixed-size voice pool — no RT allocation. `midi == -1` marks an
+    // inactive slot. `noteOnFrame`/`releaseFrame` are mStreamFrameCounter
+    // values (not seconds), matching every other piece of scheduling state
+    // in this class; converted to the envelope's ageSeconds terms only at
+    // render time, against whatever this callback's actual output sample
+    // rate is. `releaseFrame < 0` means still held. `sampleBankIndex`
+    // indexes directly into `*mPianoBank.load()` (see dsp::PianoSample
+    // BankEntry's own doc comment for the ordering contract).
+    struct PianoVoiceState {
+        bool active = false;
+        int32_t midi = -1;
+        int32_t sampleBankIndex = -1;
+        double readPos = 0.0;
+        double rate = 1.0;
+        int64_t noteOnFrame = 0;
+        int64_t releaseFrame = -1;
+    };
+    static constexpr int32_t kMaxPianoVoices = 16; // the web app has no cap (the browser handles it) — a real Android-side constraint
+    // Plain atomic, not the command queue — unlike note-on/off, volume has
+    // no frame-accurate scheduling need; the RT thread just wants whatever
+    // the most recent value is, exactly like every other atomic knob in
+    // this class (e.g. mMode itself).
+    std::atomic<float> mPianoMasterGain{1.0f};
+    std::array<PianoVoiceState, kMaxPianoVoices> mPianoVoices{};
+    // Sized once, to kMaxFramesPerCallback frames, mono — same "never
+    // resized on the RT thread" contract as mMultitrackScratch, and
+    // deliberately a separate buffer from it: multitrack playback and
+    // piano voices can both be live in the same callback (piano is
+    // additive over every mode), so sharing one scratch buffer between
+    // them would mean one silently clobbering the other's in-progress mix.
+    std::vector<float> mPianoScratch;
 
     EngineStateBlock mState;
 

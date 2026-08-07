@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "audio_engine.h"
+#include "dsp/piano_voice.h"
 #include "dsp/track_mixer.h"
 #include "dsp/wav_encoder.h"
 
@@ -445,6 +446,80 @@ JNIEXPORT jint JNICALL
 Java_com_songnotes_core_audio_AudioEngine_nativeGetInputSessionId(JNIEnv *, jobject, jlong handle) {
     auto *engine = toEngine(handle);
     return engine ? engine->inputSessionId() : -1;
+}
+
+// Phase 9 piano. sampleBuffers[i]/sampleRates[i] must correspond to
+// dsp::kPianoSamples[i] — PianoSampleLoader.kt loads PIANO_SAMPLES (its
+// Kotlin mirror of that same table) in order and this is expected to be
+// called with the result unreordered, same ordering contract
+// dsp::PianoSampleBankEntry's own doc comment states.
+JNIEXPORT jboolean JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeLoadPianoBank(JNIEnv *env, jobject, jlong handle,
+                                                                jobjectArray sampleBuffers,
+                                                                jdoubleArray sampleRates) {
+    auto *engine = toEngine(handle);
+    if (!engine || !sampleBuffers || !sampleRates) return JNI_FALSE;
+
+    const jsize count = env->GetArrayLength(sampleBuffers);
+    std::vector<jdouble> rates(static_cast<size_t>(count));
+    env->GetDoubleArrayRegion(sampleRates, 0, count, rates.data());
+
+    std::vector<songnotes::dsp::PianoSampleBankEntry> entries(static_cast<size_t>(count));
+    for (jsize i = 0; i < count; i++) {
+        auto *bufferArr = static_cast<jfloatArray>(env->GetObjectArrayElement(sampleBuffers, i));
+        const jsize len = env->GetArrayLength(bufferArr);
+        auto buffer = std::make_shared<std::vector<float>>(static_cast<size_t>(len));
+        env->GetFloatArrayRegion(bufferArr, 0, len, buffer->data());
+        env->DeleteLocalRef(bufferArr);
+
+        entries[static_cast<size_t>(i)].buffer = buffer;
+        entries[static_cast<size_t>(i)].sampleRateHz = rates[static_cast<size_t>(i)];
+    }
+
+    return engine->loadPianoBank(std::move(entries)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativePianoNoteOn(JNIEnv *, jobject, jlong handle, jint midiNote) {
+    auto *engine = toEngine(handle);
+    return (engine != nullptr && engine->pianoNoteOn(midiNote)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativePianoNoteOff(JNIEnv *, jobject, jlong handle, jint midiNote) {
+    auto *engine = toEngine(handle);
+    return (engine != nullptr && engine->pianoNoteOff(midiNote)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeSetPianoVolume(JNIEnv *, jobject, jlong handle, jfloat gain) {
+    auto *engine = toEngine(handle);
+    if (engine) engine->setPianoVolume(gain);
+}
+
+// Stateless — exists purely for cross-validating dsp::renderVoiceInto
+// against the independent JVM reference (com.songnotes.core.domain's
+// renderVoiceInto in PianoVoice.kt), same reasoning/pattern as
+// nativeMixTracks. Returns the rendered `numFrames`-long output buffer
+// (starting from silence, i.e. this call's own contribution only — the
+// real RT engine sums voices into whatever the output already holds, but
+// the cross-validation only needs to compare one voice's isolated output
+// against the JVM side's own isolated output).
+JNIEXPORT jfloatArray JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeRenderPianoVoice(
+    JNIEnv *env, jobject, jint numFrames, jfloatArray buffer, jdouble startReadPos, jdouble rate,
+    jdouble startAgeSeconds, jdouble releaseAgeSeconds, jdouble sampleRateHz, jfloat gain) {
+    const jsize bufferLen = env->GetArrayLength(buffer);
+    std::vector<float> bufferVec(static_cast<size_t>(bufferLen));
+    env->GetFloatArrayRegion(buffer, 0, bufferLen, bufferVec.data());
+
+    std::vector<float> out(static_cast<size_t>(numFrames), 0.0f);
+    songnotes::dsp::renderVoiceInto(out.data(), numFrames, bufferVec.data(), bufferLen, startReadPos, rate,
+                                     startAgeSeconds, releaseAgeSeconds, sampleRateHz, gain);
+
+    auto *result = env->NewFloatArray(numFrames);
+    env->SetFloatArrayRegion(result, 0, numFrames, out.data());
+    return result;
 }
 
 } // extern "C"

@@ -441,6 +441,89 @@ std::vector<float> NativeAudioEngine::takeCalibrationCapture() {
     return result;
 }
 
+bool NativeAudioEngine::loadPianoBank(std::vector<dsp::PianoSampleBankEntry> entries) {
+    auto bank = std::make_shared<std::vector<dsp::PianoSampleBankEntry>>(std::move(entries));
+    mPianoBank.store(bank.get(), std::memory_order_release);
+    mPianoBankRetired.push_back(std::move(bank));
+    constexpr size_t kKeepGenerations = 2;
+    while (mPianoBankRetired.size() > kKeepGenerations) {
+        mPianoBankRetired.pop_front();
+    }
+    return true;
+}
+
+bool NativeAudioEngine::pianoNoteOn(int32_t midiNote) {
+    Command cmd;
+    cmd.type = CommandType::PianoNoteOn;
+    cmd.midiNote = midiNote;
+    return mCommandQueue.write(&cmd, 1) == 1;
+}
+
+bool NativeAudioEngine::pianoNoteOff(int32_t midiNote) {
+    Command cmd;
+    cmd.type = CommandType::PianoNoteOff;
+    cmd.midiNote = midiNote;
+    return mCommandQueue.write(&cmd, 1) == 1;
+}
+
+void NativeAudioEngine::handlePianoNoteOn(int32_t midi, double engineSampleRateHz) {
+    // Ignore a retrigger of a note that's still held — matches
+    // PianoPanel.jsx's triggerNoteOn early-return on an already-active
+    // noteKey. A voice mid-release for this same midi (from a prior
+    // note-off) is a different slot and is left alone; only the currently
+    // -held one (if any) blocks a new note-on.
+    for (const auto &voice : mPianoVoices) {
+        if (voice.active && voice.midi == midi && voice.releaseFrame < 0) return;
+    }
+
+    const auto *bank = mPianoBank.load(std::memory_order_acquire);
+    if (bank == nullptr || bank->empty()) return; // piano not loaded yet — silently do nothing, not a crash
+
+    const int32_t sampleIndex = dsp::nearestSampleIndexFor(midi);
+    if (sampleIndex < 0 || static_cast<size_t>(sampleIndex) >= bank->size()) return;
+    const auto &entry = (*bank)[static_cast<size_t>(sampleIndex)];
+    if (!entry.buffer || entry.buffer->empty()) return;
+
+    // First free slot, else steal the oldest-triggered voice — a fixed pool
+    // is a real Android-side constraint the web app doesn't have (the
+    // browser has no such cap).
+    int32_t targetIndex = -1;
+    for (int32_t i = 0; i < kMaxPianoVoices; i++) {
+        if (!mPianoVoices[static_cast<size_t>(i)].active) {
+            targetIndex = i;
+            break;
+        }
+    }
+    if (targetIndex < 0) {
+        int64_t oldest = mPianoVoices[0].noteOnFrame;
+        targetIndex = 0;
+        for (int32_t i = 1; i < kMaxPianoVoices; i++) {
+            if (mPianoVoices[static_cast<size_t>(i)].noteOnFrame < oldest) {
+                oldest = mPianoVoices[static_cast<size_t>(i)].noteOnFrame;
+                targetIndex = i;
+            }
+        }
+    }
+
+    auto &voice = mPianoVoices[static_cast<size_t>(targetIndex)];
+    voice.active = true;
+    voice.midi = midi;
+    voice.sampleBankIndex = sampleIndex;
+    voice.readPos = 0.0;
+    voice.rate = dsp::playbackRateFor(midi, dsp::kPianoSamples[static_cast<size_t>(sampleIndex)].midi,
+                                       entry.sampleRateHz, engineSampleRateHz);
+    voice.noteOnFrame = mStreamFrameCounter;
+    voice.releaseFrame = -1;
+}
+
+void NativeAudioEngine::handlePianoNoteOff(int32_t midi) {
+    for (auto &voice : mPianoVoices) {
+        if (voice.active && voice.midi == midi && voice.releaseFrame < 0) {
+            voice.releaseFrame = mStreamFrameCounter;
+        }
+    }
+}
+
 void NativeAudioEngine::writerThreadLoop(std::string filePath, int64_t headSkipFrames) {
     std::ofstream file(filePath, std::ios::binary | std::ios::trunc);
     if (!file) {
@@ -535,6 +618,10 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
             mActiveClickTemplate = nullptr;
             mActiveClickReadPos = 0;
             mMode.store(static_cast<int32_t>(EngineMode::Armed), std::memory_order_release);
+        } else if (cmd.type == CommandType::PianoNoteOn) {
+            handlePianoNoteOn(cmd.midiNote, static_cast<double>(stream->getSampleRate()));
+        } else if (cmd.type == CommandType::PianoNoteOff) {
+            handlePianoNoteOff(cmd.midiNote);
         }
     }
 
@@ -794,6 +881,70 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
             }
             mBeatIndexInBar = (mBeatIndexInBar + 1) % std::max(1, mBeatsPerBar);
             mNextClickFrame += mBeatIntervalFrames;
+        }
+    }
+
+    // 3b. Piano voices: additive layer, deliberately OUTSIDE the mode
+    // if/else chain above — piano sounds during recording, playback, idle,
+    // any mode, not just one exclusive EngineMode (see
+    // docs/handoff/PHASE-09.md for why this isn't its own mode). Renders
+    // each active voice into mPianoScratch (mono, cleared per voice), then
+    // fans it across output channels and sums — same pattern the backing-
+    // track mix above already uses for layering onto the click.
+    {
+        const auto *bank = mPianoBank.load(std::memory_order_acquire);
+        if (bank != nullptr) {
+            if (mPianoScratch.size() < static_cast<size_t>(kMaxFramesPerCallback)) {
+                mPianoScratch.assign(static_cast<size_t>(kMaxFramesPerCallback), 0.0f);
+            }
+            const double engineSr = static_cast<double>(stream->getSampleRate());
+            const auto renderFrames = std::min<int32_t>(numFrames, static_cast<int32_t>(mPianoScratch.size()));
+
+            for (auto &voice : mPianoVoices) {
+                if (!voice.active) continue;
+                if (voice.sampleBankIndex < 0 || static_cast<size_t>(voice.sampleBankIndex) >= bank->size()) {
+                    voice.active = false;
+                    continue;
+                }
+                const auto &entry = (*bank)[static_cast<size_t>(voice.sampleBankIndex)];
+                if (!entry.buffer) {
+                    voice.active = false;
+                    continue;
+                }
+
+                const double startAgeSeconds =
+                    static_cast<double>(mStreamFrameCounter - voice.noteOnFrame) / engineSr;
+                const double releaseAgeSeconds = voice.releaseFrame < 0
+                                                      ? -1.0
+                                                      : static_cast<double>(voice.releaseFrame - voice.noteOnFrame) /
+                                                            engineSr;
+                // Forcibly cut a released voice once its release ramp has
+                // finished, regardless of how much of its own sample buffer
+                // is left — matches the web app's explicit source.stop()
+                // ~450ms after note-off (see dsp::kPianoReleaseSeconds's
+                // own doc comment). Without this, a released note would
+                // keep "sounding" at the 0.001 floor for its whole natural
+                // decay tail (many seconds) and never free its voice slot.
+                if (releaseAgeSeconds >= 0.0 && startAgeSeconds - releaseAgeSeconds >= dsp::kPianoReleaseSeconds) {
+                    voice.active = false;
+                    continue;
+                }
+
+                std::fill(mPianoScratch.begin(), mPianoScratch.begin() + renderFrames, 0.0f);
+                auto result = dsp::renderVoiceInto(mPianoScratch.data(), renderFrames, entry.buffer->data(),
+                                                    static_cast<int32_t>(entry.buffer->size()), voice.readPos,
+                                                    voice.rate, startAgeSeconds, releaseAgeSeconds, engineSr,
+                                                    mPianoMasterGain.load(std::memory_order_relaxed));
+                voice.readPos = result.nextReadPos;
+                if (result.exhausted) voice.active = false;
+
+                for (int32_t frame = 0; frame < renderFrames; frame++) {
+                    const float sample = mPianoScratch[static_cast<size_t>(frame)];
+                    for (int32_t ch = 0; ch < outChannels; ch++) {
+                        out[frame * outChannels + ch] += sample;
+                    }
+                }
+            }
         }
     }
 

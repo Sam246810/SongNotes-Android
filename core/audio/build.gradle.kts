@@ -50,6 +50,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":core:domain")) // PianoSampleLoader.kt reads PIANO_SAMPLES's midi grid
     implementation(libs.oboe)
     implementation(libs.kotlinx.coroutines.core)
 

@@ -1,5 +1,6 @@
 package com.songnotes.core.audio
 
+import android.content.Context
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -270,6 +271,56 @@ class AudioEngine {
         return if (h == 0L) FloatArray(0) else nativeTakeCalibrationCapture(h)
     }
 
+    /**
+     * Decodes the bundled Salamander piano samples ([PianoSampleLoader])
+     * and publishes them to the native engine's piano voice bank. Call
+     * once, typically when the piano UI first becomes visible — repeat
+     * calls are safe (see `NativeAudioEngine::loadPianoBank`'s own doc
+     * comment) but unnecessary. Until this has completed, [pianoNoteOn]
+     * silently does nothing (no bank loaded yet), not a crash.
+     */
+    suspend fun loadPianoSamples(context: Context): Boolean {
+        if (!ensureCreated()) return false
+        val decoded = PianoSampleLoader.loadAll(context)
+        val buffers = Array(decoded.size) { decoded[it].buffer }
+        val sampleRates = DoubleArray(decoded.size) { decoded[it].sampleRateHz.toDouble() }
+        return nativeLoadPianoBank(handle, buffers, sampleRates)
+    }
+
+    /** Starts a piano note sounding. Ignored if [midi] is already held — matches the web app's own retrigger-ignore. */
+    fun pianoNoteOn(midi: Int): Boolean = ensureCreated() && nativePianoNoteOn(handle, midi)
+
+    /** Releases a held piano note into its ~400ms decay tail (`dsp::kPianoReleaseSeconds`). */
+    fun pianoNoteOff(midi: Int): Boolean {
+        val h = handle
+        return h != 0L && nativePianoNoteOff(h, midi)
+    }
+
+    /** Sets the piano voices' master gain. */
+    fun setPianoVolume(gain: Float) {
+        if (handle != 0L) nativeSetPianoVolume(handle, gain)
+    }
+
+    /**
+     * Stateless — renders one voice's isolated output with no live engine
+     * involvement, no handle needed. Exists purely for cross-validating
+     * `dsp::renderVoiceInto` against the independent JVM reference
+     * (`com.songnotes.core.domain`'s `renderVoiceInto` in `PianoVoice.kt`),
+     * same reasoning/pattern as [mixTracksNative].
+     */
+    fun renderPianoVoiceNative(
+        numFrames: Int,
+        buffer: FloatArray,
+        startReadPos: Double,
+        rate: Double,
+        startAgeSeconds: Double,
+        releaseAgeSeconds: Double,
+        sampleRateHz: Double,
+        gain: Float,
+    ): FloatArray = nativeRenderPianoVoice(
+        numFrames, buffer, startReadPos, rate, startAgeSeconds, releaseAgeSeconds, sampleRateHz, gain,
+    )
+
     /** Stops everything except an in-progress recording — call when the app backgrounds. The mic foreground service is what keeps a recording alive past that point. */
     fun pauseForBackground() {
         if (handle == 0L) return
@@ -415,6 +466,20 @@ class AudioEngine {
     private external fun nativeIsMMapUsed(handle: Long): Boolean
     private external fun nativeGetXRunCount(handle: Long): Int
     private external fun nativeGetLastError(handle: Long): String
+    private external fun nativeLoadPianoBank(handle: Long, sampleBuffers: Array<FloatArray>, sampleRates: DoubleArray): Boolean
+    private external fun nativePianoNoteOn(handle: Long, midiNote: Int): Boolean
+    private external fun nativePianoNoteOff(handle: Long, midiNote: Int): Boolean
+    private external fun nativeSetPianoVolume(handle: Long, gain: Float)
+    private external fun nativeRenderPianoVoice(
+        numFrames: Int,
+        buffer: FloatArray,
+        startReadPos: Double,
+        rate: Double,
+        startAgeSeconds: Double,
+        releaseAgeSeconds: Double,
+        sampleRateHz: Double,
+        gain: Float,
+    ): FloatArray
 
     companion object {
         init {
