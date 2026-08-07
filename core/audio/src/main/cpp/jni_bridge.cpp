@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "audio_engine.h"
+#include "dsp/peak_pyramid.h"
 #include "dsp/piano_voice.h"
 #include "dsp/track_mixer.h"
 #include "dsp/wav_encoder.h"
@@ -519,6 +520,56 @@ Java_com_songnotes_core_audio_AudioEngine_nativeRenderPianoVoice(
 
     auto *result = env->NewFloatArray(numFrames);
     env->SetFloatArrayRegion(result, 0, numFrames, out.data());
+    return result;
+}
+
+// Phase 10 waveform. Stateless, same reasoning as nativeMixTracks/
+// nativeRenderPianoVoice -- peak computation isn't RT-critical (done once
+// when a clip loads, off the audio thread), so it doesn't touch the live
+// engine at all.
+//
+// Returns one self-describing FloatArray rather than a real nested
+// structure -- JNI has no cheap way to hand back "a list of levels, each
+// with its own arrays" without constructing real Kotlin objects field by
+// field from native code, which is a lot of extra JNI plumbing for what's
+// fundamentally just numbers. Format:
+//   [numLevels,
+//    level0.samplesPerPeak, level0.peakCount, level0.min[0], level0.max[0], level0.min[1], level0.max[1], ...,
+//    level1.samplesPerPeak, level1.peakCount, ...,
+//    ...]
+// Every value fits exactly in a float32 (small non-negative integers for
+// the headers, real sample values for the peaks), so there's no precision
+// concern packing the integer headers in as floats. AudioEngine.kt's
+// buildPeakPyramid() is the decoder for this format -- keep the two in
+// sync if this shape ever changes.
+JNIEXPORT jfloatArray JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeBuildPeakPyramid(JNIEnv *env, jobject, jfloatArray buffer,
+                                                                    jint baseSamplesPerPeak, jint minPeaksPerLevel) {
+    const jsize len = env->GetArrayLength(buffer);
+    std::vector<float> bufferVec(static_cast<size_t>(len));
+    env->GetFloatArrayRegion(buffer, 0, len, bufferVec.data());
+
+    auto pyramid = songnotes::dsp::buildPeakPyramid(bufferVec, baseSamplesPerPeak, minPeaksPerLevel);
+
+    size_t totalFloats = 1; // numLevels header
+    for (const auto &level : pyramid) {
+        totalFloats += 2 + level.peaks.size() * 2; // samplesPerPeak + peakCount headers, then min/max pairs
+    }
+
+    std::vector<float> flat;
+    flat.reserve(totalFloats);
+    flat.push_back(static_cast<float>(pyramid.size()));
+    for (const auto &level : pyramid) {
+        flat.push_back(static_cast<float>(level.samplesPerPeak));
+        flat.push_back(static_cast<float>(level.peaks.size()));
+        for (const auto &peak : level.peaks) {
+            flat.push_back(peak.min);
+            flat.push_back(peak.max);
+        }
+    }
+
+    auto *result = env->NewFloatArray(static_cast<jsize>(flat.size()));
+    env->SetFloatArrayRegion(result, 0, static_cast<jsize>(flat.size()), flat.data());
     return result;
 }
 

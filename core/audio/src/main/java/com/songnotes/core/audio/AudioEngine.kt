@@ -321,6 +321,38 @@ class AudioEngine {
         numFrames, buffer, startReadPos, rate, startAgeSeconds, releaseAgeSeconds, sampleRateHz, gain,
     )
 
+    /**
+     * Phase 10 waveform: builds a multi-resolution min/max pyramid for
+     * [buffer] via `dsp::buildPeakPyramid` — level 0 uses [baseSamplesPerPeak]
+     * samples/peak, each level after that doubles it, stopping once a level
+     * would have fewer than [minPeaksPerLevel] peaks. Stateless, same as
+     * [renderPianoVoiceNative]/[mixTracksNative] — no engine handle needed,
+     * since peak computation isn't RT-critical (done once when a clip loads,
+     * off the audio thread).
+     */
+    fun buildPeakPyramid(buffer: FloatArray, baseSamplesPerPeak: Int = 256, minPeaksPerLevel: Int = 8): PeakPyramid {
+        val flat = nativeBuildPeakPyramid(buffer, baseSamplesPerPeak, minPeaksPerLevel)
+        if (flat.isEmpty()) return PeakPyramid(emptyList())
+
+        val numLevels = flat[0].toInt()
+        val levels = ArrayList<PeakLevel>(numLevels)
+        var pos = 1
+        repeat(numLevels) {
+            val samplesPerPeak = flat[pos].toInt()
+            val peakCount = flat[pos + 1].toInt()
+            pos += 2
+            val mins = FloatArray(peakCount)
+            val maxes = FloatArray(peakCount)
+            for (i in 0 until peakCount) {
+                mins[i] = flat[pos]
+                maxes[i] = flat[pos + 1]
+                pos += 2
+            }
+            levels.add(PeakLevel(samplesPerPeak, mins, maxes))
+        }
+        return PeakPyramid(levels)
+    }
+
     /** Stops everything except an in-progress recording — call when the app backgrounds. The mic foreground service is what keeps a recording alive past that point. */
     fun pauseForBackground() {
         if (handle == 0L) return
@@ -480,6 +512,7 @@ class AudioEngine {
         sampleRateHz: Double,
         gain: Float,
     ): FloatArray
+    private external fun nativeBuildPeakPyramid(buffer: FloatArray, baseSamplesPerPeak: Int, minPeaksPerLevel: Int): FloatArray
 
     companion object {
         init {
@@ -527,3 +560,26 @@ private class FlattenedTracks(
     val trackMuted: BooleanArray,
     val trackSoloed: BooleanArray,
 )
+
+/** One resolution level of a [PeakPyramid] — mirrors `dsp::PeakLevel` in `peak_pyramid.h`. [mins]/[maxes] are parallel arrays, one entry per peak. */
+data class PeakLevel(val samplesPerPeak: Int, val mins: FloatArray, val maxes: FloatArray) {
+    val peakCount: Int get() = mins.size
+}
+
+/**
+ * Multi-resolution min/max waveform, built once per clip via
+ * [AudioEngine.buildPeakPyramid] (off the audio thread — not RT-safe to call
+ * from a render callback). [selectLevelForZoom] mirrors
+ * `dsp::selectLevelForZoom`: the coarsest level whose `samplesPerPeak` still
+ * fits within the caller's samples-per-pixel budget, so a waveform
+ * `Canvas` never draws more peaks than it has pixels for.
+ */
+data class PeakPyramid(val levels: List<PeakLevel>) {
+    fun selectLevelForZoom(samplesPerPixel: Double): PeakLevel {
+        var best = levels.first()
+        for (level in levels) {
+            if (level.samplesPerPeak <= samplesPerPixel) best = level
+        }
+        return best
+    }
+}
