@@ -269,6 +269,15 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
         )
         Spacer(Modifier.height(8.dp))
 
+        Timeline(
+            engine = engine,
+            tracks = project.tracks,
+            totalFrames = project.totalFrames,
+            playbackFrame = if (isPlaying) engineState.playbackFrame.toLong() else null,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(16.dp))
+
         // A plain Column, not LazyColumn: this list is always short (a
         // handful of tracks, not a virtualization-scale dataset), and the
         // whole screen is already inside a scrollable Column above — a
