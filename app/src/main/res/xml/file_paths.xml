@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Exposes only app/cache/exports/ (see ExportActions.kt's shareSongAsPdf)
+     through the FileProvider content:// URI a share-sheet target actually
+     needs to read the exported PDF; nothing else in app storage is shared. -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="exports" path="exports/" />
+</paths>

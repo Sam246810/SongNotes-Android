@@ -337,6 +337,8 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             TextButton(onClick = { showImport = true }) { Text("Import text", color = ChordColor) }
+            TextButton(onClick = { copySongTextToClipboard(context, currentSong()) }) { Text("Export text", color = ChordColor) }
+            TextButton(onClick = { shareSongAsPdf(context, currentSong()) }) { Text("Export PDF", color = ChordColor) }
             TextButton(onClick = {
                 lines = lines.map { it.copy(chords = transposeChordsLine(it.chords, -1) ?: it.chords) }
                 persist()
