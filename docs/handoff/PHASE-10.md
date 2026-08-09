@@ -355,23 +355,29 @@ confirmed `ScratchpadScreen`'s existing apply-on-open effect called
 exact ID — `Input device ID` still read `22 (phone mic)`, now via
 explicit pinning rather than default routing. No crashes throughout.
 
-## Real Bluetooth headphones: recording via the device's own mic (2026-08-09)
+## Real Bluetooth headphones: recording via the device's own mic — tried, then dropped (2026-08-09)
 
 The force-phone-mic checkbox above only covers half the ask — "keep the
-phone mic no matter what's connected." The other half, tested here with
-a real Sony WF-1000XM5 earbud connected over classic Bluetooth: let the
-user choose the *opposite*, recording through the headset's own mic
+phone mic no matter what's connected." The other half, attempted here
+with a real Sony WF-1000XM5 earbud connected over classic Bluetooth: let
+the user choose the *opposite*, recording through the headset's own mic
 instead. That's a materially different problem. Plain Bluetooth audio
 (A2DP, the profile used for music) has **no microphone path to any app
 at all** — only an active **SCO** session (the low-quality, call-audio
 profile) makes `AudioManager` route input to a Bluetooth device, and it
 downgrades both directions to narrowband (~8kHz) while active. This
 needed real negotiation, not just another `setPreferredInputDevice`
-call.
+call — so a `BluetoothScoController.kt` was built to do it, went through
+three real on-device-discovered bugs, and got a session working
+end-to-end. It was then **reverted**: real-device testing turned up a
+deeper architectural conflict than any of those three bugs, and rather
+than patch around it, the feature was dropped back to just the
+force-phone-mic direction. The three bugs are kept here as the useful
+part of this investigation — the postmortem below explains why the
+feature itself didn't ship.
 
-**`BluetoothScoController.kt`** (new) wraps that negotiation, and went
-through three real, on-device-discovered problems before it worked
-reliably:
+**Three bugs found and fixed en route** (all in the now-deleted
+`BluetoothScoController.kt`):
 
 1. **A genuine crash**, not a logic bug: requesting the `BLUETOOTH_CONNECT`
    runtime permission via `ActivityResultContracts.RequestPermission()`
@@ -381,12 +387,9 @@ reliably:
    wasn't a composition-timing fluke. This is a known androidx interop
    gap (`ActivityResultRegistry`'s random request-code generation vs.
    `FragmentActivity`'s legacy 16-bit-only validation), not something
-   fixable from application code. Resolved by dropping the runtime
-   permission request entirely: `connect()` just attempts SCO directly
-   and catches `SecurityException`, failing that one attempt gracefully
-   instead of crashing, on the (untested but architecturally sound)
-   theory that a device which actually enforces the grant will surface
-   it there instead.
+   fixable from application code. Worked around by dropping the runtime
+   permission request entirely: `connect()` attempted SCO directly and
+   caught `SecurityException` instead of crashing.
 2. **Unreliable connection confirmation on real hardware.** The first
    implementation used the deprecated `startBluetoothSco()` +
    `ACTION_SCO_AUDIO_STATE_UPDATED` broadcast. On the test device, the
@@ -401,12 +404,12 @@ reliably:
    just never transitioned within the timeout. Mixing the deprecated
    API family with the modern query turned out to be part of the
    problem, not a mitigation: Google's own guidance is to use one full
-   API generation or the other, never both on the same session.
-   Resolved by two entirely separate code paths instead of one with a
-   version check sprinkled in — API 31+ uses `setCommunicationDevice()`
+   API generation or the other, never both on the same session. Fixed
+   by two entirely separate code paths instead of one with a version
+   check sprinkled in — API 31+ used `setCommunicationDevice()`
    exclusively, which reports success or failure **synchronously**
    through its own return value (no broadcast, no polling, nothing to
-   race or time out); API 30 (this app's minSdk) keeps the old
+   race or time out); API 30 (this app's minSdk) kept the old
    broadcast-only approach, since `setCommunicationDevice()` has no
    equivalent there. The modern path connected successfully on **3/3**
    consecutive fresh app launches once this was in place, having failed
@@ -417,24 +420,75 @@ reliably:
    `scoController.connect()` — two overlapping attempts whose
    `BroadcastReceiver` registration/cleanup could interfere with each
    other. Fixed with a tracked `micRoutingJob: Job?` that
-   `useBuiltinMic()`/`useDeviceMic()` both cancel before launching a new
-   attempt, so exactly one is ever in flight.
+   `useBuiltinMic()`/`useDeviceMic()` both cancelled before launching a
+   new attempt, so exactly one was ever in flight.
 
-**Verified on device**, with the real WF-1000XM5 connected: checkbox
-correctly appeared, labeled with the device's name; unchecking it
-connected SCO and flipped the label to "Recording with WF-1000XM5's mic
-(lower audio quality while active)" — reproduced on 3 consecutive fresh
-launches. Recorded a full 80-second take through it start to finish (no
-crash, committed onto a new track normally). Re-checking the box
-switched cleanly back to the phone mic, confirmed via `adb logcat`
-showing `clearCommunicationDevice()` firing and the system route
-reverting to `bluetooth a2dp (8)` — no lingering degraded-audio state
-left behind. Not separately exercised: `DisposableEffect`'s
-leave-the-screen SCO teardown specifically (every test session ended by
-manually switching back to phone mic first, which already exercises the
-same `disconnect()` call) and the API 30 legacy code path (no API 30
-device available — the physical test device runs a much newer OS; that
-path is reasoned from the same API contract, not device-verified).
+With all three fixed, a full session worked: checkbox appeared, labeled
+with the device's name; unchecking it connected SCO, flipped the label,
+reproduced on 3 consecutive fresh launches, and a full 80-second take
+recorded through it start to finish with no crash. That looked like a
+shipped feature — but it wasn't durable, which is why it was reverted.
+
+### Why it was reverted: SCO routing wasn't durable, and the real fix wasn't worth its cost
+
+Continued real-device use (not the scripted verification above, just
+normal use with the earbuds on) surfaced the actual problem: sometime
+after a successful SCO connect, Bluetooth audio would silently fall
+back to no input at all — moving to a different room and making noise
+produced a recording with nothing on it. `adb shell dumpsys audio`
+during a "connected" session showed the real picture: `Communication
+route clients: (empty)`, `Applied Preferred communication device:
+null`, `Active communication device: ... type:bt_a2dp` — the system had
+quietly dropped back to plain A2DP (no mic path) while this app's own
+UI state still claimed SCO was active.
+
+The root cause is architectural, not a bug to patch further:
+`setCommunicationDevice()`/SCO routing is designed to stay bound to a
+genuine "communication use case" — an audio stream using
+`USAGE_VOICE_COMMUNICATION`-style attributes. This app's Oboe engine
+deliberately uses `InputPreset::Unprocessed` (input) and
+`Usage::Media`/`ContentType::Music` (output) — chosen since Phase 0-3
+specifically to keep Android from force-enabling AEC (echo
+cancellation), because AEC would corrupt the calibration system this
+whole app is built around (see `docs/PLAN.md`: "Never
+`VoiceCommunication`/`VoicePerformance` — those force AEC on, which is
+exactly what destroys calibration"). Because neither stream is
+attribute-tagged as a communication use case, the system has no durable
+reason to keep routing through SCO, and the route reverts on its own.
+
+The real fix — `AudioManager.MODE_IN_COMMUNICATION` — would make SCO
+routing durable, but was deliberately not adopted: it forces AEC on the
+input stream (and it's untested whether the stream-level
+`InputPreset::Unprocessed` would even be honored once that global mode
+is set), would invalidate every existing calibration offset for that
+recording path (no calibration was ever measured for a differently
+-processed signal), is system-wide state that needs careful lifecycle
+management to avoid leaking into other audio on the phone, and — most
+importantly — is exactly the tradeoff `docs/PLAN.md` already ruled out
+by name. Classic Bluetooth also generally can't run SCO and A2DP
+concurrently on one connection (they compete for the same radio
+channel), so even a durable fix would mean output degrades to
+call-quality audio the whole time input is being captured. Given all
+that, the decision was to drop BT-device-mic recording rather than
+chase it: **Bluetooth headphones can be used to listen while recording
+on the phone's own mic (the force-phone-mic direction, which works
+correctly and is now the only Bluetooth behavior offered), but not to
+record through the headset's own mic.**
+
+### USB wired headset mic: expected to work, untested (no hardware)
+
+`AudioRoute.isWiredType()` already classifies `TYPE_USB_HEADSET`/
+`TYPE_USB_DEVICE` as "wired," alongside plain 3.5mm wired headsets — the
+existing `setPreferredInputDevice`-based checkbox (built for wired
+headsets generally, no Bluetooth-specific code involved) should already
+work correctly for a USB headset's mic with zero code changes, since
+USB Audio Class devices are architecturally full-duplex and have none
+of classic Bluetooth's SCO/A2DP profile-switching conflict. This is
+**reasoned from the Android device-type docs and the existing wired
+-device code path, not device-verified** — no USB headset with a mic
+was available to test with this session. Worth an actual on-device
+check the next time one is in hand; until then, treat it as "should
+work" rather than "confirmed."
 
 ## What's left (not started)
 
@@ -494,20 +548,19 @@ path is reasoned from the same API contract, not device-verified).
    ones** — fine at the scale exercised so far (a couple of tracks,
    under a minute each), but would get slow for a genuinely large
    project. No incremental/delta save exists.
-7. **Force-phone-mic / device-mic routing has now been tested with a real
-   Bluetooth headset (Sony WF-1000XM5)** — see "Real Bluetooth
-   headphones" above. Both directions confirmed: forcing the phone mic
-   while a BT device is connected, and the reverse (recording through
-   the BT device's own mic via a real SCO session), including a full
-   80-second take and clean teardown back to normal A2DP routing. What's
-   still genuinely untested: a **wired** headset specifically (only
-   Bluetooth was available this session — the wired path needs no SCO
-   dance at all per the design, so it should just work via default
-   routing, but that's reasoned, not device-verified), and the API 30
-   legacy SCO code path (the test device runs a much newer OS).
+7. **Force-phone-mic routing has been tested with a real Bluetooth
+   headset (Sony WF-1000XM5)** and works correctly — a Bluetooth route
+   always forces the phone mic now (no checkbox, just an informational
+   line), since recording through the BT device's own mic was tried and
+   reverted (see "Real Bluetooth headphones" above — SCO routing wasn't
+   durable against this app's deliberately non-"communication" audio
+   streams). What's still genuinely untested: a **wired or USB** headset
+   specifically (only Bluetooth was available this session — the wired/
+   USB path needs no SCO dance at all per the design, so it should just
+   work via default routing, but that's reasoned, not device-verified).
    `AudioRoute.isWiredType`/`isBluetoothType`'s device-type
    classification itself is still reasoned from the Android docs rather
-   than confirmed against a real wired device.
+   than confirmed against a real wired or USB device.
 8. **`CalibrationStore`'s `routeKey` was deliberately left
    input-device-only, not widened to also key on the output device.**
    This is intentional, not an oversight: since the input stream is

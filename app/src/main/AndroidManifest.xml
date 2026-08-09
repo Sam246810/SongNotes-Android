@@ -12,15 +12,6 @@
          haptic cueing during calibration (visual + haptic only, no
          audible click competing with the sweep/mic). -->
     <uses-permission android:name="android.permission.VIBRATE" />
-    <!-- Normal permission, no runtime request needed — required by
-         AudioManager.startBluetoothSco()/setBluetoothScoOn() in
-         BluetoothScoController (recording via a Bluetooth headset's own
-         mic, Phase 10's force-phone-mic-or-not routing toggle). -->
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <!-- Runtime permission on API 31+ — also required for
-         startBluetoothSco() there. minSdk is 30, so this is requested
-         only when Build.VERSION.SDK_INT >= 31. -->
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <!-- No android:icon yet — Phase 0 has no app icon asset. Android falls back to a
          system default launcher icon until Phase 8 (or earlier, whenever branding lands). -->
