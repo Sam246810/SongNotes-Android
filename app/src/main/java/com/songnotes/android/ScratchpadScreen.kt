@@ -45,6 +45,7 @@ import androidx.core.content.ContextCompat
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.audio.AudioRoute
 import com.songnotes.core.audio.AudioRouteDetector
+import com.songnotes.core.audio.BluetoothScoController
 import com.songnotes.core.audio.CalibrationStore
 import com.songnotes.core.audio.EngineState
 import com.songnotes.core.audio.MultitrackClipSpec
@@ -55,6 +56,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -105,8 +107,25 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     val scope = rememberCoroutineScope()
     val storage = remember { MultitrackProjectStorage(context) }
     val inputPreference = remember { RecordingInputPreference(context) }
+    val scoController = remember { BluetoothScoController(context) }
     var forceBuiltinMic by remember { mutableStateOf(false) }
     var currentInputRoute by remember { mutableStateOf<AudioRoute?>(null) }
+    // True only while a real SCO session is up — drives whether "switch back
+    // to phone mic" (or leaving the screen) needs to tear one down. Distinct
+    // from forceBuiltinMic: that's the user's saved *choice*, this is
+    // "is the low-quality Bluetooth voice channel actually live right now."
+    var isScoActive by remember { mutableStateOf(false) }
+    var isConnectingSco by remember { mutableStateOf(false) }
+    // useBuiltinMic()/useDeviceMic() can each be triggered more than once in
+    // quick succession — the initial screen-open effect calling one, then a
+    // user tapping the checkbox again before it's finished — and without
+    // this, two overlapping scoController.connect() calls raced each
+    // other's BroadcastReceiver/poll-job cleanup on a real device (caught
+    // via diagnostic logging: one attempt's `finally` unregistering state
+    // the other attempt still needed, muddying an otherwise-successful
+    // connect). Cancelling any in-flight attempt before starting a new one
+    // keeps exactly one active at a time.
+    var micRoutingJob by remember { mutableStateOf<Job?>(null) }
 
     var hasRecordPermission by remember {
         mutableStateOf(
@@ -130,34 +149,86 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
         }
     }
 
-    // Detects the input route once at screen-open (same point-in-time,
-    // "good enough" check beginRecording()'s calibration-offset lookup
-    // already does — not live-updated if the route changes while this
-    // screen stays open) and re-applies a previously-saved "use phone mic"
-    // choice, so the override doesn't silently reset to default routing
-    // every time the screen is reopened.
-    LaunchedEffect(Unit) {
-        val route = withContext(Dispatchers.Default) { AudioRouteDetector(context).currentInputRoute() }
-        currentInputRoute = route
-        forceBuiltinMic = inputPreference.forceBuiltinMic
-        if (forceBuiltinMic) {
-            val builtinMicId = withContext(Dispatchers.Default) {
-                AudioRouteDetector(context).builtinMicDeviceId()
+    fun useBuiltinMic() {
+        forceBuiltinMic = true
+        inputPreference.forceBuiltinMic = true
+        micRoutingJob?.cancel()
+        micRoutingJob = scope.launch {
+            if (isScoActive) {
+                withContext(Dispatchers.Default) { scoController.disconnect() }
+                isScoActive = false
             }
-            if (builtinMicId != null) engine.setPreferredInputDevice(builtinMicId)
+            val builtinMicId = withContext(Dispatchers.Default) { AudioRouteDetector(context).builtinMicDeviceId() } ?: 0
+            engine.setPreferredInputDevice(builtinMicId)
         }
     }
 
-    fun setForceBuiltinMic(enabled: Boolean) {
-        forceBuiltinMic = enabled
-        inputPreference.forceBuiltinMic = enabled
-        scope.launch {
-            val deviceId = if (enabled) {
-                withContext(Dispatchers.Default) { AudioRouteDetector(context).builtinMicDeviceId() } ?: 0
+    // "Use the connected device's own mic instead of the phone's." For a
+    // wired device this is just Android's existing automatic routing —
+    // setPreferredInputDevice(0/unspecified) is enough, same as before this
+    // Bluetooth work existed. For Bluetooth it's not: plain A2DP (music)
+    // Bluetooth audio has no microphone path to any app at all, regardless
+    // of device ID — only an active SCO (call-audio) session makes
+    // AudioManager route input to the device.
+    //
+    // No BLUETOOTH_CONNECT permission request happens here — deliberately.
+    // Routing that through ActivityResultContracts.RequestPermission() on
+    // this app's FragmentActivity reliably crashed with
+    // "IllegalArgumentException: Can only use lower 16 bits for requestCode"
+    // (a known androidx interop gap between ActivityResultRegistry's random
+    // request-code generation and FragmentActivity's legacy 16-bit-only
+    // validation — reproduced from both a LaunchedEffect and a real
+    // checkbox tap, so it isn't a composition-timing issue this app's code
+    // can work around). scoController.connect() just attempts SCO directly
+    // and reports failure (see its own doc comment) if the OS ever does
+    // reject it for a missing grant, rather than crashing.
+    fun useDeviceMic() {
+        val route = currentInputRoute
+        forceBuiltinMic = false
+        inputPreference.forceBuiltinMic = false
+        micRoutingJob?.cancel()
+        if (route == null || !route.isBluetooth) {
+            micRoutingJob = scope.launch { engine.setPreferredInputDevice(0) }
+            return
+        }
+        isConnectingSco = true
+        micRoutingJob = scope.launch {
+            val connected = withContext(Dispatchers.Default) { scoController.connect() }
+            isConnectingSco = false
+            isScoActive = connected
+            if (connected) {
+                // 0/unspecified now correctly resolves to the SCO device —
+                // it didn't before connect() succeeded, which is exactly
+                // why setPreferredInputDevice() always rebuilds on call
+                // rather than skipping an "unchanged" 0 -> 0 request.
+                engine.setPreferredInputDevice(0)
+                statusMessage = null
             } else {
-                0 // oboe::kUnspecified — restores default input routing
+                statusMessage = "Couldn't connect to ${route.label}'s mic — using the phone mic instead."
+                useBuiltinMic()
             }
-            engine.setPreferredInputDevice(deviceId)
+        }
+    }
+
+    // Detects the input route once at screen-open (same point-in-time,
+    // "good enough" check beginRecording()'s calibration-offset lookup
+    // already does — not live-updated if the route changes while this
+    // screen stays open) and re-applies a previously-saved mic-routing
+    // choice, so it doesn't silently reset to default (and, for a
+    // Bluetooth "use device mic" choice, silently drop back to no SCO
+    // session) every time the screen is reopened. Only relevant at all
+    // when something other than the phone's own mic is actually connected
+    // — matches the checkbox's own visibility condition below. Safe to
+    // call useDeviceMic()/useBuiltinMic() directly from here — neither
+    // touches an ActivityResultLauncher anymore (see useDeviceMic()'s own
+    // doc comment for why that's off the table entirely now).
+    LaunchedEffect(Unit) {
+        val route = withContext(Dispatchers.Default) { AudioRouteDetector(context).currentInputRoute() }
+        currentInputRoute = route
+        if (!route.isBuiltinMic) {
+            if (inputPreference.forceBuiltinMic) useBuiltinMic() else useDeviceMic()
+        } else {
+            forceBuiltinMic = inputPreference.forceBuiltinMic
         }
     }
 
@@ -171,12 +242,19 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     // engine is a real, not-yet-understood-crash-risk state this project
     // should just never be able to enter. isRecording is deliberately not
     // a DisposableEffect key — it only needs to run once, on final
-    // disposal, not every time recording starts/stops.
+    // disposal, not every time recording starts/stops. Same reasoning
+    // covers tearing down an active Bluetooth SCO session on the way out —
+    // left running past this screen, it silently degrades every other
+    // app's audio on the phone (including this app's own next playback)
+    // until something else explicitly turns it off.
     DisposableEffect(Unit) {
         onDispose {
             if (isRecording) {
                 engine.stopRecording()
                 context.stopService(Intent(context, RecordingForegroundService::class.java))
+            }
+            if (isScoActive) {
+                scoController.disconnect()
             }
         }
     }
@@ -339,9 +417,19 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
         // besides the built-in mic in that case anyway.
         if (currentInputRoute?.isBuiltinMic == false) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = forceBuiltinMic, onCheckedChange = { setForceBuiltinMic(it) }, enabled = !isRecording)
+                Checkbox(
+                    checked = forceBuiltinMic,
+                    onCheckedChange = { if (it) useBuiltinMic() else useDeviceMic() },
+                    enabled = !isRecording && !isConnectingSco,
+                )
                 Text(
-                    "Record with the phone's mic — keep hearing the click through ${currentInputRoute?.label}",
+                    when {
+                        isConnectingSco -> "Connecting to ${currentInputRoute?.label}..."
+                        forceBuiltinMic ->
+                            "Recording with the phone's mic — click still plays through ${currentInputRoute?.label}"
+                        else -> "Recording with ${currentInputRoute?.label}'s mic" +
+                            if (currentInputRoute?.isBluetooth == true) " (lower audio quality while active)" else ""
+                    },
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

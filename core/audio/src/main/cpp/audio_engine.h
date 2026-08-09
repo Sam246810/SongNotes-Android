@@ -195,11 +195,15 @@ public:
     // along with it). `oboe::kUnspecified` (0) restores default routing.
     // Rebuilds the duplex streams immediately if they're already open
     // (same closeStreamsLocked()/openStreamsLocked() pair
-    // onErrorAfterClose() uses for a route-change recovery); otherwise just
-    // remembers the preference for the next open. The OUTPUT stream is
-    // never pinned — it's left on default routing deliberately, since that
-    // already follows a connected headset/headphones automatically, which
-    // is exactly where the click should play.
+    // onErrorAfterClose() uses for a route-change recovery) — always, even
+    // if deviceId didn't numerically change, since a caller may be reacting
+    // to what oboe::kUnspecified now resolves to having changed underneath
+    // (e.g. Bluetooth SCO connecting/disconnecting), not to this preference
+    // itself. If streams aren't open yet, just remembers the preference for
+    // the next open. The OUTPUT stream is never pinned — it's left on
+    // default routing deliberately, since that already follows a connected
+    // headset/headphones automatically, which is exactly where the click
+    // should play.
     bool setPreferredInputDevice(int32_t deviceId);
 
 private:

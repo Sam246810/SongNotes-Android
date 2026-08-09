@@ -1094,7 +1094,6 @@ int32_t NativeAudioEngine::inputDeviceId() {
 
 bool NativeAudioEngine::setPreferredInputDevice(int32_t deviceId) {
     std::lock_guard<std::mutex> lock(mRebuildMutex);
-    if (mPreferredInputDeviceId == deviceId) return true; // already the active preference — nothing to rebuild
     mPreferredInputDeviceId = deviceId;
 
     if (!mOutputStream && !mInputStream) {
@@ -1102,6 +1101,16 @@ bool NativeAudioEngine::setPreferredInputDevice(int32_t deviceId) {
         // first real open happens (ensureReady()/startTestTone()/etc).
         return true;
     }
+
+    // Deliberately always rebuilds below when streams are already open, even
+    // if deviceId is numerically unchanged from before — a caller can be
+    // reacting to a change in what "unspecified" (0) actually resolves to
+    // (e.g. Bluetooth SCO just connected or disconnected), which this
+    // preference alone doesn't capture while staying at oboe::kUnspecified
+    // both times. setPreferredInputDevice() is a low-frequency, user-action
+    // call, never on any RT or polled path, so a redundant rebuild on an
+    // unchanged value is a non-issue — losing a real routing change to a
+    // skipped rebuild would not be.
 
     // Streams already exist: rebuild them on the new preference right now,
     // same close/reopen pair onErrorAfterClose() uses for route-change
