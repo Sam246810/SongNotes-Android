@@ -83,15 +83,24 @@ class EnvelopeV2GoldenFixtureTest {
             .put("envelope", keys.envelope.toJson())
         val text = fixture.toString(2) + "\n"
 
-        writeIfParentExists(ownCopy, text)
+        writeToExistingParent(ownCopy, text)
         // Also drop a copy directly into the desktop repo's spec/ dir, if it's checked
         // out as a sibling of this repo (the layout every prior fixture-porting pass in
         // this session has assumed) -- matches "committed to BOTH repos" from the plan.
-        writeIfParentExists(File("../../../SongNotes/spec/envelope-v2-from-android.json"), text)
+        writeToExistingParent(File("../../../SongNotes/spec/envelope-v2-from-android.json"), text)
     }
 
-    private fun writeIfParentExists(file: File, text: String) {
-        file.parentFile?.let { if (!it.exists()) it.mkdirs() }
+    /**
+     * Writes only if [file]'s parent directory already exists -- never creates
+     * it. The previous version of this helper (`writeIfParentExists`) called
+     * `mkdirs()` unconditionally, which on any machine without the web repo
+     * checked out as a sibling of this one (a CI agent, a fresh clone) would
+     * silently create a stray `../../../SongNotes/spec/` directory tree at an
+     * arbitrary path outside this repo entirely, rather than just skipping the
+     * optional cross-repo copy as intended.
+     */
+    private fun writeToExistingParent(file: File, text: String) {
+        if (file.parentFile?.exists() != true) return
         file.writeText(text)
     }
 

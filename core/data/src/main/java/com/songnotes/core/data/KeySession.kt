@@ -12,19 +12,31 @@ package com.songnotes.core.data
  * it isn't wired into a real sign-in flow yet (see docs/handoff/PHASE-07.md). Until
  * then, the DEK simply doesn't survive the process being killed, same as any
  * other in-memory-only secret.
+ *
+ * Also tracks which envelope `dekId` the current DEK came from (see
+ * accountKeys.js's `generateDekId` / `AccountKeys.kt`'s equivalent) -- not
+ * secret, just an identifier. [SongSyncWorker] compares this against the
+ * account's live `user_keys.envelope.dekId` before syncing, so a DEK rotated
+ * elsewhere (a recovery-code-lost reset on another device) is caught before
+ * this session pushes local edits re-encrypted under a key that's already dead.
  */
 object KeySession {
     @Volatile private var dek: ByteArray? = null
+    @Volatile private var dekId: String? = null
 
-    fun establish(newDek: ByteArray) {
+    fun establish(newDek: ByteArray, newDekId: String? = null) {
         dek = newDek
+        dekId = newDekId
     }
 
     fun current(): ByteArray? = dek
+
+    fun currentDekId(): String? = dekId
 
     fun isUnlocked(): Boolean = dek != null
 
     fun clear() {
         dek = null
+        dekId = null
     }
 }

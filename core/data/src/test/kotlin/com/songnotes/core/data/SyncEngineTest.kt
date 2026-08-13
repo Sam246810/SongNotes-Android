@@ -94,6 +94,22 @@ class SyncEngineTest {
     }
 
     @Test
+    fun `push stamps dek_id from the dekId passed to sync`() = runBlocking {
+        dao.upsert(localSong())
+        engine.sync(userId, dek, "dek-abc")
+
+        assertEquals("dek-abc", adapter.rows["song-1"]!!.dek_id)
+    }
+
+    @Test
+    fun `push leaves dek_id null when sync was called without one (pre-Phase-12 caller shape)`() = runBlocking {
+        dao.upsert(localSong())
+        engine.sync(userId, dek) // no dekId argument -- must still compile and work
+
+        assertNull(adapter.rows["song-1"]!!.dek_id)
+    }
+
+    @Test
     fun `push updates an existing remote song via updateWithRevCheck`() = runBlocking {
         val existingRemote = buildRemoteRow("song-1", rev = 3)
         adapter.rows["song-1"] = existingRemote
@@ -174,6 +190,33 @@ class SyncEngineTest {
         assertEquals("From The Cloud", pulled.title)
         assertEquals(1, pulled.remoteRev)
         assertEquals(false, pulled.pendingSync)
+    }
+
+    @Test
+    fun `pull skips a row that fails to decrypt instead of aborting the whole pass`() = runBlocking {
+        // Simulates a row encrypted under a DIFFERENT DEK than this session's --
+        // e.g. synced from another device in the gap between a DEK rotation and
+        // that device's own purge running (see the web app's accountRecovery.js
+        // rotateAndPurge). A prior implementation had no try/catch here at all,
+        // so the first such row aborted the pull entirely, leaving every OTHER
+        // row un-synced too -- found during Phase 12 design review, not live.
+        val otherDek = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        val badContent = JSONObject()
+            .put("title", "Undecryptable").put("lines", org.json.JSONArray())
+            .put("bpm", 0).put("key", "").put("tuning", "").put("capo", 0)
+            .put("createdAt", "2026-01-01T00:00:00.000Z").put("updatedAt", "2026-01-01T00:00:00.000Z")
+        val badEnvelope = encryptContentJson(otherDek, badContent.toString())
+        adapter.rows["bad-song"] = SongRow(
+            id = "bad-song", user_id = userId, encrypted = true, content = badEnvelope.toJsonElement(),
+            is_locked = false, dek_id = "some-other-dek-id", rev = 1, deleted_at = null,
+            created_at = "2026-01-01T00:00:00.000Z", updated_at = "2026-01-01T00:00:00.000Z",
+        )
+        adapter.rows["good-song"] = buildRemoteRow("good-song", rev = 1, title = "Still Readable")
+
+        engine.sync(userId, dek)
+
+        assertNull(dao.rows["bad-song"]) // skipped, not upserted with garbage
+        assertEquals("Still Readable", dao.rows["good-song"]!!.title) // the OTHER row still made it through
     }
 
     @Test

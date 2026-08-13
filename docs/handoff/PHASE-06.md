@@ -364,12 +364,15 @@ hands at the actual moment of verification.
 
 ## What's left (this phase, deliberately deferred)
 
-- **`dekId` not yet stamped on any row** — `SongEntity` has no `dekId` column
-  yet since nothing in the Android app encrypts song content with the account
-  DEK yet (only local SQLCipher-at-rest encryption exists so far, plus the
-  fourth pass's in-memory-only device-wrap smoke test — no envelope from
-  either has ever been persisted). Deferred until the app actually writes
-  DEK-encrypted content.
+- **`dekId` not yet stamped on any row** — **done in Phase 12**, once the app
+  actually started writing DEK-encrypted content (the trigger this bullet was
+  originally waiting for). Stamped on `SongRow` (the Supabase-facing wire
+  shape) on every push, and `SongSyncWorker` checks it against the account's
+  live envelope before syncing at all. `SongEntity` (the local Room table)
+  still carries no `dekId` column, deliberately — Room only ever holds this
+  device's own already-decrypted content, so there's nothing for a per-row
+  local `dekId` to disambiguate that the sync-time check above doesn't
+  already cover. See `docs/handoff/PHASE-12-forgot-password.md`.
 - **No Room migrations yet** — only ever been version 1, `exportSchema =
   false`. Add real schema export + a migration test once the schema changes
   for the first time.

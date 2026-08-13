@@ -31,10 +31,29 @@ class SongSyncWorker(context: Context, params: WorkerParameters) : CoroutineWork
     override suspend fun doWork(): Result {
         val userId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id ?: return Result.success()
         val dek = KeySession.current() ?: return Result.success()
+        val sessionDekId = KeySession.currentDekId()
 
         return try {
+            // If this session's DEK came from an envelope that's no longer the
+            // account's active one (a recovery-code-lost reset on another
+            // device rotated it -- see the web app's accountRecovery.js
+            // rotateAndPurge), pushing local edits would re-encrypt them under
+            // a key that's already dead, and pulling would just fail to
+            // decrypt every row. Neither is useful; skip the whole sync and
+            // drop the stale session so the next foreground use re-prompts for
+            // the current password (LockedAccountScreen) instead of silently
+            // failing forever in the background.
+            if (sessionDekId != null) {
+                val currentDekId = SupabaseAuthRepository().fetchCurrentDekId()
+                if (currentDekId != null && currentDekId != sessionDekId) {
+                    Log.w("SongSyncWorker", "DEK rotated elsewhere (dekId mismatch) -- clearing stale session, skipping sync")
+                    KeySession.clear()
+                    return Result.success()
+                }
+            }
+
             val db = SongDatabase.open(applicationContext, KeystoreDbKeyProvider(applicationContext).getOrCreateDbKey())
-            SyncEngine(db.songDao()).sync(userId, dek)
+            SyncEngine(db.songDao()).sync(userId, dek, sessionDekId)
             Result.success()
         } catch (e: Exception) {
             Log.e("SongSyncWorker", "sync failed", e)

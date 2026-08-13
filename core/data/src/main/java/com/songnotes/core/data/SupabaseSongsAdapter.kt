@@ -26,6 +26,11 @@ data class SongRow(
     val deleted_at: String?,
     val created_at: String,
     val updated_at: String,
+    // Which account DEK `content` is encrypted under (user_keys.envelope.dekId) --
+    // nullable, see supabase/schema.sql's doc comment on the column. Defaults to
+    // null so existing SongRow construction call sites that predate this field
+    // don't all need updating at once.
+    val dek_id: String? = null,
 )
 
 sealed class UpdateResult {

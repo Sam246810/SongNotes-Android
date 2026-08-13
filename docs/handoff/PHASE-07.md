@@ -239,14 +239,20 @@ Unpausing it via the Supabase dashboard resolved it; no code was at fault.
   whose envelope predates v2 cannot sign in from Android.
 - **Full `WIRE-FORMAT-v2.md` alignment is partial.** This pass aligned only
   the chords representation (anchors, not the web app's old padded-string
-  form — see "Wire format" below); the doc's `dekId` column, DB-side rev-bump
-  trigger, and `v`/`id`/`meta`-wrapped content-JSON shape were not
-  implemented on either client. Both clients still use the simpler
+  form — see "Wire format" below); the doc's DB-side rev-bump trigger and
+  `v`/`id`/`meta`-wrapped content-JSON shape were not implemented on either
+  client, and still aren't as of Phase 12. Both clients still use the simpler
   client-computed-rev scheme and flat content-JSON shape this Tier 0 pass
-  originally built.
+  originally built. The `dekId` column — the other gap this bullet used to
+  name — **is** implemented now; see the two bullets below and
+  `docs/handoff/PHASE-12-forgot-password.md`.
 - **Tier 1 (per-line 3-way merge)** — still explicitly deferred by the plan
   itself.
-- **`dekId` stamped on rows** — still not done (carried over from Phase 6).
+- **`dekId` stamped on rows** — **done in Phase 12** (carried over from Phase
+  6, then this phase, before finally landing): `SongRow.dek_id` is stamped on
+  every push, and `SongSyncWorker` now checks the account's live `dekId`
+  before syncing at all, clearing a stale `KeySession` and skipping the sync
+  on a mismatch rather than pushing edits re-encrypted under a dead key.
 
 ## Wire format: chords as anchors, not the padded editing string
 

@@ -1,5 +1,7 @@
 package com.songnotes.android
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -27,6 +29,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.songnotes.core.data.EnvelopeKeyMismatchException
 import com.songnotes.core.data.SongSyncWorker
 import com.songnotes.core.data.SupabaseAuthRepository
 import com.songnotes.core.data.SupabaseClientProvider
@@ -53,6 +56,15 @@ fun AuthScreen(onDone: () -> Unit) {
     var isLoading by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
     var recoveryCode by remember { mutableStateOf<String?>(null) }
+    // Set on a sign-in whose auth succeeded but whose envelope doesn't match this
+    // password (EnvelopeKeyMismatchException) -- routes to recovery-code entry
+    // instead of just showing a raw error with no way forward.
+    var showRecoveryUnlock by remember { mutableStateOf(false) }
+    // Set when signUp() returns null -- this Supabase project requires email
+    // confirmation before granting a session, so there's no encryption key to
+    // show yet (see signUp's doc comment). Confirmed live against the real
+    // project, not a hypothetical.
+    var needsEmailConfirmation by remember { mutableStateOf(false) }
 
     if (!SupabaseClientProvider.isConfigured) {
         Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
@@ -69,9 +81,33 @@ fun AuthScreen(onDone: () -> Unit) {
         return
     }
 
-    // A recovery code is shown exactly once, right after sign-up -- the user
-    // must save it now, there's no way to see it again later (same as the
-    // web app's own signup flow).
+    if (showRecoveryUnlock) {
+        RecoveryUnlockScreen(
+            newPassword = password,
+            onDone = onDone,
+            onCancel = { showRecoveryUnlock = false; errorText = null },
+        )
+        return
+    }
+
+    if (needsEmailConfirmation) {
+        Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+            Text("Check your email", style = MaterialTheme.typography.headlineSmall)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Confirm your account from the link we just sent, then sign in. Your recovery " +
+                    "code will be created and shown the first time you do.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Spacer(Modifier.height(24.dp))
+            OutlinedButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text("OK") }
+        }
+        return
+    }
+
+    // A recovery code is shown exactly once, right after sign-up (or the first
+    // sign-in for an account that never had one -- see signIn's doc comment) --
+    // the user must save it now, there's no way to see it again later.
     if (recoveryCode != null) {
         Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
             Text("Save your recovery code", style = MaterialTheme.typography.headlineSmall)
@@ -128,13 +164,25 @@ fun AuthScreen(onDone: () -> Unit) {
                     try {
                         if (isSignUp) {
                             val keys = authRepo.signUp(email, password)
-                            SongSyncWorker.enqueueOneTime(context)
-                            recoveryCode = keys.recoveryCode
+                            if (keys != null) {
+                                SongSyncWorker.enqueueOneTime(context)
+                                recoveryCode = keys.recoveryCode
+                            } else {
+                                needsEmailConfirmation = true
+                            }
                         } else {
-                            authRepo.signIn(email, password)
+                            val freshRecoveryCode = authRepo.signIn(email, password)
                             SongSyncWorker.enqueueOneTime(context)
-                            onDone()
+                            if (freshRecoveryCode != null) {
+                                // First sign-in for an account with no envelope yet --
+                                // a code was just minted and has never been shown.
+                                recoveryCode = freshRecoveryCode
+                            } else {
+                                onDone()
+                            }
                         }
+                    } catch (e: EnvelopeKeyMismatchException) {
+                        showRecoveryUnlock = true
                     } catch (e: Exception) {
                         errorText = e.message ?: "Something went wrong"
                     } finally {
@@ -158,6 +206,13 @@ fun AuthScreen(onDone: () -> Unit) {
         Spacer(Modifier.height(16.dp))
         TextButton(onClick = { isSignUp = !isSignUp; errorText = null }) {
             Text(if (isSignUp) "Already have an account? Sign in" else "Need an account? Sign up")
+        }
+        if (!isSignUp) {
+            TextButton(onClick = {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(WEB_FORGOT_PASSWORD_URL)))
+            }) {
+                Text("Forgot your password?")
+            }
         }
     }
 }

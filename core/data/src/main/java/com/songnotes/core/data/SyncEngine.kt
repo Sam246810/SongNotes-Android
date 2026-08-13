@@ -44,14 +44,23 @@ class SyncEngine(
     private val dao: SongDao,
     private val adapter: SongsRemoteAdapter = SupabaseSongsAdapter(),
 ) {
-    suspend fun sync(userId: String, dek: ByteArray) {
-        pushPending(userId, dek)
+    /**
+     * @param dekId the envelope `dekId` [dek] came from (see [KeySession]) --
+     * optional and defaulting to null purely so existing call sites (this
+     * class's own tests included) don't all need updating at once; a null
+     * `dekId` just means every pushed row's `dek_id` column comes out null too
+     * (same as any pre-Phase-12 row). [SongSyncWorker] is the one real caller
+     * that supplies it, having already confirmed it against the account's live
+     * envelope before calling this at all.
+     */
+    suspend fun sync(userId: String, dek: ByteArray, dekId: String? = null) {
+        pushPending(userId, dek, dekId)
         pull(userId, dek)
     }
 
-    private suspend fun pushPending(userId: String, dek: ByteArray) {
+    private suspend fun pushPending(userId: String, dek: ByteArray, dekId: String?) {
         for (entity in dao.getPendingSync()) {
-            val row = buildRow(entity, userId, dek)
+            val row = buildRow(entity, userId, dek, dekId)
 
             if (entity.remoteRev == null) {
                 val inserted = adapter.insert(row)
@@ -80,13 +89,25 @@ class SyncEngine(
                 continue
             }
 
-            val contentJson = JSONObject(decryptContentJson(dek, row.content.toContentEnvelope()))
-            val song = songFromContentJson(row.id, contentJson)
+            // A single undecryptable row -- most likely encrypted under a
+            // different DEK than this session's (dek_id mismatch; see
+            // SongSyncWorker's pre-sync check for the common cause), or
+            // genuinely corrupt -- must not abort the whole pull and leave
+            // every OTHER row un-synced. Matches the web app's per-row
+            // _placeholderSong fallback in songsRepository.js's list(). Local
+            // state for this one row is simply left untouched (whatever it was
+            // before this pass, including "doesn't exist locally yet").
+            val song = try {
+                val contentJson = JSONObject(decryptContentJson(dek, row.content.toContentEnvelope()))
+                songFromContentJson(row.id, contentJson)
+            } catch (e: Exception) {
+                continue
+            }
             dao.upsert(SongEntity.fromDomain(song).copy(rev = row.rev, deletedAt = null, pendingSync = false, remoteRev = row.rev))
         }
     }
 
-    private fun buildRow(entity: SongEntity, userId: String, dek: ByteArray): SongRow {
+    private fun buildRow(entity: SongEntity, userId: String, dek: ByteArray, dekId: String?): SongRow {
         val domain = entity.toDomain()
         val contentJson = JSONObject()
             .put("title", entity.title)
@@ -106,6 +127,7 @@ class SyncEngine(
             encrypted = true,
             content = envelope.toJsonElement(),
             is_locked = false,
+            dek_id = dekId,
             rev = entity.rev,
             deleted_at = entity.deletedAt?.let(::toIso),
             created_at = toIso(entity.createdAt),
