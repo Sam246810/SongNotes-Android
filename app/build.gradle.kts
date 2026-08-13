@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.androidx.baselineprofile)
 }
 
 android {
@@ -18,7 +19,18 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // TEMPORARY placeholder so a release-configured build can be
+            // installed and verified on-device at all (an unsigned release
+            // APK can't be adb-installed). Phase 11 replaces this with a
+            // real release signingConfig -- see
+            // docs/handoff/PHASE-11-prep-navigation.md.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
@@ -33,6 +45,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
@@ -58,7 +71,11 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+    implementation(libs.androidx.material.icons.extended)
     implementation(libs.androidx.biometric)
+    implementation(libs.androidx.profileinstaller)
 
     debugImplementation(libs.androidx.ui.tooling)
+
+    baselineProfile(project(":baselineprofile"))
 }

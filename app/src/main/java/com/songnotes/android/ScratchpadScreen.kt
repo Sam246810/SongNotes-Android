@@ -5,28 +5,62 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Headset
+import androidx.compose.material.icons.filled.HeadsetOff
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -37,9 +71,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.songnotes.core.audio.AudioEngine
@@ -50,6 +88,7 @@ import com.songnotes.core.audio.EngineState
 import com.songnotes.core.audio.MultitrackClipSpec
 import com.songnotes.core.audio.MultitrackProject
 import com.songnotes.core.audio.MultitrackProjectStorage
+import com.songnotes.core.audio.MultitrackTrackSpec
 import com.songnotes.core.audio.RecordingInputPreference
 import java.io.File
 import java.nio.ByteBuffer
@@ -85,7 +124,17 @@ private fun formatBpm(bpm: Double): String =
  * gain/mute/solo tweaks — those aren't auto-saved on every slider drag
  * tick (that would mean a file write per pixel of drag), so a deliberate
  * Save is how those specifically get persisted.
+ *
+ * UI shape: a [Scaffold] with the transport controls (record/play/add
+ * track/export) pinned in a bottom bar rather than living at the bottom of
+ * the scrolling content — with more than a couple of tracks the old layout
+ * pushed those controls off-screen, which is the one thing on this screen
+ * used on every single take. Tempo/time-signature/mic-route settings are
+ * folded into a collapsible card (the plan's "DAW collapsible to tempo/BPM/
+ * start-stop" polish item) since they're set once per session and don't
+ * need to stay visible while recording.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     val context = LocalContext.current
@@ -102,6 +151,7 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     var isExporting by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
     var engineState by remember { mutableStateOf(EngineState.idle()) }
+    var settingsExpanded by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
     val storage = remember { MultitrackProjectStorage(context) }
     val inputPreference = remember { RecordingInputPreference(context) }
@@ -296,6 +346,16 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
         if (granted) beginRecording() else statusMessage = "Microphone permission is required to record."
     }
 
+    fun onRecordPressed() {
+        if (isRecording) {
+            stopRecordingAndCommit()
+        } else if (!hasRecordPermission) {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            beginRecording()
+        }
+    }
+
     LaunchedEffect(isRecording, isPlaying) {
         while (isRecording || isPlaying) {
             engineState = engine.state()
@@ -304,233 +364,333 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Scratchpad", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
-            Button(onClick = onDone) { Text("Done") }
-        }
-        Spacer(Modifier.height(16.dp))
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Scratchpad") },
+                navigationIcon = {
+                    IconButton(onClick = onDone) {
+                        Icon(Icons.Filled.Close, contentDescription = "Done")
+                    }
+                },
+                actions = {
+                    IconButton(enabled = !isRecording, onClick = { persist(project, announce = true) }) {
+                        Icon(Icons.Filled.Save, contentDescription = "Save")
+                    }
+                },
+            )
+        },
+        bottomBar = {
+            ScratchpadTransportBar(
+                isRecording = isRecording,
+                isPlaying = isPlaying,
+                isExporting = isExporting,
+                isArmed = engineState.isArmed,
+                countInBeatsRemaining = engineState.countInBeatsRemaining,
+                recordedSeconds = engineState.framesRecorded / kSampleRate,
+                selectedTrackIndex = selectedTrackIndex,
+                playbackFrame = engineState.playbackFrame,
+                playbackTotalFrames = engineState.playbackTotalFrames,
+                onAddTrack = {
+                    project = project.addTrack()
+                    persist(project)
+                },
+                onRecordPressed = ::onRecordPressed,
+                onPlayToggle = ::togglePlayback,
+                onExport = ::exportMixdown,
+            )
+        },
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+        ) {
+            statusMessage?.let { message ->
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(message, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
 
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = bpmText,
-                onValueChange = { text ->
+            SessionSettingsCard(
+                expanded = settingsExpanded,
+                onToggleExpanded = { settingsExpanded = !settingsExpanded },
+                bpmText = bpmText,
+                onBpmChange = { text ->
                     bpmText = text
                     val parsed = text.toDoubleOrNull()
                     if (parsed != null && parsed > 0.0) project = project.copy(bpm = parsed)
                 },
-                label = { Text("BPM") },
+                beatsPerBar = project.beatsPerBar,
+                onBeatsPerBarChange = { project = project.copy(beatsPerBar = it) },
                 enabled = !isRecording,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.width(120.dp),
+                route = currentInputRoute,
+                forceBuiltinMic = forceBuiltinMic,
+                onForceBuiltinMicChange = { if (it) useBuiltinMic() else useDeviceMic() },
             )
-            Spacer(Modifier.width(16.dp))
-            Column {
-                Text("Beats per bar", style = MaterialTheme.typography.bodySmall)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Button(
-                        enabled = !isRecording && project.beatsPerBar > 1,
-                        onClick = { project = project.copy(beatsPerBar = project.beatsPerBar - 1) },
-                    ) { Text("−") }
-                    Text(
-                        "${project.beatsPerBar}",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(horizontal = 16.dp),
-                    )
-                    Button(
-                        enabled = !isRecording && project.beatsPerBar < 12,
-                        onClick = { project = project.copy(beatsPerBar = project.beatsPerBar + 1) },
-                    ) { Text("+") }
-                }
-            }
-        }
-        Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
 
-        // Only relevant when the currently-connected input route isn't
-        // already the phone's own mic (a wired/USB headset, or a Bluetooth
-        // device) — a plain pair of headphones with no mic never shows
-        // this, since there's nothing for Android to route input to
-        // besides the built-in mic in that case anyway. Bluetooth gets an
-        // informational line only, not a checkbox: there's no real
-        // device-mic alternative to offer (see useDeviceMic()'s doc
-        // comment), so the phone mic is always used and always will be.
-        val route = currentInputRoute
-        if (route?.isBuiltinMic == false) {
-            if (route.isBluetooth) {
-                Text(
-                    "Recording with the phone's mic — click still plays through ${route.label}",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            } else {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(
-                        checked = forceBuiltinMic,
-                        onCheckedChange = { if (it) useBuiltinMic() else useDeviceMic() },
-                        enabled = !isRecording,
-                    )
+            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp)) {
                     Text(
-                        if (forceBuiltinMic) {
-                            "Recording with the phone's mic — click still plays through ${route.label}"
+                        if (project.tracks.isEmpty()) {
+                            "Timeline"
                         } else {
-                            "Recording with ${route.label}'s mic"
+                            "${project.tracks.size} track(s) · ${"%.1f".format(project.totalFrames / kSampleRate.toDouble())}s total"
                         },
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.titleSmall,
                     )
+                    Spacer(Modifier.height(8.dp))
+
+                    if (project.tracks.isEmpty()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Filled.MusicNote,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "No tracks yet — tap Record below to create one.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    } else {
+                        Timeline(
+                            engine = engine,
+                            tracks = project.tracks,
+                            totalFrames = project.totalFrames,
+                            bpm = project.bpm,
+                            beatsPerBar = project.beatsPerBar,
+                            playbackFrame = if (isPlaying) engineState.playbackFrame.toLong() else null,
+                            scrubFrame = scrubFrame,
+                            onScrubChange = { scrubFrame = it },
+                            enabled = !isRecording && !isPlaying,
+                            onClipChange = { trackIndex, clipIndex, transform ->
+                                project = project.withClipTransform(engine, trackIndex, clipIndex, transform)
+                                persist(project)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Punch-in point: %.1fs".format(scrubFrame / kSampleRate.toDouble()),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
             Spacer(Modifier.height(16.dp))
-        }
 
-        Text(
-            if (project.tracks.isEmpty()) {
-                "No tracks yet — tap Record to create one."
-            } else {
-                "${project.tracks.size} track(s), ${"%.1f".format(project.totalFrames / kSampleRate.toDouble())}s total"
-            },
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Spacer(Modifier.height(8.dp))
-
-        Timeline(
-            engine = engine,
-            tracks = project.tracks,
-            totalFrames = project.totalFrames,
-            bpm = project.bpm,
-            beatsPerBar = project.beatsPerBar,
-            playbackFrame = if (isPlaying) engineState.playbackFrame.toLong() else null,
-            scrubFrame = scrubFrame,
-            onScrubChange = { scrubFrame = it },
-            enabled = !isRecording && !isPlaying,
-            onClipChange = { trackIndex, clipIndex, transform ->
-                project = project.withClipTransform(engine, trackIndex, clipIndex, transform)
-                persist(project)
-            },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Text(
-            "Punch-in point: %.1fs".format(scrubFrame / kSampleRate.toDouble()),
-            style = MaterialTheme.typography.bodySmall,
-        )
-        Spacer(Modifier.height(16.dp))
-
-        // A plain Column, not LazyColumn: this list is always short (a
-        // handful of tracks, not a virtualization-scale dataset), and the
-        // whole screen is already inside a scrollable Column above — a
-        // fixed-height LazyColumn nested in there needs a per-row height
-        // guess that's easy to get wrong (an earlier version hard-coded
-        // 92dp, which clipped the second track's Mute/Solo row off-screen
-        // entirely once actually run on device). A plain Column just takes
-        // each row's real height, no guessing.
-        project.tracks.forEachIndexed { index, track ->
-            TrackRow(
-                index = index,
-                track = track,
-                selected = selectedTrackIndex == index,
-                enabled = !isRecording && !isPlaying,
-                onSelect = { selectedTrackIndex = if (selectedTrackIndex == index) null else index },
-                onGainChange = { project = project.withTrackGain(index, it) },
-                onMutedChange = { project = project.withTrackMuted(index, it) },
-                onSoloedChange = { project = project.withTrackSoloed(index, it) },
-                onRemove = {
-                    project = project.removeTrack(index)
-                    // selectedTrackIndex is a list position, not a stable
-                    // track identity — removing a track shifts every later
-                    // index down by one, so a selection AFTER the removed
-                    // track needs to shift with it, not just get cleared
-                    // when it happens to equal the removed index.
-                    selectedTrackIndex = when {
-                        selectedTrackIndex == index -> null
-                        selectedTrackIndex != null && selectedTrackIndex!! > index -> selectedTrackIndex!! - 1
-                        else -> selectedTrackIndex
-                    }
-                    persist(project)
-                },
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-
-        Row {
-            Button(
-                enabled = !isRecording && !isPlaying,
-                onClick = {
-                    project = project.addTrack()
-                    persist(project)
-                },
-            ) {
-                Text("Add track")
+            if (project.tracks.isNotEmpty()) {
+                Text("Tracks", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(8.dp))
             }
-            Spacer(Modifier.width(12.dp))
-            Button(enabled = !isRecording, onClick = { persist(project, announce = true) }) {
-                Text("Save")
-            }
-        }
-        Spacer(Modifier.height(16.dp))
-        HorizontalDivider()
-        Spacer(Modifier.height(16.dp))
 
-        if (engineState.isArmed) {
-            Text("Counting in: ${engineState.countInBeatsRemaining}", style = MaterialTheme.typography.titleMedium)
+            // A plain Column, not LazyColumn: this list is always short (a
+            // handful of tracks, not a virtualization-scale dataset), and the
+            // whole screen is already inside a scrollable Column above — a
+            // fixed-height LazyColumn nested in there needs a per-row height
+            // guess that's easy to get wrong (an earlier version hard-coded
+            // 92dp, which clipped the second track's Mute/Solo row off-screen
+            // entirely once actually run on device). A plain Column just takes
+            // each row's real height, no guessing.
+            val soloedTrackExists = project.tracks.any { it.soloed }
+            project.tracks.forEachIndexed { index, track ->
+                TrackRow(
+                    index = index,
+                    track = track,
+                    selected = selectedTrackIndex == index,
+                    enabled = !isRecording && !isPlaying,
+                    silencedBySolo = soloedTrackExists && !track.soloed,
+                    onSelect = { selectedTrackIndex = if (selectedTrackIndex == index) null else index },
+                    onGainChange = { project = project.withTrackGain(index, it) },
+                    onMutedChange = { project = project.withTrackMuted(index, it) },
+                    onSoloedChange = { project = project.withTrackSoloed(index, it) },
+                    onRemove = {
+                        project = project.removeTrack(index)
+                        // selectedTrackIndex is a list position, not a stable
+                        // track identity — removing a track shifts every later
+                        // index down by one, so a selection AFTER the removed
+                        // track needs to shift with it, not just get cleared
+                        // when it happens to equal the removed index.
+                        selectedTrackIndex = when {
+                            selectedTrackIndex == index -> null
+                            selectedTrackIndex != null && selectedTrackIndex!! > index -> selectedTrackIndex!! - 1
+                            else -> selectedTrackIndex
+                        }
+                        persist(project)
+                    },
+                )
+            }
+            // Bottom breathing room so the last track row isn't flush against
+            // the fixed transport bar.
             Spacer(Modifier.height(8.dp))
-        } else if (isRecording) {
-            Text(
-                "Recording onto track ${(selectedTrackIndex ?: 0) + 1} — " +
-                    "${engineState.framesRecorded / kSampleRate}s so far",
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Spacer(Modifier.height(8.dp))
-        }
-
-        Row {
-            Button(
-                enabled = !isPlaying,
-                onClick = {
-                    if (isRecording) {
-                        stopRecordingAndCommit()
-                    } else if (!hasRecordPermission) {
-                        permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                    } else {
-                        beginRecording()
-                    }
-                },
-            ) {
-                Text(if (isRecording) "Stop recording" else "Record" + (selectedTrackIndex?.let { " (track ${it + 1})" } ?: " (new track)"))
-            }
-            Spacer(Modifier.width(12.dp))
-            Button(enabled = !isRecording, onClick = { togglePlayback() }) {
-                Text(if (isPlaying) "Stop" else "Play")
-            }
-        }
-        Spacer(Modifier.height(8.dp))
-        Button(enabled = !isRecording && !isPlaying && !isExporting, onClick = { exportMixdown() }) {
-            Text(if (isExporting) "Exporting..." else "Export mixdown to WAV")
-        }
-
-        if (isPlaying) {
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Playback: ${engineState.playbackFrame} / ${engineState.playbackTotalFrames}",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-
-        statusMessage?.let {
-            Spacer(Modifier.height(16.dp))
-            Text(it, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
 
+/**
+ * Tempo/time-signature/mic-route controls, folded behind a header that's
+ * always visible (with a one-line summary) so the full form doesn't have to
+ * stay on screen for a session that's already dialed in.
+ */
+@Composable
+private fun SessionSettingsCard(
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    bpmText: String,
+    onBpmChange: (String) -> Unit,
+    beatsPerBar: Int,
+    onBeatsPerBarChange: (Int) -> Unit,
+    enabled: Boolean,
+    route: AudioRoute?,
+    forceBuiltinMic: Boolean,
+    onForceBuiltinMicChange: (Boolean) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable(onClick = onToggleExpanded),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("Session", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                if (!expanded) {
+                    Text(
+                        "$bpmText BPM · ${beatsPerBar}/4",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Icon(
+                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                )
+            }
+
+            if (expanded) {
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = bpmText,
+                        onValueChange = onBpmChange,
+                        label = { Text("BPM") },
+                        enabled = enabled,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.width(120.dp),
+                    )
+                    Spacer(Modifier.width(16.dp))
+                    Column {
+                        Text("Beats per bar", style = MaterialTheme.typography.bodySmall)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                enabled = enabled && beatsPerBar > 1,
+                                onClick = { onBeatsPerBarChange(beatsPerBar - 1) },
+                            ) { Text("−", style = MaterialTheme.typography.titleMedium) }
+                            Text(
+                                "$beatsPerBar",
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.padding(horizontal = 4.dp),
+                            )
+                            IconButton(
+                                enabled = enabled && beatsPerBar < 12,
+                                onClick = { onBeatsPerBarChange(beatsPerBar + 1) },
+                            ) { Text("+", style = MaterialTheme.typography.titleMedium) }
+                        }
+                    }
+                }
+
+                // Only relevant when the currently-connected input route isn't
+                // already the phone's own mic (a wired/USB headset, or a
+                // Bluetooth device) — a plain pair of headphones with no mic
+                // never shows this, since there's nothing for Android to route
+                // input to besides the built-in mic in that case anyway.
+                // Bluetooth gets an informational line only, not a toggle:
+                // there's no real device-mic alternative to offer (see
+                // useDeviceMic()'s doc comment in ScratchpadScreen), so the
+                // phone mic is always used and always will be.
+                if (route?.isBuiltinMic == false) {
+                    Spacer(Modifier.height(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (route.isBluetooth) Icons.Filled.Bluetooth else Icons.Filled.Headset,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        if (route.isBluetooth) {
+                            Text(
+                                "Recording with the phone's mic — click still plays through ${route.label}",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        } else {
+                            Column {
+                                Text(
+                                    if (forceBuiltinMic) {
+                                        "Recording with the phone's mic — click still plays through ${route.label}"
+                                    } else {
+                                        "Recording with ${route.label}'s mic"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            Spacer(Modifier.weight(1f))
+                            FilterChip(
+                                selected = forceBuiltinMic,
+                                onClick = { onForceBuiltinMicChange(!forceBuiltinMic) },
+                                enabled = enabled,
+                                label = { Text("Force phone mic") },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Solo's unmistakable "this is what you'll hear" color — Ableton uses the same blue-for-solo convention. */
+private val SoloBlue = Color(0xFF1E88E5)
+
+/** Mute reads as "switched off" rather than an alert color, so it doesn't compete visually with Solo or Record/Delete's red. */
+private val MuteGray = Color(0xFF616161)
+
 @Composable
 private fun TrackRow(
     index: Int,
-    track: com.songnotes.core.audio.MultitrackTrackSpec,
+    track: MultitrackTrackSpec,
     selected: Boolean,
     enabled: Boolean,
+    /** True when some OTHER track is soloed, silencing this one even though [MultitrackTrackSpec.muted] is false. */
+    silencedBySolo: Boolean,
     onSelect: () -> Unit,
     onGainChange: (Float) -> Unit,
     onMutedChange: (Boolean) -> Unit,
@@ -538,40 +698,240 @@ private fun TrackRow(
     onRemove: () -> Unit,
 ) {
     val durationSeconds = (track.clips.maxOfOrNull { it.startFrame + it.lengthFrames } ?: 0L) / kSampleRate.toDouble()
-    Column(
+    val accent = trackColor(index)
+    // Ableton's own technique for "you won't hear this right now": dim the
+    // whole strip rather than relying on the mute/solo chips alone to
+    // communicate audibility across every OTHER track on screen.
+    val isAudible = !track.muted && !silencedBySolo
+    Card(
+        onClick = onSelect,
+        enabled = enabled,
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(enabled = enabled, onClick = onSelect)
-            .padding(12.dp),
+            .alpha(if (isAudible) 1f else 0.5f),
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        ),
+        border = if (selected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "Track ${index + 1} (${track.clips.size} clip(s), %.1fs)".format(durationSeconds),
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.weight(1f),
-            )
-            Button(enabled = enabled, onClick = onRemove) { Text("Remove") }
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(accent),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Track ${index + 1}",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "${track.clips.size} clip(s) · %.1fs".format(durationSeconds),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(4.dp))
+                IconButton(enabled = enabled, onClick = onRemove) {
+                    Icon(Icons.Filled.Delete, contentDescription = "Remove track", tint = MaterialTheme.colorScheme.error)
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    if (track.gain > 0f) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+                Slider(
+                    value = track.gain,
+                    onValueChange = onGainChange,
+                    valueRange = 0f..2f,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                )
+                Text(
+                    "%.1f".format(track.gain),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.width(28.dp),
+                )
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(top = 4.dp),
+            ) {
+                FilterChip(
+                    selected = track.muted,
+                    onClick = { onMutedChange(!track.muted) },
+                    enabled = enabled,
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = MuteGray,
+                        selectedLabelColor = Color.White,
+                        selectedLeadingIconColor = Color.White,
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = enabled,
+                        selected = track.muted,
+                        selectedBorderColor = Color.Transparent,
+                    ),
+                    leadingIcon = {
+                        Icon(
+                            if (track.muted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    },
+                    label = { Text(if (track.muted) "Muted" else "Mute") },
+                )
+                FilterChip(
+                    selected = track.soloed,
+                    onClick = { onSoloedChange(!track.soloed) },
+                    enabled = enabled,
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = SoloBlue,
+                        selectedLabelColor = Color.White,
+                        selectedLeadingIconColor = Color.White,
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = enabled,
+                        selected = track.soloed,
+                        selectedBorderColor = Color.Transparent,
+                    ),
+                    leadingIcon = {
+                        Icon(
+                            if (track.soloed) Icons.Filled.Headset else Icons.Filled.HeadsetOff,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    },
+                    label = { Text(if (track.soloed) "Soloed" else "Solo") },
+                )
+            }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Gain", style = MaterialTheme.typography.bodySmall)
-            Slider(
-                value = track.gain,
-                onValueChange = onGainChange,
-                valueRange = 0f..2f,
-                enabled = enabled,
-                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-            )
-            Text("%.1f".format(track.gain), style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+/**
+ * Fixed bottom transport strip — record/play/add-track/export stay reachable
+ * without scrolling regardless of how many tracks are in the project, since
+ * these are the controls used on every single take.
+ */
+@Composable
+private fun ScratchpadTransportBar(
+    isRecording: Boolean,
+    isPlaying: Boolean,
+    isExporting: Boolean,
+    isArmed: Boolean,
+    countInBeatsRemaining: Int,
+    recordedSeconds: Int,
+    selectedTrackIndex: Int?,
+    playbackFrame: Int,
+    playbackTotalFrames: Int,
+    onAddTrack: () -> Unit,
+    onRecordPressed: () -> Unit,
+    onPlayToggle: () -> Unit,
+    onExport: () -> Unit,
+) {
+    Surface(tonalElevation = 3.dp, shadowElevation = 8.dp) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+        ) {
+            val statusText = when {
+                isArmed -> "Counting in: $countInBeatsRemaining"
+                isRecording -> "Recording onto track ${(selectedTrackIndex ?: 0) + 1} — ${recordedSeconds}s so far"
+                isPlaying -> "Playback: $playbackFrame / $playbackTotalFrames"
+                else -> null
+            }
+            if (statusText != null) {
+                Text(
+                    statusText,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (isRecording || isArmed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                TransportAction(
+                    icon = Icons.Filled.Add,
+                    label = "Add track",
+                    enabled = !isRecording && !isPlaying,
+                    onClick = onAddTrack,
+                )
+                TransportAction(
+                    icon = if (isPlaying) Icons.Filled.Stop else Icons.Filled.PlayArrow,
+                    label = if (isPlaying) "Stop" else "Play",
+                    enabled = !isRecording,
+                    size = 56.dp,
+                    iconSize = 28.dp,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    onClick = onPlayToggle,
+                )
+                TransportAction(
+                    icon = if (isRecording) Icons.Filled.Stop else Icons.Filled.FiberManualRecord,
+                    label = if (isRecording) "Stop" else "Record",
+                    enabled = !isPlaying,
+                    size = 64.dp,
+                    iconSize = 30.dp,
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                    onClick = onRecordPressed,
+                )
+                TransportAction(
+                    icon = Icons.Filled.SaveAlt,
+                    label = if (isExporting) "Exporting…" else "Export",
+                    enabled = !isRecording && !isPlaying && !isExporting,
+                    loading = isExporting,
+                    onClick = onExport,
+                )
+            }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = track.muted, onCheckedChange = onMutedChange, enabled = enabled)
-            Text("Mute", style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.width(16.dp))
-            Checkbox(checked = track.soloed, onCheckedChange = onSoloedChange, enabled = enabled)
-            Text("Solo", style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun TransportAction(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    size: Dp = 48.dp,
+    iconSize: Dp = 22.dp,
+    containerColor: Color = MaterialTheme.colorScheme.secondaryContainer,
+    contentColor: Color = MaterialTheme.colorScheme.onSecondaryContainer,
+    loading: Boolean = false,
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        FilledIconButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = Modifier.size(size),
+            colors = IconButtonDefaults.filledIconButtonColors(
+                containerColor = containerColor,
+                contentColor = contentColor,
+            ),
+        ) {
+            if (loading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(iconSize),
+                    strokeWidth = 2.dp,
+                    color = contentColor,
+                )
+            } else {
+                Icon(icon, contentDescription = label, modifier = Modifier.size(iconSize))
+            }
         }
+        Spacer(Modifier.height(4.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall)
     }
 }

@@ -60,9 +60,26 @@ data class MultitrackProject(
         copy(tracks = tracks.filterIndexed { i, _ -> i != index })
 
     fun withTrackGain(index: Int, gain: Float): MultitrackProject = updateTrack(index) { it.copy(gain = gain) }
-    fun withTrackMuted(index: Int, muted: Boolean): MultitrackProject = updateTrack(index) { it.copy(muted = muted) }
+
+    /** Muting a soloed track un-solos it — a track can never be both at once. */
+    fun withTrackMuted(index: Int, muted: Boolean): MultitrackProject =
+        updateTrack(index) { it.copy(muted = muted, soloed = it.soloed && !muted) }
+
+    /**
+     * Soloing a track un-solos every other track (only one can be soloed at
+     * a time) and un-mutes this one — a track can never be both muted and
+     * soloed.
+     */
     fun withTrackSoloed(index: Int, soloed: Boolean): MultitrackProject =
-        updateTrack(index) { it.copy(soloed = soloed) }
+        copy(
+            tracks = tracks.mapIndexed { i, t ->
+                when {
+                    i == index -> t.copy(soloed = soloed, muted = t.muted && !soloed)
+                    soloed -> t.copy(soloed = false)
+                    else -> t
+                }
+            },
+        )
 
     private fun updateTrack(index: Int, transform: (MultitrackTrackSpec) -> MultitrackTrackSpec): MultitrackProject =
         copy(tracks = tracks.mapIndexed { i, t -> if (i == index) transform(t) else t })

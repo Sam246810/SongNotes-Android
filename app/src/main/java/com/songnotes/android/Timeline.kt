@@ -39,7 +39,6 @@ import kotlin.math.roundToLong
 
 private const val kSampleRate = 48000
 
-private val ClipColor = Color(0xFF6EE7B7)
 private val PlayheadColor = Color(0xFFF87171)
 private val ScrubColor = Color(0xFF60A5FA)
 private val TrimHandleColor = Color(0xFFB45309)
@@ -48,6 +47,24 @@ private val TrackRowSpacing = 4.dp
 private val TrimHandleWidth = 12.dp
 private val MinClipWidth = 8.dp
 private val RulerHeight = 20.dp
+
+/**
+ * Fixed, non-theme palette (distinct from [PlayheadColor]'s red and
+ * [ScrubColor]'s light blue, which stay reserved for those two markers) so a
+ * track's identity — waveform here, the matching swatch on its [TrackRow] in
+ * [ScratchpadScreen] — reads the same regardless of light/dark theme.
+ */
+private val TrackPalette = listOf(
+    Color(0xFF6750A4), // purple
+    Color(0xFF00796B), // teal
+    Color(0xFFEF6C00), // orange
+    Color(0xFF1565C0), // blue
+    Color(0xFF2E7D32), // green
+    Color(0xFFAD1457), // pink
+)
+
+/** Stable per-track color, cycling through [TrackPalette] for track counts beyond its size. */
+fun trackColor(trackIndex: Int): Color = TrackPalette[trackIndex % TrackPalette.size]
 
 /** No-op default for [Timeline]'s edit callback — read-only callers don't need to pass one. */
 private val NoOpClipChange: (Int, Int, (MultitrackClipSpec) -> MultitrackClipSpec) -> Unit = { _, _, _ -> }
@@ -208,7 +225,7 @@ private fun ScrubRuler(
         modifier = Modifier
             .fillMaxWidth()
             .height(RulerHeight)
-            .clip(RoundedCornerShape(4.dp))
+            .clip(RoundedCornerShape(6.dp))
             .background(MaterialTheme.colorScheme.surface)
             .then(
                 if (enabled) {
@@ -249,7 +266,7 @@ private fun TimelineTrackRow(
         modifier = Modifier
             .fillMaxWidth()
             .height(TrackRowHeight)
-            .clip(RoundedCornerShape(4.dp))
+            .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant),
     ) {
         track.clips.forEachIndexed { clipIndex, clip ->
@@ -304,7 +321,7 @@ private fun TimelineClip(
             pyramid = pyramid,
             bufferOffsetFrames = clip.bufferOffsetFrames,
             lengthFrames = clip.lengthFrames,
-            color = ClipColor,
+            color = trackColor(trackIndex),
             modifier = Modifier
                 .fillMaxSize()
                 .then(

@@ -59,14 +59,49 @@ class MultitrackProjectTest {
     }
 
     @Test
-    fun `withTrackMuted and withTrackSoloed toggle independently`() {
+    fun `withTrackMuted and withTrackSoloed toggle independently when not conflicting`() {
         val project = MultitrackProject().addTrack(MultitrackTrackSpec(clips = emptyList()))
         val muted = project.withTrackMuted(0, true)
         assertTrue(muted.tracks[0].muted)
         assertFalse(muted.tracks[0].soloed)
+        val unmuted = muted.withTrackMuted(0, false)
+        assertFalse(unmuted.tracks[0].muted)
+        assertFalse(unmuted.tracks[0].soloed)
+    }
+
+    @Test
+    fun `soloing a muted track un-mutes it -- a track can never be both`() {
+        val project = MultitrackProject().addTrack(MultitrackTrackSpec(clips = emptyList()))
+        val muted = project.withTrackMuted(0, true)
         val soloed = muted.withTrackSoloed(0, true)
-        assertTrue(soloed.tracks[0].muted) // unaffected by the solo toggle
         assertTrue(soloed.tracks[0].soloed)
+        assertFalse(soloed.tracks[0].muted) // soloing wins over a prior mute
+    }
+
+    @Test
+    fun `muting a soloed track un-solos it -- a track can never be both`() {
+        val project = MultitrackProject().addTrack(MultitrackTrackSpec(clips = emptyList()))
+        val soloed = project.withTrackSoloed(0, true)
+        val muted = soloed.withTrackMuted(0, true)
+        assertTrue(muted.tracks[0].muted)
+        assertFalse(muted.tracks[0].soloed) // muting wins over a prior solo
+    }
+
+    @Test
+    fun `only one track can be soloed at a time`() {
+        val project = MultitrackProject()
+            .addTrack(MultitrackTrackSpec(clips = emptyList()))
+            .addTrack(MultitrackTrackSpec(clips = emptyList()))
+            .addTrack(MultitrackTrackSpec(clips = emptyList()))
+        val firstSoloed = project.withTrackSoloed(0, true)
+        assertTrue(firstSoloed.tracks[0].soloed)
+
+        val secondSoloed = firstSoloed.withTrackSoloed(2, true)
+        assertFalse(secondSoloed.tracks[0].soloed) // soloing another track un-solos the first
+        assertTrue(secondSoloed.tracks[2].soloed)
+
+        val unsoloed = secondSoloed.withTrackSoloed(2, false)
+        assertFalse(unsoloed.tracks.any { it.soloed }) // un-soloing the only soloed track leaves none soloed
     }
 
     @Test

@@ -10,11 +10,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -47,7 +51,12 @@ import kotlinx.coroutines.launch
  * notification re-emits the list automatically.
  */
 @Composable
-fun SongListScreen(onOpenSong: (songId: String) -> Unit, onDone: () -> Unit) {
+fun SongListScreen(
+    onOpenSong: (songId: String) -> Unit,
+    onOpenScratchpad: () -> Unit,
+    onOpenPiano: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     val repo = remember { SongRepository(context) }
     val scope = rememberCoroutineScope()
@@ -67,14 +76,21 @@ fun SongListScreen(onOpenSong: (songId: String) -> Unit, onDone: () -> Unit) {
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+    Column(modifier = modifier.fillMaxSize().padding(24.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("Songs", style = MaterialTheme.typography.headlineSmall)
-            OutlinedButton(onClick = onDone) { Text("Done") }
+            Row {
+                IconButton(onClick = onOpenScratchpad) {
+                    Icon(Icons.Filled.GraphicEq, contentDescription = "Scratchpad")
+                }
+                IconButton(onClick = onOpenPiano) {
+                    Icon(Icons.Filled.Piano, contentDescription = "Piano")
+                }
+            }
         }
         Spacer(Modifier.height(16.dp))
         Button(onClick = ::createSong, modifier = Modifier.fillMaxWidth()) {

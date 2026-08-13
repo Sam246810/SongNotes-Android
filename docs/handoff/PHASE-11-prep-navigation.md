@@ -1,10 +1,9 @@
-# Phase 11 prep — real home screen, dev screens gated out (planned, not yet implemented)
+# Phase 11 prep — real home screen, dev screens gated out
 
-**Status (2026-08-09): scoped and approved, implementation not started.** This
-is a decision record for a gap found while discussing what Phase 11
-("Hardening + Play release") needs to cover — not a completed phase, and not
-formally part of Phase 11 itself (see "Why this isn't blocking on Phase 11"
-below).
+**Status (2026-08-10): implemented and verified on-device.** This is a
+decision record for a gap found while discussing what Phase 11 ("Hardening +
+Play release") needs to cover — not a completed phase, and not formally part
+of Phase 11 itself (see "Why this isn't blocking on Phase 11" below).
 
 ## The gap
 
@@ -92,21 +91,40 @@ release build — has no upside. Doing it now and noting it in `docs/PLAN.md`'s
 Phase 11 row keeps the phase table honest without inflating Phase 11's own
 scope.
 
-## What's NOT done yet
+## Implementation report
 
-Everything above is a decision record, not an implementation report. Still
-to do, once implementation starts:
+All of the following shipped and were verified on a physical device
+(Samsung Galaxy Z Fold, `RFCX70MEMRX`) via `adb`, driving both a debug and a
+release-configured build end to end:
 
-- `app/build.gradle.kts`: add `buildFeatures { buildConfig = true }` (not
-  currently set for `:app` — `BuildConfig.DEBUG` isn't accessible yet).
-- `MainActivity.kt`: default-screen change, `AccountRow` extraction, the
-  `BuildConfig.DEBUG`-gated Diagnostics button, rewiring Scratchpad/Piano/
-  Auth's `onDone` to `Screen.Songs`.
-- `SongListScreen.kt`: signature change (drop `onDone`, add
-  `onOpenScratchpad`/`onOpenPiano`), top-bar button swap.
-- On-device verification of both a debug build (Diagnostics button present
-  and fully functional) and a release-configured build (Diagnostics button
-  absent, Scratchpad/Piano/sign-in still work) — no release `signingConfig`
-  exists yet either, so verifying the release variant needs a temporary
-  `signingConfig = signingConfigs.getByName("debug")` in the `release {}`
-  block, clearly marked as a placeholder for Phase 11's real signing setup.
+- `app/build.gradle.kts`: added `buildFeatures { buildConfig = true }`, plus
+  a **temporary** `release { signingConfig = signingConfigs.getByName("debug") }`
+  placeholder so a release-configured build can actually be installed and
+  exercised on-device (an unsigned release APK can't be `adb install`ed).
+  Phase 11 replaces this with a real release `signingConfig`.
+- `MainActivity.kt`: `Screen.Songs` is now the initial screen in every
+  build. `AccountRow` (sign-in/out + "Sync now") was extracted out of the
+  old `Diagnostics` branch into its own composable, called from the new
+  `Screen.Songs` branch. The `BuildConfig.DEBUG`-gated "Diagnostics" button
+  lives in that same branch. Scratchpad/Piano/Auth's `onDone` now all route
+  back to `Screen.Songs` instead of `Screen.Diagnostics`. The old
+  `Diagnostics` branch gained its own "Done" button (it's no longer home, so
+  it needs an explicit way back) — the only thing that changes it wasn't
+  already covered by the plan above.
+- `SongListScreen.kt`: `onDone` dropped, `onOpenScratchpad`/`onOpenPiano`
+  added, and the top-bar "Done" button swapped for two icon buttons
+  (`Icons.Filled.GraphicEq` for Scratchpad, `Icons.Filled.Piano` for Piano).
+  Also gained a `modifier: Modifier = Modifier` parameter so `MainActivity`
+  can give it `Modifier.weight(1f)` inside the `Songs` branch's wrapping
+  `Column` (needed once `AccountRow` sits above it in the same column —
+  without `weight`, `SongListScreen`'s own internal `fillMaxSize()` would
+  overflow past the column's remaining space).
+- On-device verification, both variants: debug build launches to Songs,
+  "Diagnostics" button present and fully functional (opens Diagnostics,
+  "Done" returns to Songs); Scratchpad and Piano reachable from the new
+  top-bar icons and their own "Done"/close buttons correctly return to
+  Songs. Release-configured build: confirmed via both screenshot and a
+  `uiautomator dump` accessibility-tree check that no "Diagnostics" node
+  exists anywhere in the tree; Scratchpad opens and shows the same
+  Room/SQLCipher-backed project data as the debug install, confirming
+  storage carried over correctly across the variant reinstall.
