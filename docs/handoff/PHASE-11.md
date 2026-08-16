@@ -5,6 +5,13 @@ done and verified on-device. Privacy policy and Data Safety form are
 drafted (not submitted). Real release signing, the internal testing track,
 and a multi-device matrix are still open — see "What's NOT done" below.**
 
+**Update (2026-08-15):** account deletion implemented (see "What's NOT
+done" below); 16 KB ELF alignment picked up and mostly resolved — only
+`libsqlcipher.so` is a genuine remaining gap (upstream, not fixable
+here), the other four libraries the on-device warning names were false
+positives, and a `checkElfAlignment` Gradle task now guards against
+regressions. Full detail in "What's NOT done".
+
 The navigation/dev-screen-gating gap found while scoping this phase was
 already fixed and documented separately in
 `docs/handoff/PHASE-11-prep-navigation.md` before this phase's own work
@@ -136,17 +143,29 @@ pre-submission blocker, separate from anything else in this phase.
 
 ## What's NOT done
 
-These need the developer's own Play Console account, business/legal
-decisions, or physical hardware this session didn't have access to:
+Most of these need the developer's own Play Console account,
+business/legal decisions, or physical hardware this session didn't have
+access to; the 16 KB alignment item at the end is pure code/build work
+and is being picked up in this same pass:
 
 - **Real release signing.** `release { signingConfig }` still points at
   the temporary debug-signing placeholder from
   `docs/handoff/PHASE-11-prep-navigation.md`, put there only so a
   release-configured build could be installed and verified on-device at
   all. A real signing key/config is still needed before any Play upload.
-- **Account deletion feature.** Surfaced above — needs actual
-  implementation (an in-app action, or a web form) before Data Safety can
-  be truthfully submitted.
+- **Account deletion feature.** ~~Surfaced above — needs actual
+  implementation~~ **Update (2026-08-15):** implemented as a web page
+  (`/delete-account` in the SongNotes web repo, commit `afa651c`) that
+  Android links out to (`WebLinks.kt`'s `WEB_DELETE_ACCOUNT_URL`, surfaced
+  as a "Delete account" link in `MainActivity.kt`'s `SyncHeader` when
+  signed in) — same link-out pattern as forgot-password. Still blocked on
+  two account-holder actions before this satisfies Play: (1) the web app
+  isn't deployed anywhere yet (`WEB_DELETE_ACCOUNT_URL` is still the
+  `example.com` placeholder — swap in the real Vercel URL once live, same
+  as the forgot-password link), and (2) Play Console's own Data safety →
+  Account deletion field needs that same final URL entered separately —
+  Play checks that field independently of what the app links to. See
+  `docs/DATA_SAFETY_FORM.md`.
 - **Hosting and submitting the privacy policy / Data Safety form.**
   Drafted; publishing the policy URL and filling out the live Play Console
   form are account-holder actions.
@@ -155,3 +174,42 @@ decisions, or physical hardware this session didn't have access to:
 - **Manual device matrix.** Every on-device verification this phase (and
   every phase before it) ran on one physical device, a Samsung Galaxy Z
   Fold. No second device was available to cross-check against.
+- **16 KB page-size / ELF alignment — narrowed down and now covered by a
+  build check; one genuine upstream gap remains.** `docs/PLAN.md`'s
+  "Module layout" section predicted this by name and assigned it to
+  Phase 11 ("add Google's `check_elf_alignment.sh` to CI on day one"),
+  but Phase 11 never actually did it — picked up in this pass:
+  - The device's own "Android App Compatibility" debug-build warning
+    (seen live on the same Z Fold, 2026-08-15) lists five libraries —
+    `libc++_shared.so`, `libsongnotes_audio.so`, `libsqlcipher.so`,
+    `liboboe.so`, `libandroidx.graphics.path.so` — the same set
+    `docs/handoff/PHASE-06.md` found. That warning turned out to be
+    noisier than it looks: pulling the actual installed `base.apk` off
+    the device (`adb pull`) and checking every `arm64-v8a`/`x86_64`
+    `.so`'s `LOAD` segments with the NDK's `llvm-readelf -l` shows only
+    **`libsqlcipher.so`** (`p_align=0x1000`, i.e. 4 KB) is actually
+    misaligned. The other four are already 16 KB-aligned in both their
+    ELF `LOAD` segments and their zip offsets — the on-device checker's
+    "Unknown error" for those four is a false positive, not a real gap.
+  - Re-checked Maven Central: `net.zetetic:android-database-sqlcipher`
+    is still at 4.5.4 (same version `PHASE-06.md` checked, still the
+    latest release) — no upstream fix has shipped. This remains a
+    genuine third-party gap, not something fixable from this repo
+    without either an upstream SQLCipher release or re-linking their
+    prebuilt `.so` (not attempted — too risky to do without a way to
+    verify the re-linked crypto library is still correct).
+  - Added `app/build.gradle.kts`'s `checkElfAlignment` Gradle task:
+    builds the debug APK, extracts every 64-bit-ABI `.so` (16 KB
+    alignment is only meaningful for 64-bit ABIs — `armeabi-v7a` is
+    exempt and legitimately 4 KB-aligned), and fails the build if
+    anything **not** on a small known-gaps allowlist (currently just
+    `libsqlcipher.so`) drops below 16 KB alignment. Run it directly with
+    `./gradlew checkElfAlignment`. This is the CI-equivalent check
+    `docs/PLAN.md` asked for — nothing here builds CI itself. Also warns
+    if `libsqlcipher.so` ever becomes aligned upstream, as a nudge to
+    remove it from the allowlist.
+  - Still not a blocker today (app installs and runs fine on this
+    device); becomes a hard blocker only on an Android 15+ device with
+    strict 16 KB enforcement, which is why `checkElfAlignment` exists —
+    to catch a regression (or SQLCipher's eventual fix) automatically
+    rather than relying on someone reading a debug-only warning dialog.

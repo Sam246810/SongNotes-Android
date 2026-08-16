@@ -1,6 +1,8 @@
 package com.songnotes.android
 
 import android.app.Activity
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -15,6 +17,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -296,6 +299,7 @@ private fun SyncHeader(
     onSignInClick: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var showSignOutDialog by remember { mutableStateOf(false) }
 
     if (showSignOutDialog) {
@@ -339,6 +343,15 @@ private fun SyncHeader(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                // Google Play's Account Deletion policy requires a reachable
+                // deletion path beyond sign-out; this links out to the web
+                // app's own delete flow rather than reimplementing it here
+                // (see WebLinks.kt's WEB_DELETE_ACCOUNT_URL doc comment).
+                TextButton(onClick = {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(WEB_DELETE_ACCOUNT_URL)))
+                }) {
+                    Text("Delete account", style = MaterialTheme.typography.labelSmall)
+                }
             } else {
                 Text(
                     "Not signed in",

@@ -13,21 +13,30 @@ compliance document you're accountable for.
 **Google Play requires apps that support account creation to also offer
 account deletion, reachable both in-app and via a web page, without
 requiring you to contact support first** (Play's Account Deletion policy,
-in effect since 2023). SongNotes currently has no account-deletion feature
-at all — sign-out only. Play Console's Data Safety form has a required
-"Account deletion" section that links to this; without an in-app/web
-deletion path, this section can't be answered truthfully in a way that
-passes review. **This needs an actual feature (an in-app "Delete account"
-action, or a web form) before this app can ship to production** — this
-draft's other sections are ready to submit as-is, but flag that separately
-from Data Safety as a real launch blocker.
+in effect since 2023). Play Console's Data Safety form has a required
+"Account deletion" section that links to this.
 
-**Phase 13 update (2026-08-15):** this gap is unchanged and still blocks
-submission — account creation still exists as a feature. What changed is the
-gap's practical weight: sync (and therefore account creation) is now opt-in
-and strictly manual rather than the app's default posture, so most users are
-expected to never create an account at all. See
-`docs/handoff/PHASE-13-local-first.md`.
+**Phase 13 update (2026-08-15):** this gap's practical weight changed — sync
+(and therefore account creation) is now opt-in and strictly manual rather
+than the app's default posture, so most users are expected to never create
+an account at all. See `docs/handoff/PHASE-13-local-first.md`.
+
+**Update (2026-08-15): the deletion path itself is now implemented, but not
+yet deployed.** The SongNotes web repo added a `/delete-account` page
+(sign-in, typed confirmation, then a `delete_own_account` Postgres RPC that
+cascades through all of the user's data — commit `afa651c`), and Android
+links out to it from `MainActivity.kt`'s account row (`WebLinks.kt`'s
+`WEB_DELETE_ACCOUNT_URL`), the same pattern already used for forgot-password.
+**Two things still block a real submission:**
+
+1. **The web app isn't deployed anywhere yet.** No hosting is wired up in
+   that repo (no Vercel project, no domain) — `WEB_DELETE_ACCOUNT_URL` is
+   still pointed at the `example.com` placeholder. Deploy to Vercel (decided
+   2026-08-15) and update that constant to the real URL before release.
+2. **Play Console's Data Safety → Account deletion field must be filled in
+   separately, with that same final URL**, once it exists — Play checks that
+   field independently of what the app links to; pointing the app at a page
+   doesn't populate this form field automatically.
 
 ## Does your app collect or share any of the required user data types?
 
@@ -102,10 +111,11 @@ expected to never create an account at all. See
 ## Security practices section
 
 - **Is all user data encrypted in transit?** Yes (HTTPS/TLS to Supabase).
-- **Do you provide a way for users to request data deletion?** Currently
-  **No** — this is the gap flagged above. Must be fixed (add an in-app/web
-  deletion path) before this can honestly be answered Yes, which Play
-  requires for apps with account creation.
+- **Do you provide a way for users to request data deletion?** **Yes**, once
+  the web app is deployed and `WEB_DELETE_ACCOUNT_URL` points at the real
+  URL (see the gap note above) — until then the in-app link opens a
+  placeholder `example.com` page, so answer this truthfully based on
+  whichever state is actually live at submission time.
 - **Data safety practices reviewed by an independent third party?** No
   (typical for a small/indie app — leave unchecked unless that changes).
 
