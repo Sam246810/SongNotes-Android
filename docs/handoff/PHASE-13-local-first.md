@@ -277,7 +277,7 @@ scoping for `getById` — its absence was itself part of the problem: the
 original unit test let `getById` see every row unconditionally, which made
 the *backwards* fallback logic pass.
 
-## A real schema-drift bug found by live testing
+## What's NOT done / deliberately out of scope
 
 - **Account deletion** — the standing Play Store blocker from Phase 11 is
   unchanged by this work (it still needs a real in-app/web deletion path
