@@ -34,8 +34,29 @@ class FakeSongsAdapter : SongsRemoteAdapter {
     var insertCalls = 0
     var updateCalls = 0
 
+    /**
+     * Simulates Postgres RLS scoping for [getById] -- null (the default)
+     * means "don't simulate," i.e. find any row regardless of owner, for
+     * tests that don't care about cross-account visibility. Set this to a
+     * userId to make [getById] only find rows owned by that user, the way
+     * real RLS would scope it server-side even though
+     * `SupabaseSongsAdapter.getById`'s own query has no explicit `user_id`
+     * filter (it relies entirely on the database enforcing that).
+     *
+     * This field exists because its absence was a real, live bug: an earlier
+     * version of this fake let `getById` see EVERY row unconditionally, which
+     * made a test built around the exact scenario ("adoption's precheck
+     * missed a cross-account collision because RLS hides it") pass with the
+     * fallback logic backwards -- the fake found the "hidden" row when the
+     * real backend provably wouldn't (confirmed via live testing against the
+     * real Supabase project: `getById` cleanly returned null twice in a row
+     * for an id whose own INSERT immediately 23505'd). See
+     * `docs/handoff/PHASE-13-local-first.md`.
+     */
+    var simulatedCurrentUserId: String? = null
+
     override suspend fun list(userId: String) = rows.values.filter { it.user_id == userId }
-    override suspend fun getById(id: String) = rows[id]
+    override suspend fun getById(id: String) = rows[id]?.takeIf { simulatedCurrentUserId == null || it.user_id == simulatedCurrentUserId }
     override suspend fun insert(row: SongRow): SongRow {
         insertCalls++
         if (rows.containsKey(row.id)) error("duplicate key value violates unique constraint (23505): ${row.id}")

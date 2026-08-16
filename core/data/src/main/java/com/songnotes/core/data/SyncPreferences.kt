@@ -136,10 +136,30 @@ class SyncPreferences(private val store: KeyValueStore) {
      * back into the SAME account later resumes without a fresh adoption pass.
      * [legacyJsonImportDone] is deliberately untouched: it tracks a one-time
      * local migration with no relationship to any account.
+     *
+     * [syncAccountUserId] is ALSO deliberately left untouched -- a real, live
+     * bug found during Phase 13's own testing, not a hypothetical: it's the
+     * one field `SyncController.enableSyncFor` reads to detect an account
+     * switch (`previousAccount != null && previousAccount != userId`) and
+     * detach every local `remoteRev` before the next sync. Every local row's
+     * `remoteRev` keeps pointing at whichever account it was last actually
+     * pushed to regardless of any sign-out in between (`songs` is never
+     * touched by sign-out, see above) -- so the one fact this class needs to
+     * track is exactly "which account do these `remoteRev`s belong to," and
+     * that doesn't become false just because the user signed out. Clearing it
+     * here made every sign-in look like a first-ever sign-in to
+     * `enableSyncFor`, silently skipping the detach: a song already pushed to
+     * account A would sit there marked "synced" (`pendingSync = false`) after
+     * signing into account B forever, having never actually reached B's
+     * `songs` table at all -- caught live when a real push to a fresh test
+     * account silently didn't happen for a song that looked perfectly synced
+     * in the UI. [adoptionCompletedForUserId] still clears normally; at worst
+     * that costs one redundant (idempotent, zero-network-write-if-nothing-
+     * changed) adoption pass on the next sign-in to the SAME account, a fine
+     * trade for correctness on the switch case.
      */
     fun disableSync() {
         syncEnabled = false
-        syncAccountUserId = null
         adoptionCompletedForUserId = null
         lastSyncAtMs = 0L
         lastSyncError = null

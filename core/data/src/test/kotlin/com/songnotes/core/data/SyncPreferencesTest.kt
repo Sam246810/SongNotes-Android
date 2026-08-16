@@ -71,7 +71,7 @@ class SyncPreferencesTest {
     }
 
     @Test
-    fun `disableSync clears account and sync state but leaves legacyJsonImportDone alone`() {
+    fun `disableSync clears sync state but preserves syncAccountUserId and legacyJsonImportDone`() {
         prefs.syncEnabled = true
         prefs.syncAccountUserId = "user-1"
         prefs.adoptionCompletedForUserId = "user-1"
@@ -82,7 +82,11 @@ class SyncPreferencesTest {
         prefs.disableSync()
 
         assertFalse(prefs.syncEnabled)
-        assertNull(prefs.syncAccountUserId)
+        // syncAccountUserId is deliberately NOT cleared -- see disableSync's
+        // own doc comment for the live bug this fixes: it's the one field
+        // SyncController.enableSyncFor needs to detect an account switch
+        // across a sign-out. Pinned explicitly by the next test below.
+        assertEquals("user-1", prefs.syncAccountUserId)
         assertNull(prefs.adoptionCompletedForUserId)
         assertEquals(0L, prefs.lastSyncAtMs)
         assertNull(prefs.lastSyncError)
@@ -112,5 +116,40 @@ class SyncPreferencesTest {
         assertTrue(dao.rows["song-1"]!!.pendingSync)
         assertNull(prefs.adoptionCompletedForUserId)
         assertEquals("new-user", prefs.syncAccountUserId)
+    }
+
+    @Test
+    fun `an account switch is still detected even after a sign-out in between (regression)`() = kotlinx.coroutines.runBlocking {
+        // The actual bug, found live on-device: sign in to account A (push a
+        // song), sign OUT, then sign in to a DIFFERENT account B. Before the
+        // fix, disableSync() cleared syncAccountUserId, so by the time
+        // enableSyncFor(B) ran, previousAccount was null -- every sign-in
+        // looked like a first-ever one, the detach never ran, and a song
+        // already pushed to A sat there marked "synced" under B forever,
+        // having never actually reached B's songs table at all.
+        val dao = FakeSongDao()
+        dao.upsert(SongEntity(id = "song-1", title = "Pushed to A", bpm = 0, key = "", tuning = "", capo = 0, linesJson = "[]", createdAt = 0, updatedAt = 0, rev = 1, remoteRev = 7, pendingSync = false))
+
+        // Sign in to A.
+        prefs.syncEnabled = true
+        prefs.syncAccountUserId = "account-A"
+        prefs.adoptionCompletedForUserId = "account-A"
+
+        // Sign out.
+        prefs.disableSync()
+
+        // Sign in to a DIFFERENT account, B -- mirrors SyncController.enableSyncFor.
+        val previousAccount = prefs.syncAccountUserId
+        assertEquals("account-A", previousAccount) // the fix: still known, not wiped by sign-out
+        if (previousAccount != null && previousAccount != "account-B") {
+            dao.detachFromRemote()
+            prefs.adoptionCompletedForUserId = null
+        }
+        prefs.syncAccountUserId = "account-B"
+
+        // The song from A must be detached -- otherwise it stays invisible to
+        // B's sync while the UI claims it's synced.
+        assertNull(dao.rows["song-1"]!!.remoteRev)
+        assertTrue(dao.rows["song-1"]!!.pendingSync)
     }
 }

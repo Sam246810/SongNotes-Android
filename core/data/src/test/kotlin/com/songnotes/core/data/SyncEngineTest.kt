@@ -160,13 +160,19 @@ class SyncEngineTest {
 
     @Test
     fun `an insert collision the adoption precheck missed is re-ided and retried instead of failing the whole push`() = runBlocking {
-        // Simulates the real SupabaseSongsAdapter.getById() hole: it has no
-        // user_id filter, so it CAN see another account's row (used by
-        // pushPending's own fallback), but list(userId) -- which pull() below
-        // uses -- correctly stays scoped to this account, same as real RLS. If
-        // this row belonged to `userId` instead, pull() would legitimately
-        // re-materialize it locally and this test would be testing the wrong
-        // thing.
+        // Simulates the real SupabaseSongsAdapter.getById() hole: its query
+        // has no explicit user_id filter, so whether it can see another
+        // account's row depends entirely on server-side RLS -- which hides
+        // it. simulatedCurrentUserId pins that down explicitly (its absence
+        // was itself a real bug: an unscoped fake let an earlier version of
+        // this test pass with the production fallback logic backwards --
+        // see FakeSongsAdapter's own doc comment and
+        // docs/handoff/PHASE-13-local-first.md). list(userId) -- which
+        // pull() below uses -- correctly stays scoped to this account
+        // regardless, same as real RLS on that query. If this row belonged
+        // to `userId` instead, pull() would legitimately re-materialize it
+        // locally and this test would be testing the wrong thing.
+        adapter.simulatedCurrentUserId = userId
         adapter.rows["song-1"] = buildRemoteRow("song-1", rev = 1, title = "Someone Else's Song").copy(user_id = "other-user")
         dao.upsert(localSong(id = "song-1", rev = 1, remoteRev = null, title = "My New Song"))
         dao.upsert(localSong(id = "song-2", rev = 1, remoteRev = null, title = "A Different Song"))

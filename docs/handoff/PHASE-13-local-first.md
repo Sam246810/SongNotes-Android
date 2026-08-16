@@ -190,12 +190,14 @@ test` is green across every module (`:core:domain`, `:core:audio`,
 **On-device** (Galaxy Z Fold, debug build): fresh app, no account — home screen
 shows no sync banner and no account gate; created a song, confirmed the
 force-stop/relaunch/autosave story above; returned to the list and confirmed
-the delete dialog's never-synced copy. Full account/sync round-trip (sign-up,
-adoption push, cross-device pull, DEK-rotation recovery) is covered by the JVM
-suite above but wasn't re-verified live against the real Supabase project this
-pass — nothing in the sync engine's actual push/pull/conflict *logic* changed
-shape from Phase 7–12's already-verified behavior, only its gating and error
-handling.
+the delete dialog's never-synced copy. Full live round-trip against the real
+Supabase project: sign-in (no auto-pull, confirmed), manual push and pull,
+the unsynced-exit dialog with real relative-time labels, the sanitized error
+banner, and — critically — **switching between two real accounts** (a
+disposable test account and the primary test account), which is what
+surfaced the two bugs below. Not exercised live: a brand-new sign-up (the
+`SyncOptInExplainer` screen) and DEK-rotation recovery — both are covered by
+the JVM suite only for this pass.
 
 ## Debugging a sync failure
 
@@ -232,7 +234,50 @@ recorded because it's exactly the class of thing a fake-adapter unit-test
 suite structurally cannot catch, and it's worth remembering the next time a
 push mysteriously fails against a real project that a JVM test run says is fine.
 
-## What's NOT done / deliberately out of scope
+## Two real account-switch bugs found by live testing (both fixed)
+
+Switching a device between two real accounts (sign out of A, sign in to B,
+sign back in to A) surfaced two genuine bugs in the account-switch path that
+the JVM suite's fakes had not caught — both are fixed as of this writing.
+
+**1. `SyncPreferences.disableSync()` cleared `syncAccountUserId`, silently
+breaking switch detection.** `SyncController.enableSyncFor` decides whether
+to detach every local `remoteRev` (see "Adoption" above) by comparing
+`prefs.syncAccountUserId` (the account these `remoteRev`s currently belong
+to) against the account being signed into. Sign-out used to null that field
+out — meaning by the time the user signed into a *different* account,
+`enableSyncFor` saw no previous account on record and skipped the detach
+entirely. A song already pushed to account A stayed marked `pendingSync =
+false` under account B forever, having never actually reached B's `songs`
+table — the UI confidently showed "All synced" for a song that was nowhere
+on the currently-signed-in account. Caught live: a song pushed to a real test
+account, then synced again after switching to a disposable Supabase test
+account, silently never went anywhere. Fixed by leaving `syncAccountUserId`
+alone in `disableSync()` — it's local-data state (which account these rows
+belong to), not sync-enabled state, and doesn't become false just because the
+user signed out. See `SyncPreferences.disableSync`'s own doc comment.
+
+**2. The insert-collision fallback's `getById` gate was backwards, and
+unreachable for the exact case it existed for.** `SyncEngine.pushPending`'s
+plan for "adoption's precheck missed a cross-account id collision" was: catch
+the insert failure, ask `getById`, and re-id-and-retry only `if (getById() !=
+null)`. But a cross-account collision is hidden from `getById()` by RLS *by
+definition* — the whole reason the fallback exists. That condition could only
+be true in a same-account race, never in the RLS-hidden case it was written
+to handle, so the retry path was provably unreachable for its own purpose. Confirmed live: `getById()` cleanly returned `null` twice in a row
+(once from adoption's own precheck, once from this fallback) for an id whose
+own `insert()` immediately 23505'd — undeniable proof the row existed, and
+undeniable proof `getById` couldn't see it either time. Fixed by dropping the
+gate: any insert failure now gets exactly one re-id-and-retry unconditionally
+(a fresh random UUID essentially never collides again, so this is safe
+regardless of the failure's real cause; if the retry also fails, that failure
+surfaces normally, no worse off than before). `FakeSongsAdapter` gained a
+`simulatedCurrentUserId` property so a JVM test can actually model RLS
+scoping for `getById` — its absence was itself part of the problem: the
+original unit test let `getById` see every row unconditionally, which made
+the *backwards* fallback logic pass.
+
+## A real schema-drift bug found by live testing
 
 - **Account deletion** — the standing Play Store blocker from Phase 11 is
   unchanged by this work (it still needs a real in-app/web deletion path
