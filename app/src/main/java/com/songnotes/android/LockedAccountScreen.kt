@@ -27,15 +27,21 @@ import com.songnotes.core.data.SupabaseAuthRepository
 import kotlinx.coroutines.launch
 
 /**
- * Shown whenever the app is signed in but [KeySession] has no DEK -- the
- * common case is simply that the process was killed since the last sign-in:
- * [KeySession] is memory-only by design (see its own doc comment; Phase 6's
- * Keystore device wrap is the eventual answer to "unlock without retyping the
- * password," not wired into a real flow yet). Before this screen existed the
- * app just silently sat there signed-in-but-not-syncing with no explanation
- * (see docs/PLAN.md's forgot-password phase entry) -- [SongSyncWorker] no-ops
- * successfully whenever [KeySession.current] is null, so nothing ever
- * surfaced this state to the user.
+ * Reached only from a Sync press (Phase 13 -- see `SyncController.gate`),
+ * never as a launch gate: before Phase 13 this screen blocked the ENTIRE
+ * Songs home screen whenever the app was signed in but [KeySession] had no
+ * DEK, which also blocked every local-only feature for no reason -- the DB
+ * key ([KeystoreDbKeyProvider]) has nothing to do with the account DEK, so
+ * local songs were always readable/writable regardless. Now the password is
+ * only ever demanded at the moment it's actually needed: pushing/pulling
+ * encrypted content requires the DEK, browsing/editing local songs doesn't.
+ *
+ * The common case reaching this screen is simply that the process was killed
+ * since the last sign-in: [KeySession] is memory-only by design (see its own
+ * doc comment; Phase 6's Keystore device wrap is the eventual answer to
+ * "unlock without retyping the password," not wired into a real flow yet).
+ * [SongSyncWorker] fails loudly (not a silent no-op) whenever
+ * [KeySession.current] is null, which is what routes here.
  *
  * Also the landing spot right after a WEB password reset: GoTrue revokes
  * other sessions on a password change, so Android's session dies, and its

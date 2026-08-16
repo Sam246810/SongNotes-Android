@@ -1,53 +1,19 @@
 package com.songnotes.core.data
 
 import java.security.SecureRandom
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonElement
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-/** In-memory [SongDao] -- same "fake, not a real Room DB" precedent as the JS side's FakeRemoteAdapter. */
-private class FakeSongDao : SongDao {
-    val rows = LinkedHashMap<String, SongEntity>()
-
-    override fun observeAll() = flow { emit(rows.values.filter { it.deletedAt == null }.sortedByDescending { it.updatedAt }) }
-
-    override suspend fun getByIdIncludingDeleted(id: String) = rows[id]
-    override suspend fun getById(id: String) = rows[id]?.takeIf { it.deletedAt == null }
-    override suspend fun getPendingSync() = rows.values.filter { it.pendingSync }
-    override suspend fun upsert(song: SongEntity) { rows[song.id] = song }
-    override suspend fun delete(song: SongEntity) { rows.remove(song.id) }
-    override suspend fun deleteById(id: String) { rows.remove(id) }
-}
-
-/** In-memory [SongsRemoteAdapter] mirroring songsRepository.test.js's FakeRemoteAdapter's `WHERE id=? AND rev=?` semantics. */
-private class FakeSongsAdapter : SongsRemoteAdapter {
-    val rows = LinkedHashMap<String, SongRow>()
-    var insertCalls = 0
-    var updateCalls = 0
-
-    override suspend fun list(userId: String) = rows.values.filter { it.user_id == userId }
-    override suspend fun getById(id: String) = rows[id]
-    override suspend fun insert(row: SongRow): SongRow {
-        insertCalls++
-        rows[row.id] = row
-        return row
-    }
-
-    override suspend fun updateWithRevCheck(id: String, row: SongRow, expectedRev: Int): UpdateResult {
-        updateCalls++
-        val current = rows[id]
-        if (current == null || current.rev != expectedRev) return UpdateResult.Conflict
-        rows[id] = row
-        return UpdateResult.Success(row)
-    }
-}
+// FakeSongDao / FakeSongsAdapter moved to TestFakes.kt (Phase 13) so
+// SongRepositoryTest and SyncEngineAdoptionTest can share them.
 
 class SyncEngineTest {
     private lateinit var dao: FakeSongDao
@@ -126,21 +92,98 @@ class SyncEngineTest {
     }
 
     @Test
-    fun `a lost optimistic-concurrency race writes a conflict copy instead of dropping the edit`() = runBlocking {
+    fun `a lost optimistic-concurrency race writes a conflict copy, pushes it within the same sync, and lets the winner's content win the pull`() = runBlocking {
         // Remote already moved to rev 5 (someone else's write); our local entity still expects rev 3.
         adapter.rows["song-1"] = buildRemoteRow("song-1", rev = 5)
         dao.upsert(localSong(rev = 4, remoteRev = 3, title = "My Edit"))
 
-        engine.sync(userId, dek)
+        val outcome = engine.sync(userId, dek)
 
-        val original = dao.rows["song-1"]!!
-        assertEquals(false, original.pendingSync) // gave up pushing further, not stuck retrying forever
+        assertEquals(1, outcome.conflictCopies)
 
         val conflictCopy = dao.rows.values.first { it.id != "song-1" }
         assertTrue(conflictCopy.title.startsWith("My Edit (conflict copy —"))
-        assertEquals(true, conflictCopy.pendingSync) // queued to be pushed as a genuinely new song next cycle
-        assertNull(conflictCopy.remoteRev)
-        assertEquals(1, conflictCopy.rev)
+        // Phase 13: a conflict copy is pushed within the SAME sync() pass it's
+        // created in (a bounded second pushPending() pass) -- strictly-manual
+        // sync means there might never be a "next" automatic pass to catch it.
+        assertEquals(false, conflictCopy.pendingSync)
+        assertNotNull(conflictCopy.remoteRev)
+        assertNotNull(adapter.rows[conflictCopy.id])
+
+        // The loser's row is left pointing at the winner's remote content, and
+        // the immediately-following pull() actually lands it -- rev reset to 0
+        // guarantees pull's "local.rev >= row.rev" skip rule can't permanently
+        // hide the real remote content behind an inflated local rev.
+        val original = dao.rows["song-1"]!!
+        assertEquals(false, original.pendingSync)
+        assertEquals("Remote Song", original.title)
+    }
+
+    @Test
+    fun `a failed rev check where the remote row is simply gone re-queues for insert instead of writing a conflict copy`() = runBlocking {
+        // Simulates a DEK rotation's rotateAndPurge deleting every remote row:
+        // the local entity still points at a remoteRev that no longer exists.
+        // Misreading this as a lost race would duplicate every affected song
+        // as a conflict copy -- it must instead be treated as "never
+        // successfully pushed" and re-inserted clean.
+        dao.upsert(localSong(rev = 4, remoteRev = 3, title = "Orphaned Edit"))
+        // adapter.rows deliberately has NO row for "song-1" -- updateWithRevCheck
+        // therefore reports Conflict (nothing matched id+rev), same symptom a
+        // real lost race would produce.
+
+        val outcome = engine.sync(userId, dek)
+
+        assertEquals(0, outcome.conflictCopies)
+        assertEquals(1, dao.rows.size) // no conflict copy was created
+        assertEquals(1, adapter.insertCalls) // re-queued row went out via a clean insert instead
+        val result = dao.rows["song-1"]!!
+        assertEquals(false, result.pendingSync)
+        assertNotNull(result.remoteRev)
+    }
+
+    @Test
+    fun `editing an already-synced song pushes an update, never an insert (regression for the remoteRev-drop defect)`() = runBlocking {
+        // The historical bug: SongRepository.upsert() used to silently reset
+        // remoteRev to null on every edit, which made this scenario take the
+        // INSERT branch against an id that already existed remotely --
+        // repository.upsert()'s own fix is covered by SongRepositoryTest;
+        // this proves the sync-engine side of the same story end-to-end.
+        adapter.rows["song-1"] = buildRemoteRow("song-1", rev = 3, title = "Old Title")
+        dao.upsert(localSong(rev = 4, remoteRev = 3, title = "Edited After Sync"))
+
+        engine.sync(userId, dek)
+
+        assertEquals(0, adapter.insertCalls)
+        assertEquals(1, adapter.updateCalls)
+        assertEquals("Edited After Sync", decryptContent(adapter.rows["song-1"]!!).getString("title"))
+    }
+
+    @Test
+    fun `an insert collision the adoption precheck missed is re-ided and retried instead of failing the whole push`() = runBlocking {
+        // Simulates the real SupabaseSongsAdapter.getById() hole: it has no
+        // user_id filter, so it CAN see another account's row (used by
+        // pushPending's own fallback), but list(userId) -- which pull() below
+        // uses -- correctly stays scoped to this account, same as real RLS. If
+        // this row belonged to `userId` instead, pull() would legitimately
+        // re-materialize it locally and this test would be testing the wrong
+        // thing.
+        adapter.rows["song-1"] = buildRemoteRow("song-1", rev = 1, title = "Someone Else's Song").copy(user_id = "other-user")
+        dao.upsert(localSong(id = "song-1", rev = 1, remoteRev = null, title = "My New Song"))
+        dao.upsert(localSong(id = "song-2", rev = 1, remoteRev = null, title = "A Different Song"))
+
+        val outcome = engine.sync(userId, dek)
+
+        assertEquals(1, outcome.reIded)
+        assertEquals(2, outcome.pushed) // both rows made it out despite the collision
+        assertNull(dao.rows["song-1"]) // old id reclaimed locally
+        assertEquals("Someone Else's Song", decryptContent(adapter.rows["song-1"]!!).getString("title")) // untouched
+        val reIdedEntity = dao.rows.values.first { it.title == "My New Song" }
+        assertNotEquals("song-1", reIdedEntity.id)
+        assertNotNull(reIdedEntity.remoteRev)
+        assertEquals(false, reIdedEntity.pendingSync)
+        val secondEntity = dao.rows.values.first { it.title == "A Different Song" }
+        assertEquals(false, secondEntity.pendingSync)
+        assertNotNull(secondEntity.remoteRev)
     }
 
     @Test

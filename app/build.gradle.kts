@@ -65,6 +65,10 @@ dependencies {
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    // Phase 13: collectAsStateWithLifecycle for SyncStatus (was only on the
+    // classpath transitively via compose-ui before this -- made explicit
+    // since Phase 13 is the first real dependency on it).
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)

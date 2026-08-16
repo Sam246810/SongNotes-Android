@@ -1663,7 +1663,12 @@ private suspend fun runEncryptedDbSmokeTest(context: android.content.Context): S
             append("db file: ${dbFile.absolutePath}")
         }
     } finally {
-        repo.delete(testSong)
+        // Phase 13: this song never reached the server (it's created and
+        // torn down entirely within this smoke test), so a plain delete()
+        // tombstone would leave a permanent, never-reclaimed row behind --
+        // deleteRespectingSync hard-deletes it instead, exactly like a real
+        // never-synced song's delete would.
+        repo.deleteRespectingSync(testSong)
     }
 }
 

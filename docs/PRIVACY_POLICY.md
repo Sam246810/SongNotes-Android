@@ -39,7 +39,9 @@ To create an account, we collect:
   authentication provider, Supabase. Your password is never stored or seen
   by us directly; Supabase handles credential storage and verification.
 
-Once signed in, to sync your songs across your devices, we store:
+Syncing is manual: nothing is uploaded automatically, not even right after you
+sign in. Your songs stay on your device until you tap the Sync button
+yourself. Once you do, to sync your songs across your devices, we store:
 
 - **Your song content (lyrics, chords, titles, and metadata like BPM/key/
   tuning)** — but only in encrypted form. Your device encrypts this content
@@ -128,3 +130,13 @@ client-side encryption format for synced song content), the app's
 and its Gradle dependencies (no analytics/ads/crash-reporting SDKs present).
 Verify anything you're unsure of before publishing — this is a starting
 draft, not legal advice.
+
+Updated 2026-08-15 for Phase 13 (`docs/handoff/PHASE-13-local-first.md`):
+Android became local-first with opt-in, strictly manual sync —
+`SongSyncWorker.enqueueOneTime` is now only ever called from a direct user
+action (`SyncController.requestSync`), never automatically on sign-in. The
+claims above ("optional," "stays on your device") were already written this
+way in Phase 11 but are now actually enforced by the code rather than
+partially aspirational — Phase 11's `LockedAccountScreen` used to gate the
+entire song list behind the account password even for a signed-in user with
+no unsynced intent; Phase 13 removed that gate.

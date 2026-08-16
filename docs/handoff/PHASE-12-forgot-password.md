@@ -99,19 +99,27 @@ doesn't exist or doesn't work. They're fixed together.
   `/forgot-password` rather than reimplementing the destructive rotate+purge
   flow and Supabase email-link handling before the app has even shipped, per
   the plan's own scoping decision.
-- **`LockedAccountScreen.kt`** — gates the Songs home screen whenever
-  `authRepo.isSignedIn && !KeySession.isUnlocked()`, the common case being
-  simply that the process was killed since the last sign-in (`KeySession` is
-  memory-only by design). Before this phase, that state had **no UI at all** —
-  `SongSyncWorker` no-ops successfully when `KeySession.current()` is null, so
-  the app just sat there signed-in-but-silently-not-syncing. Also the landing
-  spot right after a **web-side** password reset: GoTrue revokes other
-  sessions on a password change, so a web reset kills Android's session, and
-  its next sign-in throws `EnvelopeKeyMismatchException` — routed to
-  `RecoveryUnlockScreen` from here exactly like any other mismatch. Includes a
-  "Forgot your password? Sign out instead" escape hatch (mirrors the web
-  app's `PrivacyScreen`) — without one, someone who's genuinely forgotten
-  their password would be stuck on this screen permanently.
+- **`LockedAccountScreen.kt`** — at the time of this phase, gated the Songs
+  home screen whenever `authRepo.isSignedIn && !KeySession.isUnlocked()`, the
+  common case being simply that the process was killed since the last sign-in
+  (`KeySession` is memory-only by design). Before this phase, that state had
+  **no UI at all** — `SongSyncWorker` no-ops successfully when
+  `KeySession.current()` is null, so the app just sat there
+  signed-in-but-silently-not-syncing. Also the landing spot right after a
+  **web-side** password reset: GoTrue revokes other sessions on a password
+  change, so a web reset kills Android's session, and its next sign-in throws
+  `EnvelopeKeyMismatchException` — routed to `RecoveryUnlockScreen` from here
+  exactly like any other mismatch. Includes a "Forgot your password? Sign out
+  instead" escape hatch (mirrors the web app's `PrivacyScreen`) — without one,
+  someone who's genuinely forgotten their password would be stuck on this
+  screen permanently.
+  >
+  > **Phase 13 update (2026-08-15):** the "gates the Songs home screen" part
+  > is no longer true — Android became local-first, and gating the entire
+  > song list behind an account password made no sense once an account is
+  > optional. `LockedAccountScreen` is unchanged as a composable but is now
+  > reached only from an actual Sync button press, never as a launch gate. See
+  > `docs/handoff/PHASE-13-local-first.md`.
 - **`AuthScreen.kt`** — "Forgot your password?" opens the web app's
   `/forgot-password` via a plain `ACTION_VIEW` intent (no Custom Tabs
   dependency added for one link). `signIn`'s return type changed from `Unit`

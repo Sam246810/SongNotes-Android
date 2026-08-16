@@ -33,7 +33,13 @@ import org.json.JSONObject
  * table: with one outstanding local edit possible per song at a time (the UI
  * always edits the CURRENT row in place, same as the web app's own debounce-
  * per-song-id map, not an event log), a queue table would track information a
- * boolean already captures, for no real benefit at this scale.
+ * boolean already captures, for no real benefit at this scale. Set on every
+ * write regardless of whether an account is even signed in (Phase 13: sync is
+ * opt-in and local-first) -- it means "locally modified since the last
+ * confirmed push," which is exactly as meaningful for a song that will never
+ * be pushed as one that will; `SongRepository.observeAllWithSyncState` and the
+ * `SyncBanner` UI are what interpret it in light of whether sync is enabled,
+ * not this column itself.
  *
  * [remoteRev] is null until the first successful push confirms this song
  * actually exists on the server -- what tells [SyncWorker] whether to `insert`

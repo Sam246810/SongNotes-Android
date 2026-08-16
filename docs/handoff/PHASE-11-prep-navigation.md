@@ -1,6 +1,11 @@
 # Phase 11 prep — real home screen, dev screens gated out
 
-**Status (2026-08-10): implemented and verified on-device.** This is a
+**Status (2026-08-10): implemented and verified on-device.** (**Phase 13
+update, 2026-08-15:** the "sign-in/sign-out + Sync now row" this doc describes
+moving onto the `Songs` branch was itself replaced by `SyncHeader` + a
+persistent `SyncBanner`, and `LockedAccountScreen` no longer gates that branch
+at all — see `docs/handoff/PHASE-13-local-first.md`. Everything else here
+about the navigation/dev-screen-gating structure is unchanged.) This is a
 decision record for a gap found while discussing what Phase 11 ("Hardening +
 Play release") needs to cover — not a completed phase, and not formally part
 of Phase 11 itself (see "Why this isn't blocking on Phase 11" below).

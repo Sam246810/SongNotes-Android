@@ -1,5 +1,6 @@
 package com.songnotes.android
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -28,11 +29,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,6 +62,9 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.songnotes.core.data.SongRepository
 import com.songnotes.core.domain.ChordVoicing
 import com.songnotes.core.domain.Song
@@ -74,7 +80,6 @@ import com.songnotes.core.domain.parseLyricsText
 import com.songnotes.core.domain.tokenizeChordLine
 import com.songnotes.core.domain.transposeChordsLine
 import java.util.UUID
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -172,13 +177,38 @@ private fun findSplitIndex(text: String, style: TextStyle, maxWidthPx: Int, meas
 fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     val context = LocalContext.current
     val repo = remember { SongRepository(context) }
+    val sessionStore = remember { EditorSessionStore(context) }
+    // AppScope.io, not rememberCoroutineScope() -- see SongDraftAutosaver's own
+    // doc comment for why: a debounced write must survive this composable
+    // leaving composition, not get cancelled by it.
+    val autosaver = remember { SongDraftAutosaver(repo, AppScope.io) }
 
     // Room's load is suspend, unlike the old SongStorage's synchronous file read —
     // nothing below renders until it resolves, same "loading state gates the real
     // UI" pattern as everywhere else Compose talks to a database.
     var loadedSong by remember { mutableStateOf<Song?>(null) }
+    var missing by remember { mutableStateOf(false) }
     LaunchedEffect(songId) {
-        loadedSong = repo.getById(songId) ?: emptySong(songId)
+        sessionStore.lastOpenSongId = songId
+        val existing = repo.getById(songId)
+        if (existing == null) {
+            // Phase 13: no longer synthesizes an empty placeholder here (the
+            // old emptySong() fallback would have created a brand-new song
+            // with createdAt = 0 the moment anything triggered persist()).
+            // A missing id here means either a stale last-open-song pointer,
+            // or the song was deleted/pulled-as-a-tombstone by a sync that
+            // happened while this device wasn't looking -- either way there
+            // is nothing to edit; bail back to the list rather than
+            // resurrecting a ghost song.
+            sessionStore.lastOpenSongId = null
+            missing = true
+        } else {
+            loadedSong = existing
+        }
+    }
+    if (missing) {
+        LaunchedEffect(Unit) { onDone() }
+        return
     }
     val loaded = loadedSong ?: return
 
@@ -187,12 +217,46 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     var lines by remember { mutableStateOf(songToEditorLines(loaded)) }
     var customChords by remember { mutableStateOf(loaded.customChords) }
     var pendingFocus by remember { mutableStateOf<PendingFocus?>(null) }
-    var showImport by remember { mutableStateOf(false) }
-    var activeChordName by remember { mutableStateOf<String?>(null) }
-    var fontScale by remember { mutableStateOf(1f) }
+    // UI-only state (never persisted to Room -- there's nothing here Room's
+    // own draft-of-record needs to know about) survives a config change via
+    // rememberSaveable; title/meta/lines/customChords deliberately do NOT --
+    // Room already IS the durable draft store (see SongDraftAutosaver's doc
+    // comment), and a rememberSaveable Saver for a whole song's `lines` list
+    // risks Bundle's ~500KB TransactionTooLargeException on a long song for
+    // no benefit over what the autosaver + lifecycle flush already guarantee.
+    var showImport by rememberSaveable { mutableStateOf(false) }
+    var activeChordName by rememberSaveable { mutableStateOf<String?>(null) }
+    var fontScale by rememberSaveable { mutableStateOf(1f) }
     var linesAreaWidthPx by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
     val textMeasurer = rememberTextMeasurer()
+
+    // Phase 13: guarantees nothing typed is lost on any exit path, not just
+    // the Done button. ON_STOP is the last lifecycle callback guaranteed
+    // before the process becomes a kill candidate; onDispose covers this
+    // composable leaving the tree for any other reason (back-press,
+    // navigating away via a route other than Done).
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) AppScope.io.launch { autosaver.flush() }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            AppScope.io.launch { autosaver.flush() }
+        }
+    }
+
+    fun finish() {
+        scope.launch {
+            autosaver.flush()
+            sessionStore.lastOpenSongId = null
+            onDone()
+        }
+    }
+
+    BackHandler { finish() }
 
     val chordStyle = baseChordTextStyle.copy(fontSize = baseChordTextStyle.fontSize * fontScale)
     val lyricStyle = baseLyricTextStyle.copy(fontSize = baseLyricTextStyle.fontSize * fontScale)
@@ -207,21 +271,29 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
         updatedAt = System.currentTimeMillis(),
     )
 
+    // An immediate (non-debounced) save through the SAME autosaver + Mutex a
+    // debounced text edit uses -- schedule() then flush() right away, rather
+    // than a separate direct repo.upsert(), so a voicing save can never race
+    // a still-pending debounced write into two independent upserts.
+    fun saveNow(song: Song) {
+        scope.launch {
+            autosaver.schedule(song)
+            autosaver.flush()
+        }
+    }
+
     fun saveVoicing(chordName: String, voicing: ChordVoicing) {
         customChords = customChords + (chordName to voicing)
-        scope.launch { repo.upsert(currentSong()) }
+        saveNow(currentSong())
     }
 
     fun resetVoicing(chordName: String) {
         customChords = customChords - chordName
-        scope.launch { repo.upsert(currentSong()) }
+        saveNow(currentSong())
     }
 
     fun persist() {
-        scope.launch {
-            delay(400) // debounce — avoid a DB write on every keystroke
-            repo.upsert(currentSong())
-        }
+        autosaver.schedule(currentSong())
     }
 
     fun updateLine(id: String, transform: (EditorLine) -> EditorLine) {
@@ -311,12 +383,7 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
             horizontalArrangement = Arrangement.End,
         ) {
-            TextButton(onClick = {
-                scope.launch {
-                    repo.upsert(currentSong()) // flush immediately — don't lose the last debounced edit
-                    onDone()
-                }
-            }) { Text("Done", fontWeight = FontWeight.Bold, color = ChordColor) }
+            TextButton(onClick = { finish() }) { Text("Done", fontWeight = FontWeight.Bold, color = ChordColor) }
         }
         BasicTextField(
             value = title,
@@ -410,8 +477,6 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     }
     }
 }
-
-private fun emptySong(id: String) = Song(id = id, title = "", createdAt = 0L, updatedAt = 0L)
 
 private val baseChordTextStyle = TextStyle(
     fontFamily = FontFamily.Monospace,
