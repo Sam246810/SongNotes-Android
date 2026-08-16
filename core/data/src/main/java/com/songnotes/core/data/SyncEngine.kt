@@ -135,6 +135,13 @@ class SyncEngine(
             }
             if (entity.remoteRev != null) continue // already has a proven remote lineage; nothing to reconcile
 
+            // A null result here is NOT proof the id is free -- RLS can hide a
+            // different account's row with the same id from this exact query
+            // (confirmed live: getById() cleanly returns null for a row that
+            // provably exists, per a later insert's 23505). That's fine: it
+            // just means this method does nothing for that row and leaves it
+            // pendingSync/remoteRev-null, so pushPending's own insert-failure
+            // fallback (see its doc comment) is what actually resolves it.
             val remote = adapter.getById(entity.id)
             if (remote == null) {
                 continue // no id collision -- pushPending's normal insert path handles this cleanly
@@ -194,24 +201,34 @@ class SyncEngine(
                         dao.upsert(entity.copy(pendingSync = false, remoteRev = inserted.rev))
                         pushed++
                     } catch (insertFailure: Exception) {
-                        // Ask the server directly whether this id already exists,
-                        // rather than string-matching a unique-violation error
-                        // whose exact shape varies by driver/environment. A real
-                        // collision here means adoption's own getById() precheck
-                        // missed it -- most likely RLS made a DIFFERENT account's
-                        // row with the same id invisible to that check. Re-id and
-                        // retry once; a persistent failure for any other reason
-                        // still propagates.
-                        if (adapter.getById(entity.id) != null) {
-                            val reIdEntity = entity.copy(id = UUID.randomUUID().toString(), rev = 1, remoteRev = null, pendingSync = true)
-                            dao.deleteById(entity.id)
-                            val inserted = adapter.insert(buildRow(reIdEntity, userId, dek, dekId))
-                            dao.upsert(reIdEntity.copy(pendingSync = false, remoteRev = inserted.rev))
-                            reIded++
-                            pushed++
-                        } else {
-                            throw insertFailure
-                        }
+                        // Always re-id and retry ONCE on any insert failure --
+                        // a fresh random UUID essentially never collides again,
+                        // so this is safe regardless of what actually caused
+                        // the failure. This used to be gated on
+                        // `adapter.getById(entity.id) != null`, on the theory
+                        // that a real collision here means adoption's own
+                        // getById() precheck missed a DIFFERENT account's row
+                        // with the same id, hidden by RLS. That gate was
+                        // backwards and, worse, unreachable for the exact case
+                        // it was written for: an RLS-hidden row is BY
+                        // DEFINITION invisible to getById() too, so the
+                        // condition it was gated on could only be false when
+                        // it needed to be true. Confirmed live: a genuine
+                        // cross-account primary-key collision (23505 on
+                        // insert) paired with getById() cleanly returning null
+                        // both times it was checked -- the retry branch this
+                        // was supposed to protect was provably unreachable.
+                        // Verified via `docs/handoff/PHASE-13-local-first.md`'s
+                        // own account-switch test. If this retry ALSO fails
+                        // (some other, unrelated cause), that failure
+                        // propagates normally -- no worse than surfacing the
+                        // original one would have been.
+                        val reIdEntity = entity.copy(id = UUID.randomUUID().toString(), rev = 1, remoteRev = null, pendingSync = true)
+                        dao.deleteById(entity.id)
+                        val inserted = adapter.insert(buildRow(reIdEntity, userId, dek, dekId))
+                        dao.upsert(reIdEntity.copy(pendingSync = false, remoteRev = inserted.rev))
+                        reIded++
+                        pushed++
                     }
                 } else {
                     when (val result = adapter.updateWithRevCheck(entity.id, row, entity.remoteRev)) {
