@@ -490,6 +490,25 @@ was available to test with this session. Worth an actual on-device
 check the next time one is in hand; until then, treat it as "should
 work" rather than "confirmed."
 
+**Open question, not yet investigated: cheap/variable-quality USB-C→3.5mm
+dongles on the OUTPUT (playback) side.** Distinct from the mic-path question
+above — this is about the DAC in a bargain dongle rather than the mic in a
+USB headset. Oboe/AAudio already negotiates each device's own optimal
+sample rate and `framesPerBurst` automatically at stream-open time (nothing
+in `openStreamsLocked()` hardcodes either), so a manual
+`AudioManager.getProperty(PROPERTY_OUTPUT_FRAMES_PER_BUFFER)` query would
+likely be redundant — Oboe already gets that answer for free. The real risk
+is a dongle whose reported burst size doesn't leave enough margin for its
+actual (cheap-DAC) round-trip latency, causing elevated `xRunCount()`
+(audible glitches) that the engine currently tracks but never acts on. Per
+`docs/PLAN.md`'s "freeze adaptive buffer sizing during a take" rule, the fix
+can't be resizing the buffer mid-take (that would reintroduce exactly the
+variance calibration is built to eliminate) — if this turns out to matter in
+practice, the shape of a fix is more like "detect a bad xrun rate and bump
+the buffer before the *next* take," not a live adaptation. Not device-tested
+with an actual cheap dongle yet; worth doing if one shows up in a bug
+report or is on hand to test with.
+
 ## What's left (not started)
 
 - **No metering, no undo.** Standard DAW-adjacent features, out of scope
