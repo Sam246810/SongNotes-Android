@@ -32,7 +32,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.songnotes.core.data.SongListItem
 import com.songnotes.core.data.SongRepository
+import com.songnotes.core.data.SyncPreferences
+import com.songnotes.core.data.SyncStatus
 import com.songnotes.core.domain.Song
 import java.util.UUID
 import kotlinx.coroutines.launch
@@ -44,14 +47,17 @@ import kotlinx.coroutines.launch
  * is a perfectly valid starting state the editor already handles (the
  * user names it by just typing a title, same as any notes app).
  *
- * Phase 6: backed by [SongRepository] (Room + SQLCipher) instead of the
- * original [SongStorage] (plain JSON files) — [songs] is fed by
- * [SongRepository.observeAll]'s [kotlinx.coroutines.flow.Flow], so create/
- * delete no longer need an explicit `refresh()`; Room's own change
- * notification re-emits the list automatically.
+ * Phase 13: local-first, opt-in manual sync -- home screen for a local-only
+ * user works identically to before (no account, no network, ever). When
+ * sync is enabled, [SyncBanner] shows unsynced state and delete goes through
+ * [DeleteSongDialog] with copy that depends on whether a song has ever
+ * reached the account ([SongListItem.isOnAccount]).
  */
 @Composable
 fun SongListScreen(
+    status: SyncStatus,
+    onSyncClick: () -> Unit,
+    onSignInClick: () -> Unit,
     onOpenSong: (songId: String) -> Unit,
     onOpenScratchpad: () -> Unit,
     onOpenPiano: () -> Unit,
@@ -59,12 +65,14 @@ fun SongListScreen(
 ) {
     val context = LocalContext.current
     val repo = remember { SongRepository(context) }
+    val syncPrefs = remember { SyncPreferences(context) }
     val scope = rememberCoroutineScope()
-    var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
+    var items by remember { mutableStateOf<List<SongListItem>>(emptyList()) }
+    var deleteTarget by remember { mutableStateOf<SongListItem?>(null) }
 
     LaunchedEffect(Unit) {
-        migrateFromSongStorageIfNeeded(context, repo)
-        repo.observeAll().collect { songs = it }
+        migrateFromSongStorageIfNeeded(context, repo, syncPrefs)
+        repo.observeAllWithSyncState().collect { items = it }
     }
 
     fun createSong() {
@@ -76,42 +84,57 @@ fun SongListScreen(
         }
     }
 
-    Column(modifier = modifier.fillMaxSize().padding(24.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Songs", style = MaterialTheme.typography.headlineSmall)
-            Row {
-                IconButton(onClick = onOpenScratchpad) {
-                    Icon(Icons.Filled.GraphicEq, contentDescription = "Scratchpad")
-                }
-                IconButton(onClick = onOpenPiano) {
-                    Icon(Icons.Filled.Piano, contentDescription = "Piano")
+    deleteTarget?.let { target ->
+        DeleteSongDialog(
+            title = target.song.title,
+            isOnAccount = target.isOnAccount,
+            onConfirm = {
+                scope.launch { repo.deleteRespectingSync(target.song) }
+                deleteTarget = null
+            },
+            onDismiss = { deleteTarget = null },
+        )
+    }
+
+    Column(modifier = modifier.fillMaxSize()) {
+        SyncBanner(status = status, onSyncClick = onSyncClick, onSignInClick = onSignInClick)
+        Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Songs", style = MaterialTheme.typography.headlineSmall)
+                Row {
+                    IconButton(onClick = onOpenScratchpad) {
+                        Icon(Icons.Filled.GraphicEq, contentDescription = "Scratchpad")
+                    }
+                    IconButton(onClick = onOpenPiano) {
+                        Icon(Icons.Filled.Piano, contentDescription = "Piano")
+                    }
                 }
             }
-        }
-        Spacer(Modifier.height(16.dp))
-        Button(onClick = ::createSong, modifier = Modifier.fillMaxWidth()) {
-            Text("New song")
-        }
-        Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(16.dp))
+            Button(onClick = ::createSong, modifier = Modifier.fillMaxWidth()) {
+                Text("New song")
+            }
+            Spacer(Modifier.height(16.dp))
 
-        if (songs.isEmpty()) {
-            Text(
-                "No songs yet — tap \"New song\" to write your first one.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        } else {
-            LazyColumn {
-                items(songs, key = { it.id }) { song ->
-                    SongRow(
-                        song = song,
-                        onOpen = { onOpenSong(song.id) },
-                        onDelete = { scope.launch { repo.delete(song) } },
-                    )
-                    HorizontalDivider()
+            if (items.isEmpty()) {
+                Text(
+                    "No songs yet — tap \"New song\" to write your first one.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                LazyColumn {
+                    items(items, key = { it.song.id }) { item ->
+                        SongRow(
+                            item = item,
+                            onOpen = { onOpenSong(item.song.id) },
+                            onDelete = { deleteTarget = item },
+                        )
+                        HorizontalDivider()
+                    }
                 }
             }
         }
@@ -119,7 +142,8 @@ fun SongListScreen(
 }
 
 @Composable
-private fun SongRow(song: Song, onOpen: () -> Unit, onDelete: () -> Unit) {
+private fun SongRow(item: SongListItem, onOpen: () -> Unit, onDelete: () -> Unit) {
+    val song = item.song
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         onClick = onOpen,
@@ -148,16 +172,22 @@ private fun SongRow(song: Song, onOpen: () -> Unit, onDelete: () -> Unit) {
 }
 
 /**
- * One-time (per app-start) import of any songs still sitting in the pre-
- * Phase-6 [SongStorage] (plain JSON files under `filesDir/songs/`) into the
- * new [SongRepository] (Room + SQLCipher). Idempotent via [SongRepository.upsert]
- * matching on song id, so running this on every launch is harmless — no
- * separate "have we migrated yet" flag needed at this scale. Old JSON files
- * are deliberately left in place rather than deleted: they're inert once
- * migrated (nothing reads them again), and leaving them is a strictly safer
- * default than a delete bug quietly destroying the only copy of a song.
+ * One-time (per device, tracked via [SyncPreferences.legacyJsonImportDone] --
+ * Phase 13) import of any songs still sitting in the pre-Phase-6 [SongStorage]
+ * (plain JSON files under `filesDir/songs/`) into the new [SongRepository]
+ * (Room + SQLCipher). Before Phase 13 this ran on EVERY entry to the list
+ * screen with no run-once guard -- harmless in isolation, but combined with
+ * the pre-Phase-13 `SongRepository.upsert` defects (unconditional
+ * `deletedAt = null`, dropped `remoteRev`) it would resurrect a song deleted
+ * since the last import and re-flag it `pendingSync` on every single visit to
+ * the list. Old JSON files are still deliberately left in place rather than
+ * deleted: they're inert once migrated (nothing reads them again), and
+ * leaving them is a strictly safer default than a delete bug quietly
+ * destroying the only copy of a song.
  */
-private suspend fun migrateFromSongStorageIfNeeded(context: android.content.Context, repo: SongRepository) {
+private suspend fun migrateFromSongStorageIfNeeded(context: android.content.Context, repo: SongRepository, syncPrefs: SyncPreferences) {
+    if (syncPrefs.legacyJsonImportDone) return
     val legacySongs = SongStorage(context).list()
     for (song in legacySongs) repo.upsert(song)
+    syncPrefs.legacyJsonImportDone = true
 }

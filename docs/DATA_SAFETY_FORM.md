@@ -22,6 +22,13 @@ action, or a web form) before this app can ship to production** — this
 draft's other sections are ready to submit as-is, but flag that separately
 from Data Safety as a real launch blocker.
 
+**Phase 13 update (2026-08-15):** this gap is unchanged and still blocks
+submission — account creation still exists as a feature. What changed is the
+gap's practical weight: sync (and therefore account creation) is now opt-in
+and strictly manual rather than the app's default posture, so most users are
+expected to never create an account at all. See
+`docs/handoff/PHASE-13-local-first.md`.
+
 ## Does your app collect or share any of the required user data types?
 
 **Yes.**
@@ -36,7 +43,9 @@ from Data Safety as a real launch blocker.
   advertising).
 - **Processed ephemerally:** No
 - **Optional or required:** Optional — the app is fully usable without an
-  account; only needed to sync across devices.
+  account (Phase 13: local-first is now the default posture, not a fallback
+  mode); only needed to sync across devices, and even then only collected if
+  the user completes sign-up, not merely by opening the app.
 - **Purpose(s):** Account management, App functionality.
 
 ### Audio → Voice or sound recordings
@@ -62,7 +71,8 @@ from Data Safety as a real launch blocker.
   from the user's account password before it ever leaves the device.
 - **Processed ephemerally:** No (persisted, encrypted, for sync).
 - **Optional or required:** Optional — local-only use never sends this
-  anywhere.
+  anywhere, and even a signed-in user's edits stay device-only until they
+  explicitly press Sync (Phase 13: no automatic push, ever).
 - **Purpose(s):** App functionality (cross-device sync).
 - Note: Play's Data Safety form has a specific "Is this data encrypted in
   transit?" toggle (answer **Yes** — all traffic is HTTPS) and a separate

@@ -402,6 +402,14 @@ Field-by-field, and what changed from v1:
 Android, the existing local cache pattern on web); network sync is a background
 process that reconciles local state with the server, never a read path.
 
+> **Phase 13 note (Android only, 2026-08-15):** nothing in this section's wire
+> protocol changed. What changed is *when* Android triggers it: push and pull
+> now only ever run in direct response to an explicit user action (a Sync
+> button press), never automatically on sign-in, on a local edit, or on a
+> schedule. An account is also now optional on Android — this whole section
+> only applies once a user has chosen to enable sync. See
+> `docs/handoff/PHASE-13-local-first.md`. The web app is unaffected.
+
 ### 5.1 Push (optimistic concurrency, "Tier 0")
 
 ```sql

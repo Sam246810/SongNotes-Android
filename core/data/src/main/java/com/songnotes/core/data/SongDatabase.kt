@@ -55,6 +55,8 @@ abstract class SongDatabase : RoomDatabase() {
     companion object {
         private const val DB_NAME = "songs.db"
 
+        @Volatile private var INSTANCE: SongDatabase? = null
+
         /**
          * Opens (creating if needed) the SQLCipher-encrypted song database.
          * [dbKey] is the raw passphrase bytes SQLCipher encrypts the whole file
@@ -65,6 +67,11 @@ abstract class SongDatabase : RoomDatabase() {
          * the DB opens before unlock" -- a locked-out user can still open the app
          * and see their (DEK-encrypted, so still unreadable) song list rather
          * than the whole database being inaccessible until they type a password.
+         *
+         * Prefer [getInstance] in app code -- this is kept public for tests (and
+         * as the one place [getInstance] itself calls through to) but building a
+         * second `RoomDatabase` over the same file is exactly the bug [getInstance]
+         * exists to prevent; see its own doc comment.
          */
         fun open(context: Context, dbKey: ByteArray): SongDatabase {
             net.sqlcipher.database.SQLiteDatabase.loadLibs(context.applicationContext)
@@ -77,5 +84,26 @@ abstract class SongDatabase : RoomDatabase() {
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
         }
+
+        /**
+         * The process-wide singleton every real call site should use (Phase 13).
+         * Before this, `SongListScreen`, `SongEditorScreen`, `DiagnosticsScreen`
+         * and `SongSyncWorker` each called [open] independently, building four
+         * separate `RoomDatabase` instances over one physical file. Room's
+         * `InvalidationTracker` -- what makes a `Flow<List<SongEntity>>` re-emit
+         * after a write -- is scoped per-instance, so a write through instance A
+         * never woke up a `Flow` collected from instance B. That was merely a
+         * leak/inefficiency before Phase 13's unsynced-count banner; a banner fed
+         * by a `Flow` bound to the wrong instance would just silently never
+         * update, so this stopped being optional. WorkManager runs `SongSyncWorker`
+         * in this app's own process (no `android:process` override in the
+         * manifest), so a process-wide singleton is correct there too, not just
+         * a convenience.
+         */
+        fun getInstance(context: Context): SongDatabase =
+            INSTANCE ?: synchronized(this) {
+                INSTANCE ?: open(context.applicationContext, KeystoreDbKeyProvider(context.applicationContext).getOrCreateDbKey())
+                    .also { INSTANCE = it }
+            }
     }
 }

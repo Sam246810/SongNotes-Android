@@ -167,6 +167,14 @@ which is both slow and defeats the point of testing incremental sync. This
 button is a real, permanent affordance (not just a test hook) until periodic
 sync exists.
 
+> **Phase 13 update (2026-08-15):** "until periodic sync exists" above no
+> longer applies — periodic sync was deliberately rejected, not just never
+> gotten to. Manual-only sync (and an optional account) is the permanent
+> design; see `docs/handoff/PHASE-13-local-first.md`. The button itself moved
+> off the Diagnostics screen into a persistent `SyncBanner` on the song list,
+> and `enqueueOneTime()` no longer fires on sign-in/sign-up at all — every
+> sync is now a direct user action, full stop.
+
 ### Two real bugs found by live device verification (not code review)
 
 Both were caught only because this pass insisted on testing against the real
