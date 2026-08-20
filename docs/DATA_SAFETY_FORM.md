@@ -21,22 +21,26 @@ in effect since 2023). Play Console's Data Safety form has a required
 than the app's default posture, so most users are expected to never create
 an account at all. See `docs/handoff/PHASE-13-local-first.md`.
 
-**Update (2026-08-15): the deletion path itself is now implemented, but not
-yet deployed.** The SongNotes web repo added a `/delete-account` page
-(sign-in, typed confirmation, then a `delete_own_account` Postgres RPC that
-cascades through all of the user's data — commit `afa651c`), and Android
-links out to it from `MainActivity.kt`'s account row (`WebLinks.kt`'s
-`WEB_DELETE_ACCOUNT_URL`), the same pattern already used for forgot-password.
-**Two things still block a real submission:**
+**Update (2026-08-15): the deletion path itself is implemented.** The
+SongNotes web repo added a `/delete-account` page (sign-in, typed
+confirmation, then a `delete_own_account` Postgres RPC that cascades through
+all of the user's data — commit `afa651c`), and Android links out to it from
+`MainActivity.kt`'s account row (`WebLinks.kt`'s `WEB_DELETE_ACCOUNT_URL`),
+the same pattern already used for forgot-password.
 
-1. **The web app isn't deployed anywhere yet.** No hosting is wired up in
-   that repo (no Vercel project, no domain) — `WEB_DELETE_ACCOUNT_URL` is
-   still pointed at the `example.com` placeholder. Deploy to Vercel (decided
-   2026-08-15) and update that constant to the real URL before release.
-2. **Play Console's Data Safety → Account deletion field must be filled in
-   separately, with that same final URL**, once it exists — Play checks that
-   field independently of what the app links to; pointing the app at a page
-   doesn't populate this form field automatically.
+**Update (2026-08-20): the web app is live.** Deployed to Vercel with a
+custom domain — see the web repo's `docs/DEPLOYMENT.md` for the Namecheap
+DNS setup. `WEB_DELETE_ACCOUNT_URL` now points at
+`https://www.songnotes.cloud/delete-account`. **One thing still blocks a
+real submission:**
+
+- **Play Console's Data Safety → Account deletion field must be filled in
+  separately, with that same URL** (`https://www.songnotes.cloud/delete-account`)
+  — Play checks that field independently of what the app links to; pointing
+  the app at a page doesn't populate this form field automatically. This is
+  an account-holder action in Play Console itself, not something fixable in
+  either repo. The developer's Play Console account is verified as of
+  2026-08-20, so this is ready to do — just needs to actually be entered.
 
 ## Does your app collect or share any of the required user data types?
 
@@ -111,11 +115,10 @@ links out to it from `MainActivity.kt`'s account row (`WebLinks.kt`'s
 ## Security practices section
 
 - **Is all user data encrypted in transit?** Yes (HTTPS/TLS to Supabase).
-- **Do you provide a way for users to request data deletion?** **Yes**, once
-  the web app is deployed and `WEB_DELETE_ACCOUNT_URL` points at the real
-  URL (see the gap note above) — until then the in-app link opens a
-  placeholder `example.com` page, so answer this truthfully based on
-  whichever state is actually live at submission time.
+- **Do you provide a way for users to request data deletion?** **Yes** —
+  `https://www.songnotes.cloud/delete-account`, live since 2026-08-20 (see
+  the gap note above). Still needs entering into Play Console's own Account
+  deletion field separately before this can be submitted.
 - **Data safety practices reviewed by an independent third party?** No
   (typical for a small/indie app — leave unchecked unless that changes).
 
