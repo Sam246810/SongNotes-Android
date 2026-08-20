@@ -718,24 +718,33 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
             .fillMaxSize()
             .background(ParchmentBg),
     ) {
-        // Top bar: just Done, own row with real clearance from the status
-        // bar — same "actions on top, title below with room to breathe"
-        // rhythm Samsung Notes/Keep/Apple Notes all use, rather than
-        // cramming the title into the same row as an action button flush
-        // against the top edge. statusBarsPadding() is load-bearing, not
-        // decorative: targetSdk 36 (Android 15+) enforces edge-to-edge with
-        // no opt-out, and this screen otherwise has zero WindowInsets
-        // handling, so without it Done draws under the status bar/battery
-        // icon on some devices — reported directly after live testing. The
-        // extra top padding beyond that inset is deliberate breathing room,
-        // not just the bare minimum to clear the icons.
+        // Top bar: Export (left, scrolls independently if it doesn't fit)
+        // and Done (right, always fully visible -- never shrunk or pushed
+        // off by Export). Own row with real clearance from the status bar
+        // — same "actions on top, title below with room to breathe" rhythm
+        // Samsung Notes/Keep/Apple Notes all use, rather than cramming the
+        // title into the same row as an action button flush against the
+        // top edge. statusBarsPadding() is load-bearing, not decorative:
+        // targetSdk 36 (Android 15+) enforces edge-to-edge with no opt-out,
+        // and this screen otherwise has zero WindowInsets handling, so
+        // without it Done draws under the status bar/battery icon on some
+        // devices — reported directly after live testing. The extra top
+        // padding beyond that inset is deliberate breathing room, not just
+        // the bare minimum to clear the icons.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
                 .padding(start = 16.dp, top = 18.dp, end = 16.dp, bottom = 14.dp),
-            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
+            Row(
+                modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = { copySongTextToClipboard(context, currentSong()) }) { Text("Export text", color = ChordColor) }
+                TextButton(onClick = { shareSongAsPdf(context, currentSong()) }) { Text("Export PDF", color = ChordColor) }
+            }
             TextButton(onClick = { finish() }) { Text("Done", fontWeight = FontWeight.Bold, color = ChordColor) }
         }
         BasicTextField(
@@ -778,16 +787,6 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
             TextButton(onClick = { fontScale = (fontScale + 0.1f).coerceAtMost(1.4f) }) {
                 Text("A+", color = TextMuted, fontWeight = FontWeight.Bold)
             }
-        }
-        // Export lives in its own row, deliberately separated from the
-        // editing-tool row above (undo/redo/transpose/font size) -- it's a
-        // one-off output action, not a repeated editing gesture.
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(onClick = { copySongTextToClipboard(context, currentSong()) }) { Text("Export text", color = ChordColor) }
-            TextButton(onClick = { shareSongAsPdf(context, currentSong()) }) { Text("Export PDF", color = ChordColor) }
         }
         HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = PaperLine, thickness = 1.dp)
         Spacer(Modifier.height(4.dp))
