@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -35,6 +36,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -66,6 +69,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.songnotes.core.data.SongRepository
+import com.songnotes.core.domain.ChordBarre
 import com.songnotes.core.domain.ChordVoicing
 import com.songnotes.core.domain.Song
 import com.songnotes.core.domain.SongLine
@@ -82,6 +86,8 @@ import java.util.UUID
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Phase 5.5's editor, third pass. The second pass ported the desktop web
@@ -127,9 +133,113 @@ private val PaperLine = Color(0xFFB45309).copy(alpha = 0.16f)
 /** How long a lyrics line must sit still before the width-triggered auto-wrap (or its reverse, auto-merge) runs — see [handleLyricsChange]. */
 private const val SPLIT_DEBOUNCE_MS = 180L
 
+/**
+ * How long editing must pause before the current text state is committed as
+ * one undo step — matches the "coalesce a run of typing into a single undo"
+ * behavior of most text editors, rather than pushing a new stack frame on
+ * every keystroke (which would make Undo only ever step back one character).
+ */
+private const val HISTORY_DEBOUNCE_MS = 600L
+private const val MAX_HISTORY = 100
+
 private data class EditorLine(val id: String, val chords: String, val lyrics: String)
 private enum class Track { Chords, Lyrics }
 private data class PendingFocus(val lineId: String, val track: Track, val caretIndex: Int? = null)
+
+/** A point-in-time snapshot of everything Undo/Redo restores — deliberately NOT song metadata like id/createdAt, which never change from within the editor. */
+private data class EditorSnapshot(
+    val title: String,
+    val meta: SongMeta,
+    val lines: List<EditorLine>,
+    val customChords: Map<String, ChordVoicing>,
+)
+
+/**
+ * A saved-instance-state Bundle survives both a fold/unfold (a screen-size
+ * config change, not just rotation -- Android recreates the Activity for it
+ * the same as rotation, and this app declares no configChanges to opt out)
+ * and a plain backgrounding severe enough for the OS to kill the process for
+ * memory -- both destroy and recreate [SongEditorScreen], which would
+ * otherwise silently wipe an in-progress undo/redo history built on plain
+ * `remember`. Serializing through here (same "one JSON blob" shape
+ * [SongEntity] already uses for Room, org.json rather than a new dependency)
+ * is what lets [undoStack]/[redoStack] survive that.
+ *
+ * Deliberately capped independently of [MAX_HISTORY]: that cap bounds how
+ * many snapshots live in memory during a normal session, where the cost is
+ * just Kotlin objects. This trims what actually gets written into the
+ * Activity's saved-instance-state Bundle, which -- per [SongDraftAutosaver]'s
+ * own TransactionTooLargeException concern about a single copy of `lines` --
+ * is a much tighter, shared budget: a long song's full history at
+ * [MAX_HISTORY] depth could alone blow past what the whole Bundle can hold.
+ * Both a count and a total-byte-size cap apply, oldest entries dropped
+ * first, since either alone leaves a gap (few entries from a huge song, or
+ * many from a tiny one) the other catches.
+ */
+private const val MAX_SAVED_HISTORY = 20
+private const val MAX_SAVED_HISTORY_BYTES = 150_000
+
+private fun serializeSnapshot(snapshot: EditorSnapshot): String {
+    val obj = JSONObject()
+    obj.put("title", snapshot.title)
+    obj.put(
+        "meta",
+        JSONObject()
+            .put("bpm", snapshot.meta.bpm)
+            .put("key", snapshot.meta.key)
+            .put("tuning", snapshot.meta.tuning)
+            .put("capo", snapshot.meta.capo),
+    )
+    val linesArr = JSONArray()
+    for (line in snapshot.lines) {
+        linesArr.put(JSONObject().put("id", line.id).put("chords", line.chords).put("lyrics", line.lyrics))
+    }
+    obj.put("lines", linesArr)
+    val customChordsObj = JSONObject()
+    for ((name, voicing) in snapshot.customChords) {
+        val voicingJson = JSONObject().put("frets", JSONArray(voicing.frets)).put("baseFret", voicing.baseFret)
+        voicing.barre?.let {
+            voicingJson.put("barre", JSONObject().put("fret", it.fret).put("fromString", it.fromString).put("toString", it.toString))
+        }
+        customChordsObj.put(name, voicingJson)
+    }
+    obj.put("customChords", customChordsObj)
+    return obj.toString()
+}
+
+/** Inverse of [serializeSnapshot]. Never throws on its own -- callers wrap this in [runCatching] so one malformed saved entry (e.g. a future app version changing this shape) drops just that entry instead of crashing history restoration entirely. */
+private fun deserializeSnapshot(json: String): EditorSnapshot {
+    val obj = JSONObject(json)
+    val metaObj = obj.getJSONObject("meta")
+    val meta = SongMeta(bpm = metaObj.getInt("bpm"), key = metaObj.getString("key"), tuning = metaObj.getString("tuning"), capo = metaObj.getInt("capo"))
+    val linesArr = obj.getJSONArray("lines")
+    val lines = (0 until linesArr.length()).map { i ->
+        val lineObj = linesArr.getJSONObject(i)
+        EditorLine(id = lineObj.getString("id"), chords = lineObj.getString("chords"), lyrics = lineObj.getString("lyrics"))
+    }
+    val customChordsObj = obj.getJSONObject("customChords")
+    val customChords = LinkedHashMap<String, ChordVoicing>()
+    for (name in customChordsObj.keys()) {
+        val voicingObj = customChordsObj.getJSONObject(name)
+        val fretsArr = voicingObj.getJSONArray("frets")
+        val frets = (0 until fretsArr.length()).map { fretsArr.getInt(it) }
+        val barreObj = voicingObj.optJSONObject("barre")
+        val barre = barreObj?.let { ChordBarre(fret = it.getInt("fret"), fromString = it.getInt("fromString"), toString = it.getInt("toString")) }
+        customChords[name] = ChordVoicing(frets = frets, baseFret = voicingObj.getInt("baseFret"), barre = barre)
+    }
+    return EditorSnapshot(title = obj.getString("title"), meta = meta, lines = lines, customChords = customChords)
+}
+
+private val editorSnapshotListSaver: Saver<List<EditorSnapshot>, Any> = listSaver(
+    save = { stack ->
+        // Oldest-first (stack order), so takeLast keeps the most recent --
+        // the entries an Undo press would actually reach first.
+        var kept = stack.takeLast(MAX_SAVED_HISTORY).map { serializeSnapshot(it) }
+        while (kept.size > 1 && kept.sumOf { it.length } > MAX_SAVED_HISTORY_BYTES) kept = kept.drop(1)
+        kept
+    },
+    restore = { saved -> saved.mapNotNull { runCatching { deserializeSnapshot(it) }.getOrNull() } },
+)
 
 private fun songToEditorLines(song: Song): List<EditorLine> {
     if (song.lines.isEmpty()) return listOf(EditorLine(UUID.randomUUID().toString(), "", ""))
@@ -320,6 +430,40 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     var fontScale by rememberSaveable { mutableStateOf(1f) }
     var linesAreaWidthPx by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
+
+    // Undo/redo over the text content only (title/meta/lines/customChords) --
+    // deliberately separate from Room/the autosaver, which stay the durable
+    // draft store regardless of undo history. Saved via editorSnapshotListSaver
+    // (a size- and count-capped JSON encoding, not the raw objects -- see its
+    // own doc comment) so history survives a fold/unfold or the process being
+    // killed while backgrounded, both of which recreate this composable the
+    // same as rotation would. lastHistorySnapshot deliberately stays plain
+    // `remember`, not saved: it always gets recomputed fresh from
+    // title/meta/lines/customChords below, so it's correct either way, and
+    // saving it too would just be more Bundle bytes for no benefit.
+    var undoStack by rememberSaveable(stateSaver = editorSnapshotListSaver) { mutableStateOf(listOf<EditorSnapshot>()) }
+    var redoStack by rememberSaveable(stateSaver = editorSnapshotListSaver) { mutableStateOf(listOf<EditorSnapshot>()) }
+    var lastHistorySnapshot by remember { mutableStateOf(EditorSnapshot(title, meta, lines, customChords)) }
+    // Set right before undo()/redo() assign state so the debounced effect
+    // below treats that assignment as "already historical" instead of
+    // pushing it right back onto the stack it was just popped from.
+    var suppressNextHistoryPush by remember { mutableStateOf(false) }
+
+    LaunchedEffect(title, meta, lines, customChords) {
+        val current = EditorSnapshot(title, meta, lines, customChords)
+        if (suppressNextHistoryPush) {
+            suppressNextHistoryPush = false
+            lastHistorySnapshot = current
+            return@LaunchedEffect
+        }
+        delay(HISTORY_DEBOUNCE_MS)
+        if (current != lastHistorySnapshot) {
+            undoStack = (undoStack + lastHistorySnapshot).takeLast(MAX_HISTORY)
+            lastHistorySnapshot = current
+            redoStack = emptyList()
+        }
+    }
+
     // Per-line debounce jobs for the width-triggered auto-wrap -- see
     // handleLyricsChange's doc comment for why this can't just run inline
     // on every keystroke.
@@ -389,6 +533,30 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
 
     fun persist() {
         autosaver.schedule(currentSong())
+    }
+
+    fun undo() {
+        val prev = undoStack.lastOrNull() ?: return
+        redoStack = redoStack + EditorSnapshot(title, meta, lines, customChords)
+        undoStack = undoStack.dropLast(1)
+        suppressNextHistoryPush = true
+        title = prev.title
+        meta = prev.meta
+        lines = prev.lines
+        customChords = prev.customChords
+        persist()
+    }
+
+    fun redo() {
+        val next = redoStack.lastOrNull() ?: return
+        undoStack = undoStack + EditorSnapshot(title, meta, lines, customChords)
+        redoStack = redoStack.dropLast(1)
+        suppressNextHistoryPush = true
+        title = next.title
+        meta = next.meta
+        lines = next.lines
+        customChords = next.customChords
+        persist()
     }
 
     fun updateLine(id: String, transform: (EditorLine) -> EditorLine) {
@@ -554,9 +722,18 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
         // bar — same "actions on top, title below with room to breathe"
         // rhythm Samsung Notes/Keep/Apple Notes all use, rather than
         // cramming the title into the same row as an action button flush
-        // against the top edge.
+        // against the top edge. statusBarsPadding() is load-bearing, not
+        // decorative: targetSdk 36 (Android 15+) enforces edge-to-edge with
+        // no opt-out, and this screen otherwise has zero WindowInsets
+        // handling, so without it Done draws under the status bar/battery
+        // icon on some devices — reported directly after live testing. The
+        // extra top padding beyond that inset is deliberate breathing room,
+        // not just the bare minimum to clear the icons.
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(start = 16.dp, top = 18.dp, end = 16.dp, bottom = 14.dp),
             horizontalArrangement = Arrangement.End,
         ) {
             TextButton(onClick = { finish() }) { Text("Done", fontWeight = FontWeight.Bold, color = ChordColor) }
@@ -579,8 +756,13 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
             modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = { copySongTextToClipboard(context, currentSong()) }) { Text("Export text", color = ChordColor) }
-            TextButton(onClick = { shareSongAsPdf(context, currentSong()) }) { Text("Export PDF", color = ChordColor) }
+            TextButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) {
+                Text("Undo", color = if (undoStack.isNotEmpty()) ChordColor else TextMuted)
+            }
+            TextButton(onClick = { redo() }, enabled = redoStack.isNotEmpty()) {
+                Text("Redo", color = if (redoStack.isNotEmpty()) ChordColor else TextMuted)
+            }
+            Spacer(Modifier.width(8.dp))
             TextButton(onClick = {
                 lines = lines.map { it.copy(chords = transposeChordsLine(it.chords, -1) ?: it.chords) }
                 persist()
@@ -596,6 +778,16 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
             TextButton(onClick = { fontScale = (fontScale + 0.1f).coerceAtMost(1.4f) }) {
                 Text("A+", color = TextMuted, fontWeight = FontWeight.Bold)
             }
+        }
+        // Export lives in its own row, deliberately separated from the
+        // editing-tool row above (undo/redo/transpose/font size) -- it's a
+        // one-off output action, not a repeated editing gesture.
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = { copySongTextToClipboard(context, currentSong()) }) { Text("Export text", color = ChordColor) }
+            TextButton(onClick = { shareSongAsPdf(context, currentSong()) }) { Text("Export PDF", color = ChordColor) }
         }
         HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = PaperLine, thickness = 1.dp)
         Spacer(Modifier.height(4.dp))
