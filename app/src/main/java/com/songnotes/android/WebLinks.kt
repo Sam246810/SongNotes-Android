@@ -27,11 +27,12 @@ const val WEB_FORGOT_PASSWORD_URL = "https://example.com/songnotes-forgot-passwo
  * it -- and Android links out to the web page rather than reimplementing the
  * delete flow natively, same rationale as [WEB_FORGOT_PASSWORD_URL] above.
  *
- * TODO before release: point this at the real deployed origin (web app is
- * going live on Vercel -- see that repo's README) and add the same final URL
- * to Play Console under Data safety -> Account deletion, which Play checks
- * independently of what the app links to. Placeholder domain reasoning is the
- * same as [WEB_FORGOT_PASSWORD_URL]: `example.com` is IANA-reserved, so this
- * can't accidentally collide with someone else's live site in the meantime.
+ * Live as of 2026-08-20 (see the web repo's docs/DEPLOYMENT.md: deployed on
+ * Vercel, custom domain `songnotes.cloud` connected via Namecheap DNS).
+ *
+ * TODO before release: this same URL still needs to be entered separately
+ * into Play Console under Data safety -> Account deletion -- Play checks
+ * that field independently of what the app links to; updating this constant
+ * doesn't populate it.
  */
-const val WEB_DELETE_ACCOUNT_URL = "https://example.com/delete-account"
+const val WEB_DELETE_ACCOUNT_URL = "https://www.songnotes.cloud/delete-account"

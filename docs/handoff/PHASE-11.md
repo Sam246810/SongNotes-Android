@@ -146,7 +146,12 @@ pre-submission blocker, separate from anything else in this phase.
 Most of these need the developer's own Play Console account,
 business/legal decisions, or physical hardware this session didn't have
 access to; the 16 KB alignment item at the end is pure code/build work
-and is being picked up in this same pass:
+and is being picked up in this same pass.
+
+**Update (2026-08-20): the developer's Play Console account is now
+verified**, so the account-access blocker on the bullets below is cleared —
+what's left on those is doing the actual submission work, not waiting on
+Google.
 
 - **Real release signing.** `release { signingConfig }` still points at
   the temporary debug-signing placeholder from
@@ -158,19 +163,19 @@ and is being picked up in this same pass:
   (`/delete-account` in the SongNotes web repo, commit `afa651c`) that
   Android links out to (`WebLinks.kt`'s `WEB_DELETE_ACCOUNT_URL`, surfaced
   as a "Delete account" link in `MainActivity.kt`'s `SyncHeader` when
-  signed in) — same link-out pattern as forgot-password. Still blocked on
-  two account-holder actions before this satisfies Play: (1) the web app
-  isn't deployed anywhere yet (`WEB_DELETE_ACCOUNT_URL` is still the
-  `example.com` placeholder — swap in the real Vercel URL once live, same
-  as the forgot-password link), and (2) Play Console's own Data safety →
-  Account deletion field needs that same final URL entered separately —
-  Play checks that field independently of what the app links to. See
-  `docs/DATA_SAFETY_FORM.md`.
+  signed in) — same link-out pattern as forgot-password. **Update
+  (2026-08-20):** the web app is live on Vercel with a custom domain (see
+  that repo's `docs/DEPLOYMENT.md`), and `WEB_DELETE_ACCOUNT_URL` now points
+  at `https://www.songnotes.cloud/delete-account`. One account-holder action
+  still remains: Play Console's own Data safety → Account deletion field
+  needs that same final URL entered separately — Play checks that field
+  independently of what the app links to. See `docs/DATA_SAFETY_FORM.md`.
 - **Hosting and submitting the privacy policy / Data Safety form.**
   Drafted; publishing the policy URL and filling out the live Play Console
-  form are account-holder actions.
-- **Internal testing track.** Play Console publishing action, needs the
-  developer's own account access.
+  form are account-holder actions — account is verified as of 2026-08-20,
+  so this is ready to do.
+- **Internal testing track.** Play Console publishing action — account is
+  verified as of 2026-08-20, so this is ready to do.
 - **Manual device matrix.** Every on-device verification this phase (and
   every phase before it) ran on one physical device, a Samsung Galaxy Z
   Fold. No second device was available to cross-check against.
