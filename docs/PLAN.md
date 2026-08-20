@@ -55,7 +55,7 @@ nothing. We build against 36 from day one and it never becomes an issue.
 ```
 :app                 Compose host, Hilt wiring, navigation
 :core:model          plain data classes, no Android deps
-:core:domain         PURE JVM — chords, transpose, lyricsImport, clipEngine,
+:core:domain         PURE JVM — chords, transpose, clipEngine,
                      dragMath, calibration math. Where the ported tests live.
 :core:data           Room + SQLCipher, supabase-kt, crypto, sync engine
 :core:audio          Kotlin facade + src/main/cpp (Oboe, mixer, DSP)

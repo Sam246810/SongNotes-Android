@@ -76,10 +76,11 @@ import com.songnotes.core.domain.chordsLineToAnchors
 import com.songnotes.core.domain.formatFretsForInput
 import com.songnotes.core.domain.lookupChord
 import com.songnotes.core.domain.parseFretsInput
-import com.songnotes.core.domain.parseLyricsText
 import com.songnotes.core.domain.tokenizeChordLine
 import com.songnotes.core.domain.transposeChordsLine
 import java.util.UUID
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -105,7 +106,12 @@ import kotlinx.coroutines.launch
  * fallback could hard-split *inside* a word — never acceptable, per
  * direct feedback after it happened. The new version always finds an
  * actual space to split on, searching forward past the target width if
- * necessary rather than ever breaking a word.
+ * necessary rather than ever breaking a word — [findSplitIndex] only
+ * reaches for a hard character-level cut once it's proven no space exists
+ * anywhere left in the run, e.g. a pasted wall of characters with no
+ * whitespace at all, where the alternative is the line silently
+ * overflowing off the edge of the screen forever rather than a real word
+ * getting mangled.
  *
  * The wire-format anchor model ([ChordAnchor]) stays exactly as
  * demoted-to-storage-detail as the second pass left it — nothing about
@@ -117,6 +123,9 @@ private val ChordColor = Color(0xFFB45309)
 private val LyricColor = Color(0xFF2A221B)
 private val TextMuted = Color(0xFF8A7663)
 private val PaperLine = Color(0xFFB45309).copy(alpha = 0.16f)
+
+/** How long a lyrics line must sit still before the width-triggered auto-wrap (or its reverse, auto-merge) runs — see [handleLyricsChange]. */
+private const val SPLIT_DEBOUNCE_MS = 180L
 
 private data class EditorLine(val id: String, val chords: String, val lyrics: String)
 private enum class Track { Chords, Lyrics }
@@ -132,6 +141,36 @@ private fun String.sliceSafe(start: Int, end: Int = length): String {
     val s = start.coerceIn(0, length)
     val e = end.coerceIn(s, length)
     return substring(s, e)
+}
+
+/**
+ * Undoes the soft keyboard's "double space -> period" auto-punctuation on
+ * the chords track, where a run of spaces is meaningful alignment against
+ * the lyrics below, not prose — per direct feedback after it kept firing
+ * mid-chord-entry and flinging the caret ahead of where the space was
+ * actually tapped. Detected generically (a single space in the old value
+ * became ". " in the new one, wherever in the string) rather than
+ * special-cased to end-of-line, so it also catches the substitution
+ * happening mid-line; a real, manually-typed period (e.g. the "N.C." no-
+ * chord annotation) never matches this shape and passes through untouched.
+ */
+private fun suppressDoubleSpacePeriod(old: TextFieldValue, new: TextFieldValue): TextFieldValue {
+    val oldText = old.text
+    val newText = new.text
+    if (newText.length != oldText.length + 1) return new
+
+    var prefix = 0
+    while (prefix < oldText.length && prefix < newText.length && oldText[prefix] == newText[prefix]) prefix++
+    val maxSuffix = minOf(oldText.length - prefix, newText.length - prefix)
+    var suffix = 0
+    while (suffix < maxSuffix && oldText[oldText.length - 1 - suffix] == newText[newText.length - 1 - suffix]) suffix++
+
+    val oldMiddle = oldText.substring(prefix, oldText.length - suffix)
+    val newMiddle = newText.substring(prefix, newText.length - suffix)
+    if (oldMiddle != " " || newMiddle != ". ") return new
+
+    val corrected = oldText.substring(0, prefix) + "  " + oldText.substring(oldText.length - suffix)
+    return TextFieldValue(corrected, TextRange(prefix + 2))
 }
 
 private fun splitLineAt(line: EditorLine, splitIndex: Int): Pair<EditorLine, EditorLine> {
@@ -153,10 +192,17 @@ private fun mergeWithPrevious(prev: EditorLine, curr: EditorLine): EditorLine {
 
 /**
  * Finds where to split [text] so it fits within [maxWidthPx] at [style],
- * always at a real space — never inside a word. Returns null if the text
- * already fits, or if there's truly no space anywhere to split on (one
- * unbroken run of characters longer than the available width, which is
- * left alone rather than mangled).
+ * preferring a real space over breaking mid-word — the earlier
+ * fixed-character-count heuristic's habit of hard-splitting *ordinary*
+ * words it had simply misjudged the width of was rejected outright per
+ * direct feedback, and that stands: any word a nearby space could resolve
+ * is never cut. This only reaches for a hard character-level cut as the
+ * last resort *after* [wrapLineByWidth] has proven no space exists
+ * anywhere in the run being measured — a pasted wall of characters (a long
+ * URL, mashed keys, no whitespace at all), not a real word a smarter split
+ * point would have saved. Leaving that run untouched doesn't avoid
+ * mangling a word; it just means the line silently overflows off the edge
+ * of the screen forever, which is worse.
  */
 private fun findSplitIndex(text: String, style: TextStyle, maxWidthPx: Int, measurer: TextMeasurer): Int? {
     if (maxWidthPx <= 0 || text.isEmpty()) return null
@@ -170,7 +216,53 @@ private fun findSplitIndex(text: String, style: TextStyle, maxWidthPx: Int, meas
     // so the whole word stays together, even if this line ends up a bit
     // wider than the target.
     val nextSpaceAfter = text.indexOf(' ', boundary)
-    return if (nextSpaceAfter > 0) nextSpaceAfter else null
+    if (nextSpaceAfter > 0) return nextSpaceAfter
+    // No space anywhere in this run, forward or back -- there is no word
+    // left to protect. Cut right at the measured boundary so the line
+    // makes progress instead of overflowing indefinitely; nudge off a
+    // surrogate-pair boundary (an emoji) so that doesn't get split in two.
+    if (boundary <= 0) return null // can't make forward progress at all
+    val cut = if (text[boundary].isLowSurrogate()) boundary - 1 else boundary
+    return if (cut > 0) cut else null
+}
+
+/**
+ * Repeatedly applies [findSplitIndex]/[splitLineAt] until every resulting
+ * piece fits within [maxWidthPx] — as opposed to a single split pass, which
+ * only shortens a too-long line once and leaves it still overflowing when
+ * it started out several multiples of the available width (the common case
+ * for a large paste, rather than a line that only just grew past the edge
+ * one keystroke at a time).
+ *
+ * [line]'s own id is reassigned to the LAST piece rather than the first.
+ * [splitLineAt] hands the incoming id to the earlier half and mints a
+ * fresh one for the tail on every pass, which is backwards for typing:
+ * the tail is where the caret actually is, so as someone keeps typing
+ * past the edge, every single threshold-crossing keystroke was spawning a
+ * brand-new composable + FocusRequester under their still-live cursor and
+ * reassigning focus to it. A keystroke that arrived before that focus
+ * transfer finished landed on the old, about-to-be-abandoned field instead
+ * — forking what they were typing across two rows, with the earlier one
+ * left orphaned ("just sits there") — reproduced directly by typing fast
+ * through a wrap boundary. Keeping the original id on the tail means the
+ * actively-focused field never actually changes identity while someone is
+ * mid-word; only the already-committed earlier piece(s) need a new one.
+ */
+private fun wrapLineByWidth(line: EditorLine, style: TextStyle, maxWidthPx: Int, measurer: TextMeasurer): List<EditorLine> {
+    val pieces = mutableListOf<EditorLine>()
+    var current = line
+    while (true) {
+        val splitIdx = findSplitIndex(current.lyrics, style, maxWidthPx, measurer)
+        if (splitIdx == null) {
+            pieces += current
+            break
+        }
+        val (first, second) = splitLineAt(current, splitIdx)
+        pieces += first
+        current = second
+    }
+    if (pieces.size <= 1) return pieces
+    return pieces.mapIndexed { i, p -> p.copy(id = if (i == pieces.lastIndex) line.id else UUID.randomUUID().toString()) }
 }
 
 @Composable
@@ -224,11 +316,14 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     // comment), and a rememberSaveable Saver for a whole song's `lines` list
     // risks Bundle's ~500KB TransactionTooLargeException on a long song for
     // no benefit over what the autosaver + lifecycle flush already guarantee.
-    var showImport by rememberSaveable { mutableStateOf(false) }
     var activeChordName by rememberSaveable { mutableStateOf<String?>(null) }
     var fontScale by rememberSaveable { mutableStateOf(1f) }
     var linesAreaWidthPx by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
+    // Per-line debounce jobs for the width-triggered auto-wrap -- see
+    // handleLyricsChange's doc comment for why this can't just run inline
+    // on every keystroke.
+    val splitJobs = remember { mutableMapOf<String, Job>() }
     val textMeasurer = rememberTextMeasurer()
 
     // Phase 13: guarantees nothing typed is lost on any exit path, not just
@@ -334,38 +429,119 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
         persist()
     }
 
-    fun handleAutoSplit(line: EditorLine, caretIndex: Int) {
-        val splitIdx = findSplitIndex(line.lyrics, lyricStyle, linesAreaWidthPx, textMeasurer) ?: return
-        val (first, second) = splitLineAt(line, splitIdx)
-        val idx = lines.indexOfFirst { it.id == line.id }
+    /**
+     * Re-checks [lineId]'s *current* lyrics (read fresh from `lines`, not a
+     * captured snapshot) against the available width and reflows if
+     * needed — called only after [SPLIT_DEBOUNCE_MS] of no further edits
+     * to this line, per [handleLyricsChange]'s doc comment. Two directions:
+     *
+     * - Grown past the edge: split forward into wrapped pieces, same as
+     *   before.
+     * - Shrunk by backspacing far enough that it would now fit back onto
+     *   the previous line: merge into it, undoing an earlier split the
+     *   same way it happened — a few keystrokes of backspacing snap two
+     *   lines back into one instead of leaving a now-short orphan line
+     *   sitting there until it's explicitly joined at the very start.
+     *
+     * These are mutually exclusive (a line can't simultaneously overflow
+     * on its own and also fit combined with the one above it), so one
+     * function handles both rather than two independent checks.
+     */
+    fun performReflowIfNeeded(lineId: String, caretIndex: Int) {
+        val idx = lines.indexOfFirst { it.id == lineId }
         if (idx == -1) return
-        lines = lines.toMutableList().apply {
-            set(idx, first)
-            add(idx + 1, second)
+        val curr = lines[idx]
+
+        if (idx > 0) {
+            val prev = lines[idx - 1]
+            // Keep curr's id on the merged result, not prev's -- same
+            // reasoning as wrapLineByWidth: curr is where the caret (and
+            // focus) already is, so the merge must not hand identity to a
+            // different, unfocused composable while backspacing continues.
+            val merged = mergeWithPrevious(prev, curr).copy(id = curr.id)
+            if (wrapLineByWidth(merged, lyricStyle, linesAreaWidthPx, textMeasurer).size <= 1) {
+                lines = lines.toMutableList().apply { removeAt(idx); set(idx - 1, merged) }
+                pendingFocus = PendingFocus(curr.id, Track.Lyrics, prev.lyrics.length + caretIndex)
+                persist()
+                return
+            }
         }
-        pendingFocus = PendingFocus(second.id, Track.Lyrics, (caretIndex - splitIdx).coerceAtLeast(0))
+
+        val produced = wrapLineByWidth(curr, lyricStyle, linesAreaWidthPx, textMeasurer)
+        if (produced.size <= 1) return // still fits as-is -- nothing to do
+
+        lines = lines.toMutableList().apply { removeAt(idx); addAll(idx, produced) }
+
+        var remaining = caretIndex
+        var chosen = produced.last()
+        var localCaret = chosen.lyrics.length
+        for (p in produced) {
+            if (remaining <= p.lyrics.length) {
+                chosen = p
+                localCaret = remaining.coerceAtLeast(0)
+                break
+            }
+            remaining -= p.lyrics.length
+        }
+        pendingFocus = PendingFocus(chosen.id, Track.Lyrics, localCaret)
         persist()
     }
 
-    if (showImport) {
-        ImportStep(
-            onCancel = { showImport = false },
-            onImport = { text ->
-                val parsed = parseLyricsText(text)
-                val importedLines = parsed.lines.map { l -> EditorLine(UUID.randomUUID().toString(), l.chords, l.lyrics) }
-                lines = importedLines.ifEmpty { listOf(EditorLine(UUID.randomUUID().toString(), "", "")) }
-                title = parsed.title ?: title
-                meta = SongMeta(
-                    bpm = parsed.meta["bpm"]?.toIntOrNull() ?: meta.bpm,
-                    key = parsed.meta["key"] ?: meta.key,
-                    tuning = parsed.meta["tuning"] ?: meta.tuning,
-                    capo = parsed.meta["capo"]?.toIntOrNull() ?: meta.capo,
-                )
-                persist()
-                showImport = false
-            },
-        )
-        return
+    /**
+     * Handles every edit to a line's lyrics, including a large paste — not
+     * just the character-at-a-time case a single width check used to
+     * assume. A paste can contain literal newlines (the lyrics field is
+     * `singleLine`, so those would otherwise sit inside one field and get
+     * visually swallowed rather than becoming separate lines) — handled
+     * immediately below, since a paste is a one-shot event.
+     *
+     * The far more common case — an ordinary line growing past the width
+     * one keystroke at a time — is deliberately NOT split inline here.
+     * [wrapLineByWidth] used to run on every keystroke, replacing the
+     * overflowing `EditorLine` with new pieces and moving focus to
+     * whichever one the caret landed in. Direct repro on a physical device
+     * (typing fast, not even a paste) showed why that's unsafe: Compose's
+     * recomposition and the lyrics field's own local `TextFieldValue` only
+     * catch up to a freshly-shortened `line.lyrics` on a later frame, so a
+     * keystroke that arrives before that catch-up lands on the field's
+     * still-stale (pre-split, longer) buffer instead — forking what was
+     * typed across an abandoned old row and a live new one. Debouncing the
+     * *reflow* (never the raw text update just below, which always applies
+     * immediately so nothing typed is ever lost) means the restructuring —
+     * splitting a line that grew past the edge, or, symmetrically,
+     * backspacing one back into the line above it once it fits again, see
+     * [performReflowIfNeeded] — only ever runs once typing has actually
+     * paused, when there's nothing left to race against it.
+     */
+    fun handleLyricsChange(line: EditorLine, updatedLyrics: String, caretIndex: Int) {
+        if (updatedLyrics.contains('\n')) {
+            splitJobs.remove(line.id)?.cancel()
+            val idx = lines.indexOfFirst { it.id == line.id }
+            if (idx == -1) return
+            val rawSegments = updatedLyrics.split('\n')
+            val produced = rawSegments.flatMapIndexed { i, seg ->
+                val base = if (i == 0) {
+                    EditorLine(line.id, alignChordsWithLyrics(line.chords, seg), seg)
+                } else {
+                    EditorLine(UUID.randomUUID().toString(), "", seg)
+                }
+                wrapLineByWidth(base, lyricStyle, linesAreaWidthPx, textMeasurer)
+            }
+            lines = lines.toMutableList().apply { removeAt(idx); addAll(idx, produced) }
+            // A multi-line paste lands the caret at the end of what was pasted.
+            pendingFocus = produced.last().let { PendingFocus(it.id, Track.Lyrics, it.lyrics.length) }
+            persist()
+            return
+        }
+
+        updateLine(line.id) { it.copy(lyrics = updatedLyrics) }
+
+        splitJobs[line.id]?.cancel()
+        splitJobs[line.id] = scope.launch {
+            delay(SPLIT_DEBOUNCE_MS)
+            performReflowIfNeeded(line.id, caretIndex)
+            splitJobs.remove(line.id)
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -403,7 +579,6 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
             modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = { showImport = true }) { Text("Import text", color = ChordColor) }
             TextButton(onClick = { copySongTextToClipboard(context, currentSong()) }) { Text("Export text", color = ChordColor) }
             TextButton(onClick = { shareSongAsPdf(context, currentSong()) }) { Text("Export PDF", color = ChordColor) }
             TextButton(onClick = {
@@ -441,10 +616,7 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
                     pendingFocus = pendingFocus,
                     onConsumedPendingFocus = { pendingFocus = null },
                     onChordsChange = { updated -> updateLine(line.id) { it.copy(chords = updated) } },
-                    onLyricsChange = { updated, caret ->
-                        updateLine(line.id) { it.copy(lyrics = updated) }
-                        handleAutoSplit(line.copy(lyrics = updated), caret)
-                    },
+                    onLyricsChange = { updated, caret -> handleLyricsChange(line, updated, caret) },
                     onEnter = { handleEnterFromLyrics(line.id) },
                     onBackspaceMerge = { handleMergeWithPrevious(line.id) },
                     onBackspaceDeleteEmpty = { handleDeleteLine(line.id) },
@@ -549,7 +721,10 @@ private fun LineRow(
         if (chordEditMode) {
             BasicTextField(
                 value = chordsField,
-                onValueChange = { chordsField = it; onChordsChange(it.text) },
+                onValueChange = { candidate ->
+                    chordsField = suppressDoubleSpacePeriod(chordsField, candidate)
+                    onChordsChange(chordsField.text)
+                },
                 textStyle = chordStyle.copy(color = ChordColor),
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next, autoCorrectEnabled = false),
@@ -830,38 +1005,6 @@ private fun ChordVoicingPanel(
                     Text(if (isCustom) "Edit voicing" else "Suggest a different voicing", color = ChordColor)
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun ImportStep(onCancel: () -> Unit, onImport: (String) -> Unit) {
-    var text by remember { mutableStateOf("") }
-    Column(modifier = Modifier.fillMaxSize().background(ParchmentBg).padding(24.dp)) {
-        Text("Import lyrics + chords", style = MaterialTheme.typography.headlineSmall, color = LyricColor)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Paste a plain-text chord sheet — chords on their own line above the lyrics they " +
-                "belong to, or bracketed like [G]. Replaces this song's lines.",
-            style = MaterialTheme.typography.bodySmall,
-            color = TextMuted,
-        )
-        Spacer(Modifier.height(12.dp))
-        BasicTextField(
-            value = text,
-            onValueChange = { text = it },
-            textStyle = baseLyricTextStyle,
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .background(Color.White, RoundedCornerShape(8.dp))
-                .padding(12.dp),
-        )
-        Spacer(Modifier.height(12.dp))
-        Row {
-            TextButton(onClick = onCancel) { Text("Cancel", color = TextMuted) }
-            Spacer(Modifier.width(12.dp))
-            TextButton(onClick = { onImport(text) }) { Text("Import", color = ChordColor, fontWeight = FontWeight.Bold) }
         }
     }
 }
