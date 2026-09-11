@@ -221,6 +221,61 @@ class SupabaseAuthRepository(private val client: SupabaseClient = SupabaseClient
         KeySession.establish(dek, rewrapped.dekId)
     }
 
+    /**
+     * Mints a brand-new recovery code for the CURRENT DEK and replaces only the
+     * recovery wrap -- the Android half of the web app's
+     * `accountRecovery.regenerateRecoveryCode` (AccountPage.jsx). The passphrase
+     * wrap, `dekId` and verifier are untouched and the DEK itself never changes,
+     * so no song is re-encrypted and signing in with the account password keeps
+     * working exactly as before.
+     *
+     * For the very common case of someone who never saved the code they were
+     * shown once at sign-up. Requires an unlocked [KeySession]: this rewraps the
+     * live DEK rather than deriving from the OLD recovery code, which is the
+     * whole point -- it has to work for someone who has lost that code.
+     *
+     * @return the new code, which the caller MUST show; there is no second chance.
+     */
+    suspend fun regenerateRecoveryCode(): String {
+        val userId = requireNotNull(currentUserId) { "Must be signed in to regenerate a recovery code." }
+        val dek = requireNotNull(KeySession.current()) { "Unlock your account before regenerating a recovery code." }
+        val existingRow = fetchUserKeysRow(userId) ?: error("No account encryption key found for this account yet.")
+        val envelope = EnvelopeV2.fromJson(JSONObject(existingRow.envelope.toString()))
+
+        val (newEnvelope, recoveryCode) = regenerateRecoveryWrap(envelope, dek)
+        updateUserKeysWithRevCheck(userId, newEnvelope, existingRow.envelope_rev)
+        return recoveryCode
+    }
+
+    /**
+     * Changes the account password for a user who is signed in and unlocked --
+     * the Android half of `accountRecovery.changePassword`. Distinct from
+     * [recoverWithRecoveryCode], which is the same rewrap reached via a recovery
+     * code by someone who has *forgotten* the password.
+     *
+     * Ordering is the same as the recovery path and matters for the same reason:
+     * set the Supabase auth password first, then rewrap and persist. A failure
+     * between the two leaves auth on the new password and the envelope on the
+     * old one -- recoverable, because signing in with the new password then
+     * raises [EnvelopeKeyMismatchException] and routes to recovery-code entry.
+     * Rewrapping first and failing to set the password would be the unrecoverable
+     * order: an envelope keyed to a password that was never actually adopted.
+     *
+     * The DEK is unchanged throughout, so no song is re-encrypted and the
+     * recovery code keeps working.
+     */
+    suspend fun changePassword(newPassword: String) {
+        val userId = requireNotNull(currentUserId) { "Must be signed in to change your password." }
+        val dek = requireNotNull(KeySession.current()) { "Unlock your account before changing your password." }
+        val existingRow = fetchUserKeysRow(userId) ?: error("No account encryption key found for this account yet.")
+        val envelope = EnvelopeV2.fromJson(JSONObject(existingRow.envelope.toString()))
+
+        client.auth.updateUser { password = newPassword }
+
+        val rewrapped = rewrapWithNewPassphrase(envelope, dek, newPassword)
+        updateUserKeysWithRevCheck(userId, rewrapped, existingRow.envelope_rev)
+    }
+
     suspend fun signOut() {
         client.auth.signOut()
         KeySession.clear()
