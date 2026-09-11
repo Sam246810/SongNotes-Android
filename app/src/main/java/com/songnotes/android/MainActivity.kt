@@ -62,7 +62,6 @@ private sealed interface Screen {
     data object Auth : Screen
     data object Account : Screen
     data object Unlock : Screen
-    data object Piano : Screen
     data object Diagnostics : Screen
     data object Wizard : Screen
     data object Manual : Screen
@@ -121,7 +120,7 @@ class MainActivity : FragmentActivity() {
 
                             // The backstop for exits Android gives no reliable hook
                             // for (home button, recents swipe -- only Back is
-                            // interceptable at all). SyncBanner below is the
+                            // interceptable at all). SyncStatusInline below is the
                             // primary, always-visible signal; this only fires when
                             // there's actually something to warn about.
                             BackHandler(enabled = status.enabled && status.unsyncedTotal > 0) {
@@ -138,7 +137,7 @@ class MainActivity : FragmentActivity() {
                             }
 
                             // Shared by SyncHeader's own sign-in button and the
-                            // SyncBanner rendered inside SongListScreen below --
+                            // SyncStatusInline rendered inside SongListScreen below --
                             // SyncController.gate() decides where a Sync press
                             // should route (see its own doc comment), and only
                             // MainActivity holds the `screen` navigation state
@@ -188,7 +187,6 @@ class MainActivity : FragmentActivity() {
                                     onSyncClick = onSyncClick,
                                     onSignInClick = onSignInClick,
                                     onOpenSong = { id -> screen = Screen.SongEditor(id) },
-                                    onOpenPiano = { screen = Screen.Piano },
                                     modifier = Modifier.weight(1f),
                                 )
                             }
@@ -237,10 +235,6 @@ class MainActivity : FragmentActivity() {
                         Screen.TapAlong -> {
                             BackHandler { screen = Screen.Diagnostics }
                             TapAlongCalibrationScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
-                        }
-                        Screen.Piano -> {
-                            BackHandler { screen = Screen.Songs }
-                            PianoScreen(engine = audioEngine, onDone = { screen = Screen.Songs })
                         }
                         // Debug-only: reachable exclusively via the
                         // BuildConfig.DEBUG-gated button above, never from a
@@ -339,11 +333,14 @@ private fun SyncHeader(
     // handling, so its first row drew under the status bar. That was latent
     // while "Not signed in" fitted on one line and became visible the moment
     // this row gained a third child -- found on-device, not by reading.
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .statusBarsPadding()
             .padding(horizontal = 24.dp, vertical = 16.dp),
+    ) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -365,26 +362,10 @@ private fun SyncHeader(
                 )
                 Text(
                     authRepo.currentUserEmail.orEmpty(),
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.bodyMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                // Google Play's Account Deletion policy requires a reachable
-                // deletion path beyond sign-out; this links out to the web
-                // app's own delete flow rather than reimplementing it here
-                // (see WebLinks.kt's WEB_DELETE_ACCOUNT_URL doc comment).
-                Row {
-                    // Recovery-code regeneration and password change, both of
-                    // which the web app has had all along -- see AccountScreen.
-                    TextButton(onClick = onAccountClick) {
-                        Text("Account", style = MaterialTheme.typography.labelSmall)
-                    }
-                    TextButton(onClick = {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(WEB_DELETE_ACCOUNT_URL)))
-                    }) {
-                        Text("Delete account", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
             } else {
                 Text(
                     "Not signed in",
@@ -393,34 +374,64 @@ private fun SyncHeader(
                 )
             }
         }
+        Button(onClick = {
+            if (authRepo.isSignedIn) showSignOutDialog = true else onSignInClick()
+        }) {
+            Text(if (authRepo.isSignedIn) "Sign out" else "Enable sync")
+        }
+    }
+
+    // Their own full-width row rather than stacked inside the identity
+    // column above. In that column they had only the width left over after
+    // the theme icon and Sign out had taken theirs, which was narrow enough
+    // to wrap "Delete account" onto two lines -- and a wrapped destructive
+    // action sitting under a truncated email is what made this header read
+    // as cluttered. Down here they get the full width and stay on one line.
+    //
+    // Google Play's Account Deletion policy requires a reachable deletion
+    // path beyond sign-out; this links out to the web app's own delete flow
+    // rather than reimplementing it (see WebLinks.kt's WEB_DELETE_ACCOUNT_URL).
+    // Always rendered, even signed out, because the theme toggle lives here
+    // and has to stay reachable either way -- SpaceBetween then puts the
+    // account links left and the toggle right, and still right-aligns the
+    // toggle when the links are absent and the first child is empty.
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            // Cycles system -> light -> dark. A three-state cycle rather than a
-            // two-state switch because "follow the device" is a real, distinct
-            // choice and the default -- a plain light/dark toggle would make it
-            // unreachable once touched.
-            //
-            // An IconButton, not a TextButton reading "Theme: system": this Row
-            // lays out its non-weighted children at natural width FIRST and
-            // gives the remainder to the account Column, so every pixel spent
-            // here is taken from the email/status text. A ~120px label was
-            // enough to wrap "Not signed in" onto two lines and push it into
-            // the status bar. The icon carries the same state in a fixed,
-            // predictable width.
-            IconButton(onClick = onCycleTheme) {
-                Icon(
-                    imageVector = when (themeMode) {
-                        ThemeMode.SYSTEM -> Icons.Filled.BrightnessAuto
-                        ThemeMode.LIGHT -> Icons.Filled.LightMode
-                        ThemeMode.DARK -> Icons.Filled.DarkMode
-                    },
-                    contentDescription = themeMode.label,
-                )
-            }
-            Button(onClick = {
-                if (authRepo.isSignedIn) showSignOutDialog = true else onSignInClick()
-            }) {
-                Text(if (authRepo.isSignedIn) "Sign out" else "Enable sync")
+            if (authRepo.isSignedIn) {
+                // Recovery-code regeneration and password change, both of
+                // which the web app has had all along -- see AccountScreen.
+                TextButton(onClick = onAccountClick) {
+                    Text("Account", style = MaterialTheme.typography.labelSmall)
+                }
+                TextButton(onClick = {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(WEB_DELETE_ACCOUNT_URL)))
+                }) {
+                    Text("Delete account", style = MaterialTheme.typography.labelSmall)
+                }
             }
         }
+        // Cycles system -> light -> dark. Three states rather than a two-state
+        // switch because "follow the device" is a real, distinct choice and the
+        // default -- a plain toggle would make it unreachable once touched.
+        //
+        // Down here rather than beside Sign out: up there it was a non-weighted
+        // child taking its width before the identity column got any, so every
+        // pixel it spent came out of the email, which ellipsised a normal
+        // address. On this row nothing competes with it.
+        IconButton(onClick = onCycleTheme) {
+            Icon(
+                imageVector = when (themeMode) {
+                    ThemeMode.SYSTEM -> Icons.Filled.BrightnessAuto
+                    ThemeMode.LIGHT -> Icons.Filled.LightMode
+                    ThemeMode.DARK -> Icons.Filled.DarkMode
+                },
+                contentDescription = themeMode.label,
+            )
+        }
+    }
     }
 }

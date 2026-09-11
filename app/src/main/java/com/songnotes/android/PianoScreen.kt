@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -32,6 +33,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.songnotes.core.audio.AudioEngine
 
@@ -59,13 +62,18 @@ fun PianoScreen(engine: AudioEngine, onDone: () -> Unit) {
         isLoading = false
     }
 
-    Column(modifier = Modifier.fillMaxSize().background(Color(0xFF1B1B1F))) {
+    Column(modifier = Modifier.fillMaxSize().background(Color(0xFF1B1B1F)).statusBarsPadding()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             TextButton(onClick = onDone) { Text("Done", color = Color(0xFFB45309)) }
+            // weight(1f) + ellipsis, exactly the fix SyncHeader documents for
+            // the same failure: a Row lays out its non-weighted children at
+            // natural width FIRST, so an unconstrained title here took the
+            // width the octave buttons needed and left them a sliver narrow
+            // enough to wrap "Oct +" one character per line. Found on-device.
             Text(
                 when {
                     isLoading -> "Loading piano samples…"
@@ -74,6 +82,10 @@ fun PianoScreen(engine: AudioEngine, onDone: () -> Unit) {
                 },
                 color = Color.White,
                 style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
             )
             Row {
                 TextButton(onClick = { octave = (octave - 1).coerceIn(0, 6) }) { Text("Oct −", color = Color.White) }

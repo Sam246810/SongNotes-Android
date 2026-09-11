@@ -42,7 +42,7 @@ fun DeleteSongDialog(title: String, isOnAccount: Boolean, onConfirm: () -> Unit,
  * Phase 13: the back-press-from-home warning when sync is enabled and there
  * are unsynced changes -- the backstop for the fact Android gives no reliable
  * hook for a home-button or recents-swipe exit (only Back), so this can't be
- * the ONLY signal; `SyncBanner` is the persistent one.
+ * the ONLY signal; `SyncStatusInline` is the persistent one.
  */
 @Composable
 fun UnsyncedExitDialog(unsyncedCount: Int, lastSyncLabel: String, onSyncNow: () -> Unit, onLeaveAnyway: () -> Unit, onDismiss: () -> Unit) {

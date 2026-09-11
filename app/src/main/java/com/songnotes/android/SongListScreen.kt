@@ -8,15 +8,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -54,7 +51,7 @@ import kotlinx.coroutines.withContext
  *
  * Phase 13: local-first, opt-in manual sync -- home screen for a local-only
  * user works identically to before (no account, no network, ever). When
- * sync is enabled, [SyncBanner] shows unsynced state and delete goes through
+ * sync is enabled, [SyncStatusInline] shows unsynced state and delete goes through
  * [DeleteSongDialog] with copy that depends on whether a song has ever
  * reached the account ([SongListItem.isOnAccount]).
  */
@@ -64,7 +61,6 @@ fun SongListScreen(
     onSyncClick: () -> Unit,
     onSignInClick: () -> Unit,
     onOpenSong: (songId: String) -> Unit,
-    onOpenPiano: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -143,19 +139,26 @@ fun SongListScreen(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        SyncBanner(status = status, onSyncClick = onSyncClick, onSignInClick = onSignInClick)
         Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+            // Sync state rides on this row rather than in a full-width band
+            // above the list. The band cost a large slice of vertical space
+            // and cut the screen in half for one short line that usually says
+            // there is nothing to do; here it sits on the row the eye already
+            // lands on. SyncStatusInline right-aligns its own contents and
+            // renders nothing at all when sync is off, in which case this
+            // weighted slot just acts as the spacer that keeps Piano right.
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("Songs", style = MaterialTheme.typography.headlineSmall)
-                Row {
-                    IconButton(onClick = onOpenPiano) {
-                        Icon(Icons.Filled.Piano, contentDescription = "Piano")
-                    }
-                }
+                Spacer(Modifier.width(12.dp))
+                SyncStatusInline(
+                    status = status,
+                    onSyncClick = onSyncClick,
+                    onSignInClick = onSignInClick,
+                    modifier = Modifier.weight(1f),
+                )
             }
             Spacer(Modifier.height(16.dp))
             Button(onClick = ::createSong, modifier = Modifier.fillMaxWidth()) {

@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -28,7 +29,7 @@ import androidx.compose.ui.unit.dp
  */
 @Composable
 fun SyncOptInExplainer(onAcknowledge: () -> Unit, onCancel: () -> Unit) {
-    Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+    Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
         Text("Before you sync", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(16.dp))
         Text(
@@ -67,7 +68,7 @@ fun SyncOptInExplainer(onAcknowledge: () -> Unit, onCancel: () -> Unit) {
  */
 @Composable
 fun ManualSyncNotice(onContinue: () -> Unit) {
-    Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+    Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
         Text("One more thing", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(16.dp))
         Text(

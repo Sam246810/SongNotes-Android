@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -73,7 +74,7 @@ fun AccountScreen(onDone: () -> Unit) {
     // the same screenshot protection -- see SecureScreen.
     if (newRecoveryCode != null) {
         SecureScreen()
-        Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
             Text("Your new recovery code", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text(
@@ -91,7 +92,7 @@ fun AccountScreen(onDone: () -> Unit) {
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
+        modifier = Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(24.dp),
     ) {
         Text("Account", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(4.dp))
