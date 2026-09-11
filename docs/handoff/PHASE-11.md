@@ -250,8 +250,19 @@ Google.
     `libsqlcipher.so` as "now 16 KB-aligned but still listed in this
     task's allowlist", and it was removed on that evidence. The task now
     passes with `knownMisaligned` empty, and a signed release build
-    (R8 on) was produced and confirmed to contain the library. **Still
-    needs an on-device check before release:** that an existing,
-    pre-migration `songs.db` opens normally under the new artifact. The
-    on-disk format is unchanged across this switch, so it is expected to,
-    but that has not been exercised against a real device database here.
+    (R8 on) was produced and confirmed to contain the library.
+    **Update (2026-09-11): the on-device upgrade check is now done too.**
+    A debug build of the pre-migration commit was installed under a
+    throwaway `applicationIdSuffix` (so the real app's data was never
+    involved), a song was written through the UI, and its `songs.db`
+    fingerprinted. The post-migration build was then installed *over it*
+    as an update and launched. Results: the database and `db_key.wrapped`
+    were byte-identical (md5) to what 4.5.4 had written, both the title
+    and the lyric line read back correctly, no `SQLiteException` or
+    "file is not a database" appeared in logcat, and a song written
+    afterwards by the new artifact survived a force-stop and relaunch
+    alongside the old one. `db_key.wrapped` was unchanged throughout,
+    which is the specific evidence that the new artifact genuinely
+    decrypted the existing file rather than the key-loss path firing and
+    recreating it. The two builds were also confirmed to differ as
+    expected: `libsqlcipher.so` `p_align` 0x1000 before, 0x4000 after.
