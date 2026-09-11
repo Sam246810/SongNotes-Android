@@ -148,8 +148,8 @@ class SupabaseAuthRepository(private val client: SupabaseClient = SupabaseClient
             // Wrong password would already have failed signInWith(Email) above, so
             // this means the stored envelope doesn't match the current password.
             throw EnvelopeKeyMismatchException(
-                "Signed in, but your saved encryption key doesn't match this password " +
-                    "-- likely because it was changed since encryption was set up."
+                "Your password was changed somewhere else, so your songs still need " +
+                    "unlocking with your recovery code."
             )
         }
         KeySession.establish(dek, envelope.dekId)

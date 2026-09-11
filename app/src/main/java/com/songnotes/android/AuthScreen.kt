@@ -1,5 +1,8 @@
 package com.songnotes.android
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
@@ -10,7 +13,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -56,6 +61,9 @@ import kotlinx.coroutines.launch
 @Composable
 fun AuthScreen(onDone: () -> Unit) {
     val context = LocalContext.current
+    val clipboard = remember(context) {
+        context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    }
     val authRepo = remember { SupabaseAuthRepository() }
     val syncController = remember { SyncController(context) }
     val syncPrefs = remember { SyncPreferences(context) }
@@ -71,6 +79,7 @@ fun AuthScreen(onDone: () -> Unit) {
     // password (EnvelopeKeyMismatchException) -- routes to recovery-code entry
     // instead of just showing a raw error with no way forward.
     var showRecoveryUnlock by remember { mutableStateOf(false) }
+    var showForgotPasswordNotice by remember { mutableStateOf(false) }
     // Set when signUp() returns null -- this Supabase project requires email
     // confirmation before granting a session, so there's no encryption key to
     // show yet (see signUp's doc comment). Confirmed live against the real
@@ -153,6 +162,31 @@ fun AuthScreen(onDone: () -> Unit) {
         return
     }
 
+    if (showForgotPasswordNotice) {
+        AlertDialog(
+            onDismissRequest = { showForgotPasswordNotice = false },
+            title = { Text("Resetting your password") },
+            text = {
+                Text(
+                    "This opens the SongNotes website, because resetting a password needs a " +
+                        "link emailed to you. Have your recovery code ready -- the page asks " +
+                        "for it along with your new password, and that is what keeps your songs " +
+                        "readable. If you have lost the code as well, that page can reset your " +
+                        "account instead, which does erase the songs stored on your account.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showForgotPasswordNotice = false
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(WEB_FORGOT_PASSWORD_URL)))
+                }) { Text("Continue to website") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showForgotPasswordNotice = false }) { Text("Cancel") }
+            },
+        )
+    }
+
     if (showRecoveryUnlock) {
         RecoveryUnlockScreen(
             newPassword = password,
@@ -173,7 +207,20 @@ fun AuthScreen(onDone: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
             )
             Spacer(Modifier.height(24.dp))
-            OutlinedButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text("OK") }
+            // Returns to the SIGN-IN form rather than the song list. After
+            // confirming by email the next step is always signing in, and
+            // dropping the user home meant finding the button labelled
+            // "Enable sync" -- which by then means "sign in", and reads as
+            // neither.
+            Button(
+                onClick = {
+                    needsEmailConfirmation = false
+                    isSignUp = false
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("I've confirmed — sign in") }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text("Later") }
         }
         return
     }
@@ -187,9 +234,13 @@ fun AuthScreen(onDone: () -> Unit) {
     // sign-in for an account that never had one -- see signIn's doc comment) --
     // the user must save it now, there's no way to see it again later.
     if (recoveryCode != null) {
-        // The one screen in this app that genuinely warrants it -- see
-        // SecureScreen's doc comment for why this isn't Activity-wide.
-        SecureScreen()
+        // FLAG_SECURE deliberately NOT applied here any more. It did keep the
+        // code out of the recents thumbnail, but it also blocked the single
+        // most natural way to save a code shown exactly once -- screenshotting
+        // it -- while the screen offered no copy action either. Between "hard
+        // to leak" and "possible to keep at all", a recovery code nobody saved
+        // is the worse failure: it is the only way back into an account.
+        // Copy-to-clipboard below is the other half of making it savable.
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
             Text("Save your recovery code", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
@@ -200,6 +251,15 @@ fun AuthScreen(onDone: () -> Unit) {
             )
             Spacer(Modifier.height(16.dp))
             Text(recoveryCode!!, style = MaterialTheme.typography.headlineMedium)
+            Spacer(Modifier.height(12.dp))
+            var copied by remember { mutableStateOf(false) }
+            OutlinedButton(
+                onClick = {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("SongNotes recovery code", recoveryCode!!))
+                    copied = true
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (copied) "Copied" else "Copy code") }
             Spacer(Modifier.height(24.dp))
             Button(
                 onClick = {
@@ -279,7 +339,16 @@ fun AuthScreen(onDone: () -> Unit) {
             },
         ) {
             if (isLoading) {
-                CircularProgressIndicator(modifier = Modifier.height(20.dp))
+                CircularProgressIndicator(
+                    // size(), not height(): height() alone leaves the indicator at its
+                    // default 40.dp WIDTH, so a 40.dp circle gets squeezed into a 20.dp
+                    // box and draws clipped. Colour is explicit for a related reason --
+                    // inside a filled Button the content colour is onPrimary, but the
+                    // indicator defaults to primary, i.e. the button's own fill.
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
             } else {
                 Text(if (isSignUp) "Create account" else "Sign in")
             }
@@ -309,9 +378,13 @@ fun AuthScreen(onDone: () -> Unit) {
             Text(if (isSignUp) "Already have an account? Sign in" else "Need an account? Sign up")
         }
         if (!isSignUp) {
-            TextButton(onClick = {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(WEB_FORGOT_PASSWORD_URL)))
-            }) {
+            // Explains the handoff rather than dropping the user into a
+            // browser with no warning. Resetting deliberately happens on the
+            // web: that page takes the new password AND the recovery code in
+            // one step, and is the only place offering rotateAndPurge for
+            // someone who lost the code too -- neither exists on Android, so
+            // linking out is strictly more capable than reimplementing it.
+            TextButton(onClick = { showForgotPasswordNotice = true }) {
                 Text("Forgot your password?")
             }
         }
