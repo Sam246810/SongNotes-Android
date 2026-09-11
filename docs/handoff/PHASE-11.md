@@ -153,11 +153,21 @@ verified**, so the account-access blocker on the bullets below is cleared —
 what's left on those is doing the actual submission work, not waiting on
 Google.
 
-- **Real release signing.** `release { signingConfig }` still points at
-  the temporary debug-signing placeholder from
-  `docs/handoff/PHASE-11-prep-navigation.md`, put there only so a
-  release-configured build could be installed and verified on-device at
-  all. A real signing key/config is still needed before any Play upload.
+- **Real release signing.** ~~`release { signingConfig }` still points at
+  the temporary debug-signing placeholder~~ **Update (2026-08-27):** the
+  debug-keystore placeholder is gone. `app/build.gradle.kts` now builds a
+  real `release` signing config from `release.storeFile` /
+  `release.storePassword` / `release.keyAlias` / `release.keyPassword` in
+  the gitignored `local.properties` (or the matching
+  `SONGNOTES_RELEASE_*` environment variables for CI), documented in
+  `local.properties.example`. When those are absent, `assembleRelease`
+  and `bundleRelease` now **fail** with the `keytool` command and the
+  exact property names, rather than quietly emitting an unsigned APK.
+  **You still need to generate the keystore yourself** — it must never
+  live in this repo. Note it is an *upload* key, not the app signing key:
+  new apps ship as AAB and are therefore enrolled in Play App Signing,
+  where Google holds the signing key and a lost upload key can be reset
+  through Play support. Back it up regardless.
 - **Account deletion feature.** ~~Surfaced above — needs actual
   implementation~~ **Update (2026-08-15):** implemented as a web page
   (`/delete-account` in the SongNotes web repo, commit `afa651c`) that

@@ -10,3 +10,24 @@ sdk.dir=/path/to/Android/sdk
 # own gitignored-local-file convention.
 supabase.url=https://your-project.supabase.co
 supabase.anonKey=your-anon-key
+
+# Release signing. Only needed to build a release APK/AAB -- debug builds work
+# without any of this. The release build FAILS with instructions rather than
+# silently producing an unsigned artifact if these are missing -- see the
+# assembleRelease/bundleRelease check in app/build.gradle.kts.
+#
+# Generate the keystore once, and keep it outside this repo, backed up. Under
+# Play App Signing (automatic for new AAB-based apps) this is an UPLOAD key, not
+# the app signing key Google holds -- so a loss is recoverable via a Play support
+# reset rather than permanent. Back it up anyway; a reset is not a click.
+#
+#   keytool -genkeypair -v -keystore songnotes-release.jks \
+#     -alias songnotes -keyalg RSA -keysize 4096 -validity 10000
+#
+# storeFile is resolved relative to the repo root. CI can supply the same four
+# values as SONGNOTES_RELEASE_STORE_FILE / SONGNOTES_RELEASE_STORE_PASSWORD /
+# SONGNOTES_RELEASE_KEY_ALIAS / SONGNOTES_RELEASE_KEY_PASSWORD instead.
+release.storeFile=../songnotes-release.jks
+release.storePassword=your-keystore-password
+release.keyAlias=songnotes
+release.keyPassword=your-key-password
