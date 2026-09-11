@@ -1,11 +1,15 @@
 package com.songnotes.android
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -24,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -69,11 +74,15 @@ fun AccountScreen(onDone: () -> Unit) {
     // to land in, not an error -- say what to do about it rather than showing
     // two permanently broken forms.
     val unlocked = KeySession.isUnlocked()
+    val context = LocalContext.current
+    val clipboard = remember(context) {
+        context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    }
 
-    // A freshly minted code is shown exactly once, same as at sign-up, and gets
-    // the same screenshot protection -- see SecureScreen.
+    // Shown exactly once, same as at sign-up -- and, same as at sign-up, NOT
+    // screenshot-blocked. A code nobody managed to save is worse than one
+    // sitting in a recents thumbnail; it is the only way back into an account.
     if (newRecoveryCode != null) {
-        SecureScreen()
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
             Text("Your new recovery code", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
@@ -83,6 +92,15 @@ fun AccountScreen(onDone: () -> Unit) {
             )
             Spacer(Modifier.height(16.dp))
             Text(newRecoveryCode!!, style = MaterialTheme.typography.headlineMedium)
+            Spacer(Modifier.height(12.dp))
+            var copied by remember { mutableStateOf(false) }
+            OutlinedButton(
+                onClick = {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("SongNotes recovery code", newRecoveryCode!!))
+                    copied = true
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (copied) "Copied" else "Copy code") }
             Spacer(Modifier.height(24.dp))
             Button(onClick = { newRecoveryCode = null }, modifier = Modifier.fillMaxWidth()) {
                 Text("I've saved it")
@@ -121,9 +139,17 @@ fun AccountScreen(onDone: () -> Unit) {
         Text("Recovery code", style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(8.dp))
         Text(
+            // The "make sure you still know your password" half is not padding.
+            // Regenerating leaves the passphrase wrap untouched, so afterwards
+            // the only two ways into the account are a password and a code that
+            // did not exist a moment ago. The DEK is memory-only (see
+            // KeySession), so someone who regenerates without saving the new
+            // code and cannot recall their password is locked out for good as
+            // soon as the process dies.
             "Generates a new code and invalidates the old one. Your songs aren't re-encrypted and " +
                 "your password keeps working — useful if you never saved the code you were shown " +
-                "when you signed up.",
+                "when you signed up. Save the new code straight away, and make sure you still " +
+                "know your password: they are the only two ways into your account.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -145,7 +171,21 @@ fun AccountScreen(onDone: () -> Unit) {
             },
             modifier = Modifier.fillMaxWidth(),
         ) {
-            if (regenerating) CircularProgressIndicator(modifier = Modifier.height(20.dp)) else Text("Generate a new recovery code")
+            if (regenerating) {
+            CircularProgressIndicator(
+                // size(), not height(): height() alone left the indicator at
+                // its default 40.dp WIDTH, so a 40.dp circle was squeezed into
+                // a 20.dp-tall box and drew clipped top and bottom. Colour is
+                // explicit for the same class of reason -- inside a filled
+                // Button the content colour is onPrimary, but the indicator
+                // defaults to primary, i.e. the button's own fill.
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onPrimary,
+            )
+        } else {
+            Text("Generate a new recovery code")
+        }
         }
         regenerateError?.let {
             Spacer(Modifier.height(8.dp))
@@ -211,7 +251,21 @@ fun AccountScreen(onDone: () -> Unit) {
             },
             modifier = Modifier.fillMaxWidth(),
         ) {
-            if (changingPassword) CircularProgressIndicator(modifier = Modifier.height(20.dp)) else Text("Change password")
+            if (changingPassword) {
+            CircularProgressIndicator(
+                // size(), not height(): height() alone left the indicator at
+                // its default 40.dp WIDTH, so a 40.dp circle was squeezed into
+                // a 20.dp-tall box and drew clipped top and bottom. Colour is
+                // explicit for the same class of reason -- inside a filled
+                // Button the content colour is onPrimary, but the indicator
+                // defaults to primary, i.e. the button's own fill.
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onPrimary,
+            )
+        } else {
+            Text("Change password")
+        }
         }
         passwordError?.let {
             Spacer(Modifier.height(8.dp))

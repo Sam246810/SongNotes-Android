@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -58,9 +59,14 @@ fun RecoveryUnlockScreen(newPassword: String, onDone: () -> Unit, onCancel: () -
         Text("Recover your account", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(8.dp))
         Text(
-            "You're signed in, but your saved encryption key doesn't match this password. " +
-                "Enter your recovery code (shown once when you signed up) to get back every " +
-                "encrypted song under the original key -- nothing is lost.",
+            // Deliberately not phrased as a fault. Reaching here is the
+            // EXPECTED third step after resetting a password out-of-band:
+            // the password changed, the envelope did not, and the code is
+            // what reattaches them. The old copy led with "doesn't match",
+            // which reads as something having gone wrong.
+            "Your password changed, so your songs need to be unlocked with your recovery " +
+                "code once. Enter it below and this password will unlock them from now on " +
+                "-- every song is recovered under its original key, and nothing is lost.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(20.dp))
@@ -108,7 +114,20 @@ fun RecoveryUnlockScreen(newPassword: String, onDone: () -> Unit, onCancel: () -
                 }
             },
         ) {
-            if (isLoading) CircularProgressIndicator(modifier = Modifier.height(20.dp)) else Text("Recover access")
+            if (isLoading) {
+                CircularProgressIndicator(
+                // size(), not height(): height() alone leaves the indicator at its
+                // default 40.dp WIDTH, so a 40.dp circle gets squeezed into a 20.dp
+                // box and draws clipped. Colour is explicit for a related reason --
+                // inside a filled Button the content colour is onPrimary, but the
+                // indicator defaults to primary, i.e. the button's own fill.
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onPrimary,
+            )
+            } else {
+                Text("Recover access")
+            }
         }
 
         errorText?.let {

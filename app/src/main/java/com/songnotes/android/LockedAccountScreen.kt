@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -108,7 +109,20 @@ fun LockedAccountScreen(onUnlocked: () -> Unit, onSignOut: () -> Unit) {
                 }
             },
         ) {
-            if (isLoading) CircularProgressIndicator(modifier = Modifier.height(20.dp)) else Text("Unlock")
+            if (isLoading) {
+                CircularProgressIndicator(
+                // size(), not height(): height() alone leaves the indicator at its
+                // default 40.dp WIDTH, so a 40.dp circle gets squeezed into a 20.dp
+                // box and draws clipped. Colour is explicit for a related reason --
+                // inside a filled Button the content colour is onPrimary, but the
+                // indicator defaults to primary, i.e. the button's own fill.
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onPrimary,
+            )
+            } else {
+                Text("Unlock")
+            }
         }
 
         errorText?.let {
