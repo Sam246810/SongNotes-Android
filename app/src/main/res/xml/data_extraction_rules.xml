@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    `android:allowBackup="false"` alone is not enough on Android 12+ (API 31):
+    from that release it governs CLOUD backup only, while device-to-device
+    transfer is controlled separately by this file. Without it, a D2D transfer
+    would copy the SQLCipher database and `db_key.wrapped` to a new device -
+    where the Android Keystore key that wraps that DB key cannot follow, since
+    Keystore material is hardware-bound and never leaves the original device.
+    The result is not a confidentiality leak (the copied database is
+    unreadable without the key) but a guaranteed broken install: see
+    KeystoreDbKeyProvider, which finds an unopenable database and its own
+    handling of that case.
+
+    Everything here is either re-derivable (the DEK comes from the account
+    password on the next sign-in) or device-local by design (calibration
+    offsets are measured per physical device and are actively wrong on
+    another one), so excluding all of it costs the user nothing.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </device-transfer>
+</data-extraction-rules>

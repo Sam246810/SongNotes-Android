@@ -32,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.songnotes.core.data.LocalDataResetStore
 import com.songnotes.core.data.SongListItem
 import com.songnotes.core.data.SongRepository
 import com.songnotes.core.data.SyncPreferences
@@ -69,9 +70,17 @@ fun SongListScreen(
     val scope = rememberCoroutineScope()
     var items by remember { mutableStateOf<List<SongListItem>>(emptyList()) }
     var deleteTarget by remember { mutableStateOf<SongListItem?>(null) }
+    // Set when local storage had to be discarded after the Android Keystore key
+    // protecting it was lost -- see LocalDataResetStore. Read once on entry
+    // rather than observed: the reset happens during database construction, so
+    // it can only ever become true before this screen composes, never while
+    // it's on screen.
+    val resetStore = remember { LocalDataResetStore(context) }
+    var showLocalDataResetNotice by remember { mutableStateOf(resetStore.wasReset) }
 
     LaunchedEffect(Unit) {
         migrateFromSongStorageIfNeeded(context, repo, syncPrefs)
+        sweepMigratedLegacyJson(context, repo)
         repo.observeAllWithSyncState().collect { items = it }
     }
 
@@ -93,6 +102,15 @@ fun SongListScreen(
                 deleteTarget = null
             },
             onDismiss = { deleteTarget = null },
+        )
+    }
+
+    if (showLocalDataResetNotice) {
+        LocalDataResetDialog(
+            onDismiss = {
+                resetStore.acknowledge()
+                showLocalDataResetNotice = false
+            },
         )
     }
 
@@ -180,14 +198,53 @@ private fun SongRow(item: SongListItem, onOpen: () -> Unit, onDelete: () -> Unit
  * the pre-Phase-13 `SongRepository.upsert` defects (unconditional
  * `deletedAt = null`, dropped `remoteRev`) it would resurrect a song deleted
  * since the last import and re-flag it `pendingSync` on every single visit to
- * the list. Old JSON files are still deliberately left in place rather than
- * deleted: they're inert once migrated (nothing reads them again), and
- * leaving them is a strictly safer default than a delete bug quietly
- * destroying the only copy of a song.
+ * the list.
+ *
+ * Each plaintext original is deleted once it has migrated, by
+ * [sweepMigratedLegacyJson] below. This used to leave them in place forever on
+ * the reasoning that they're inert once migrated and that keeping them beat "a
+ * delete bug quietly destroying the only copy of a song" -- a fair concern, and
+ * the reason the delete is gated on reading the song back out of the encrypted
+ * database rather than fired optimistically. But inert is not the same as
+ * harmless: every `filesDir/songs/<id>.json` is the user's lyrics in cleartext,
+ * sitting
+ * beside a SQLCipher database whose entire purpose is that they aren't. Any
+ * device that upgraded through Phase 6 has been carrying a full plaintext copy
+ * of every pre-Phase-6 song ever since, which quietly defeats
+ * encryption-at-rest for exactly the users who have been here longest.
  */
 private suspend fun migrateFromSongStorageIfNeeded(context: android.content.Context, repo: SongRepository, syncPrefs: SyncPreferences) {
     if (syncPrefs.legacyJsonImportDone) return
     val legacySongs = SongStorage(context).list()
     for (song in legacySongs) repo.upsert(song)
     syncPrefs.legacyJsonImportDone = true
+}
+
+/**
+ * Deletes each legacy plaintext song file whose content is confirmed present in
+ * the encrypted database -- see [migrateFromSongStorageIfNeeded] for why these
+ * shouldn't linger.
+ *
+ * Runs unconditionally rather than behind `legacyJsonImportDone`, because the
+ * devices that most need it are precisely the ones where that flag is *already*
+ * true: they migrated before this cleanup existed and have been holding
+ * plaintext ever since. On the overwhelmingly common device -- no legacy files
+ * at all -- this is a single `listFiles` on a non-existent directory.
+ *
+ * Two deliberate conservatisms, both aimed at never being the bug the old
+ * comment worried about:
+ *
+ * - The delete is gated on [SongRepository.existsIncludingDeleted], so a file is
+ *   only removed once its song is provably in Room. Tombstones count: that means
+ *   migrated-then-deleted, where the plaintext copy is both redundant and the
+ *   one most worth removing.
+ * - A file that fails to parse never reaches here at all -- [SongStorage.list]
+ *   drops unreadable files via `runCatching`, so anything corrupt is left
+ *   untouched rather than deleted on the strength of a failed read.
+ */
+private suspend fun sweepMigratedLegacyJson(context: android.content.Context, repo: SongRepository) {
+    val storage = SongStorage(context)
+    for (song in storage.list()) {
+        if (repo.existsIncludingDeleted(song.id)) storage.delete(song.id)
+    }
 }
