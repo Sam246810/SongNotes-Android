@@ -30,6 +30,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.songnotes.core.data.EnvelopeKeyMismatchException
+import com.songnotes.core.data.PasswordPolicy
 import com.songnotes.core.data.SupabaseAuthRepository
 import com.songnotes.core.data.SupabaseClientProvider
 import com.songnotes.core.data.SyncController
@@ -81,6 +82,16 @@ fun AuthScreen(onDone: () -> Unit) {
     var showManualSyncNotice by remember { mutableStateOf(false) }
 
     suspend fun submit() {
+        // Only on the SET path. Sign-in never length-checks -- every existing
+        // account, including any created before this policy existed, must keep
+        // working (see PasswordPolicy's doc comment, and the web app's
+        // LoginPage, which deliberately has no minLength either).
+        if (isSignUp) {
+            PasswordPolicy.validateNewPassword(password)?.let {
+                errorText = it
+                return
+            }
+        }
         isLoading = true
         errorText = null
         try {
@@ -108,7 +119,7 @@ fun AuthScreen(onDone: () -> Unit) {
         } catch (e: EnvelopeKeyMismatchException) {
             showRecoveryUnlock = true
         } catch (e: Exception) {
-            errorText = e.message ?: "Something went wrong"
+            errorText = reportAuthFailure(if (isSignUp) "Creating your account" else "Signing in", e)
         } finally {
             isLoading = false
         }
@@ -175,6 +186,9 @@ fun AuthScreen(onDone: () -> Unit) {
     // sign-in for an account that never had one -- see signIn's doc comment) --
     // the user must save it now, there's no way to see it again later.
     if (recoveryCode != null) {
+        // The one screen in this app that genuinely warrants it -- see
+        // SecureScreen's doc comment for why this isn't Activity-wide.
+        SecureScreen()
         Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
             Text("Save your recovery code", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
@@ -227,19 +241,39 @@ fun AuthScreen(onDone: () -> Unit) {
             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Password),
             modifier = Modifier.fillMaxWidth(),
         )
+        if (isSignUp) {
+            // States the requirement as a reason rather than a rule -- this
+            // password is what encrypts the songs, not just what opens the door.
+            Spacer(Modifier.height(6.dp))
+            Text(
+                PasswordPolicy.HELP_TEXT,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Spacer(Modifier.height(20.dp))
 
         Button(
             enabled = !isLoading && email.isNotBlank() && password.isNotBlank(),
             modifier = Modifier.fillMaxWidth(),
             onClick = {
-                // Sign-up needs the opt-in explainer first, the one time per
-                // device it hasn't already been acknowledged -- don't submit
-                // yet, show that instead; its own "continue" resumes submit().
-                if (isSignUp && !syncPrefs.explainerAcknowledged) {
-                    showSyncExplainer = true
-                } else {
-                    scope.launch { submit() }
+                // Password policy is checked HERE, before the explainer, not
+                // only inside submit(). Found on-device: submitting a short
+                // password showed the full opt-in explainer, waited for the
+                // user to read and accept it, and only then said "must be at
+                // least 8 characters" -- making someone accept a wall of text
+                // before telling them the form was invalid. submit() keeps its
+                // own check as the real guard (it's also reached from the
+                // already-acknowledged path); this one exists purely so the
+                // error arrives when it's useful.
+                val policyError = if (isSignUp) PasswordPolicy.validateNewPassword(password) else null
+                when {
+                    policyError != null -> errorText = policyError
+                    // Sign-up needs the opt-in explainer first, the one time per
+                    // device it hasn't already been acknowledged -- don't submit
+                    // yet, show that instead; its own "continue" resumes submit().
+                    isSignUp && !syncPrefs.explainerAcknowledged -> showSyncExplainer = true
+                    else -> scope.launch { submit() }
                 }
             },
         ) {

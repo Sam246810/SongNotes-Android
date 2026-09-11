@@ -100,7 +100,7 @@ fun LockedAccountScreen(onUnlocked: () -> Unit, onSignOut: () -> Unit) {
                     } catch (e: EnvelopeKeyMismatchException) {
                         showRecovery = true
                     } catch (e: Exception) {
-                        errorText = e.message ?: "Something went wrong"
+                        errorText = reportAuthFailure("Unlocking", e)
                     } finally {
                         isLoading = false
                     }
