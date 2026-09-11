@@ -6,7 +6,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
-import net.sqlcipher.database.SupportFactory
+import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
 /**
  * v1 -> v2 (Phase 7): adds `rev`/`deletedAt`/`pendingSync` to `songs` for the
@@ -74,13 +74,19 @@ abstract class SongDatabase : RoomDatabase() {
          * exists to prevent; see its own doc comment.
          */
         fun open(context: Context, dbKey: ByteArray): SongDatabase {
-            net.sqlcipher.database.SQLiteDatabase.loadLibs(context.applicationContext)
+            // `net.zetetic:sqlcipher-android` (the maintained artifact, which
+            // replaced the deprecated `android-database-sqlcipher` here) drops
+            // the old `SQLiteDatabase.loadLibs(context)` helper -- loading the
+            // native library is a plain System.loadLibrary call now, and it
+            // needs no Context at all. The on-disk database format is unchanged
+            // across that switch, so an existing songs.db opens normally.
+            System.loadLibrary("sqlcipher")
             return Room.databaseBuilder(
                 context.applicationContext,
                 SongDatabase::class.java,
                 DB_NAME,
             )
-                .openHelperFactory(SupportFactory(dbKey))
+                .openHelperFactory(SupportOpenHelperFactory(dbKey))
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
         }

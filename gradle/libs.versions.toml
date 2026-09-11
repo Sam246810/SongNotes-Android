@@ -12,7 +12,7 @@ bouncyCastle = "1.79"
 orgJson = "20240303"
 room = "2.8.4"
 ksp = "2.0.21-1.0.28"
-sqlcipher = "4.5.4"
+sqlcipher = "4.17.0"
 biometric = "1.1.0"
 supabase = "3.0.0"
 ktorClientOkhttp = "3.0.3"
@@ -44,7 +44,7 @@ androidx-room-runtime = { group = "androidx.room", name = "room-runtime", versio
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 androidx-room-testing = { group = "androidx.room", name = "room-testing", version.ref = "room" }
-sqlcipher-android = { group = "net.zetetic", name = "android-database-sqlcipher", version.ref = "sqlcipher" }
+sqlcipher-android = { group = "net.zetetic", name = "sqlcipher-android", version.ref = "sqlcipher" }
 androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "biometric" }
 supabase-bom = { group = "io.github.jan-tennert.supabase", name = "bom", version.ref = "supabase" }
 supabase-postgrest = { group = "io.github.jan-tennert.supabase", name = "postgrest-kt" }

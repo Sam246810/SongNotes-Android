@@ -6,11 +6,12 @@ drafted (not submitted). Real release signing, the internal testing track,
 and a multi-device matrix are still open — see "What's NOT done" below.**
 
 **Update (2026-08-15):** account deletion implemented (see "What's NOT
-done" below); 16 KB ELF alignment picked up and mostly resolved — only
-`libsqlcipher.so` is a genuine remaining gap (upstream, not fixable
-here), the other four libraries the on-device warning names were false
-positives, and a `checkElfAlignment` Gradle task now guards against
-regressions. Full detail in "What's NOT done".
+done" below); 16 KB ELF alignment picked up and resolved, and a
+`checkElfAlignment` Gradle task now guards against regressions. The four
+other libraries the on-device warning names were false positives;
+`libsqlcipher.so` was a real gap until 2026-08-27, when migrating to the
+maintained `net.zetetic:sqlcipher-android` artifact fixed it and emptied
+the allowlist. Full detail in "What's NOT done".
 
 The navigation/dev-screen-gating gap found while scoping this phase was
 already fixed and documented separately in
@@ -228,3 +229,29 @@ Google.
     strict 16 KB enforcement, which is why `checkElfAlignment` exists —
     to catch a regression (or SQLCipher's eventual fix) automatically
     rather than relying on someone reading a debug-only warning dialog.
+  - **Update (2026-08-27): resolved, and the allowlist is now empty.**
+    The re-check above was looking at the wrong artifact. Zetetic
+    deprecated `net.zetetic:android-database-sqlcipher` (which is indeed
+    frozen at 4.5.4 forever) in favour of
+    **`net.zetetic:sqlcipher-android`**, which is actively released and
+    ships a 16 KB-aligned `libsqlcipher.so`. Migrated to it at 4.17.0 —
+    not the latest (4.18.0), which pulls `kotlin-stdlib` 2.2.10 and
+    fails against this project's pinned Kotlin 2.0.21 with the same
+    metadata-version conflict already documented for supabase-kt and
+    Room's schema export; 4.17.0 is the newest version that doesn't.
+    The migration needs two source changes: the import in
+    `SongDatabase.kt` (`net.sqlcipher.database.SupportFactory` →
+    `net.zetetic.database.sqlcipher.SupportOpenHelperFactory`), and
+    dropping the old `SQLiteDatabase.loadLibs(context)` call, which the
+    new artifact replaces with a plain `System.loadLibrary("sqlcipher")`.
+    `app/proguard-rules.pro`'s keep rule moved to `net.zetetic.database.**`
+    to match.
+    **Verified, not assumed:** `checkElfAlignment` itself reported
+    `libsqlcipher.so` as "now 16 KB-aligned but still listed in this
+    task's allowlist", and it was removed on that evidence. The task now
+    passes with `knownMisaligned` empty, and a signed release build
+    (R8 on) was produced and confirmed to contain the library. **Still
+    needs an on-device check before release:** that an existing,
+    pre-migration `songs.db` opens normally under the new artifact. The
+    on-disk format is unchanged across this switch, so it is expected to,
+    but that has not been exercised against a real device database here.

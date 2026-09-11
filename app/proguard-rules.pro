@@ -53,8 +53,8 @@
 # Defensive: SQLCipher wraps its own native SQLite build via JNI. Getting this
 # wrong doesn't corrupt data (the database on disk is untouched) but does mean
 # the app can no longer open it, which is just as bad from the user's side.
--keep class net.sqlcipher.** { *; }
--dontwarn net.sqlcipher.**
+-keep class net.zetetic.database.** { *; }
+-dontwarn net.zetetic.database.**
 
 # --- Ktor / supabase-kt --------------------------------------------------
 # Kotlin Multiplatform libraries; the Android target doesn't use every engine

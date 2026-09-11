@@ -184,10 +184,14 @@ tasks.register("checkElfAlignment") {
     dependsOn("assembleDebug")
 
     // Prebuilt .so files this project doesn't build from source and can't fix directly.
-    // Confirmed misaligned via llvm-readelf on 2026-08-15 -- see
-    // docs/handoff/PHASE-11.md's "What's NOT done". Drop an entry here once its upstream
-    // ships a 16 KB-aligned build (re-run this task to confirm before removing).
-    val knownMisaligned = setOf("libsqlcipher.so")
+    // Empty as of 2026-08-27: the sole entry was libsqlcipher.so, and migrating off the
+    // deprecated `net.zetetic:android-database-sqlcipher` 4.5.4 onto the maintained
+    // `net.zetetic:sqlcipher-android` 4.17.0 resolved it -- this task reported the
+    // library as "now 16 KB-aligned but still listed in the allowlist" and it was
+    // removed on that evidence, not on the assumption that a newer version would fix it.
+    // Keep this set empty unless a genuinely unfixable upstream gap reappears; a new
+    // entry is a deliberate decision to ship something Play will reject on Android 15+.
+    val knownMisaligned = emptySet<String>()
     val requiredAlignment = 0x4000L // 16 KB
 
     val apkFile = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk")
