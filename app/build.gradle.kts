@@ -118,6 +118,13 @@ dependencies {
     // since Phase 13 is the first real dependency on it).
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.activity.compose)
+    // Pinned above whatever androidx.biometric:1.1.0 pulls in transitively
+    // (fragment 1.2.5) -- that ancient FragmentActivity throws
+    // "IllegalArgumentException: Can only use lower 16 bits for requestCode"
+    // against the request codes activity-compose's rememberLauncherForActivityResult
+    // generates, crashing on the very first permission request (RECORD_AUDIO,
+    // for the Scratchpad's mic permission). Fixed upstream well before this version.
+    implementation(libs.androidx.fragment.ktx)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
