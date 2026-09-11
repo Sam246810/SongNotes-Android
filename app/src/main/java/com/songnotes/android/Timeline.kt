@@ -1,9 +1,12 @@
 package com.songnotes.android
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -14,30 +17,45 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.audio.MultitrackClipSpec
 import com.songnotes.core.audio.MultitrackTrackSpec
 import kotlin.math.roundToLong
+import kotlinx.coroutines.launch
 
 private const val kSampleRate = 48000
+
+/** Lower bound is "fit to the available width" — there's no reason to ever zoom OUT past that on a phone-sized viewport. */
+const val TimelineMinZoom = 1f
+const val TimelineMaxZoom = 4f
 
 private val PlayheadColor = Color(0xFFF87171)
 private val ScrubColor = Color(0xFF60A5FA)
@@ -46,7 +64,10 @@ private val TrackRowHeight = 56.dp
 private val TrackRowSpacing = 4.dp
 private val TrimHandleWidth = 12.dp
 private val MinClipWidth = 8.dp
-private val RulerHeight = 20.dp
+// Taller than a bare tap strip needs, to fit bar-number labels above the tick marks.
+private val RulerHeight = 32.dp
+private val PlayheadFlagWidth = 10.dp
+private val PlayheadFlagHeight = 7.dp
 
 /**
  * Fixed, non-theme palette (distinct from [PlayheadColor]'s red and
@@ -100,6 +121,15 @@ private val NoOpClipChange: (Int, Int, (MultitrackClipSpec) -> MultitrackClipSpe
  *    handle moves `bufferOffsetFrames`/`startFrame` together (so the
  *    untrimmed audio's timeline position doesn't jump) and shrinks
  *    `lengthFrames`; the right handle only changes `lengthFrames`.
+ *
+ * [zoom] (clamped to [[TimelineMinZoom], [TimelineMaxZoom]], 1f = the whole
+ * project fit to the available width, same as before zoom existed) scales
+ * every x-position calculation below by widening the actual content past
+ * the visible viewport rather than shrinking what's drawn per-pixel — the
+ * ruler/track-rows/grid/playhead all share one [horizontalScroll] container
+ * sized to the zoomed width, so scrolling the ruler and the clips together
+ * is automatic (one shared scroll position) rather than something that
+ * needs to be kept in sync by hand.
  */
 @Composable
 fun Timeline(
@@ -112,62 +142,179 @@ fun Timeline(
     scrubFrame: Long = 0L,
     onScrubChange: (Long) -> Unit = {},
     enabled: Boolean = true,
+    zoom: Float = TimelineMinZoom,
     onClipChange: (trackIndex: Int, clipIndex: Int, transform: (MultitrackClipSpec) -> MultitrackClipSpec) -> Unit = NoOpClipChange,
     modifier: Modifier = Modifier,
 ) {
     if (tracks.isEmpty() || totalFrames <= 0L) return
 
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
-        val widthPx = with(LocalDensity.current) { maxWidth.toPx() }
+        val density = LocalDensity.current
+        val viewportWidthPx = with(density) { maxWidth.toPx() }
+        val widthPx = viewportWidthPx * zoom.coerceIn(TimelineMinZoom, TimelineMaxZoom)
+        val contentWidth = with(density) { widthPx.toDp() }
         val beatGridColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
         val barGridColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-
+        val rulerLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
+        // One shared horizontal scroll position for the ruler and the track
+        // rows together -- zooming in past the viewport width means BOTH need
+        // to pan in lockstep, and a single ancestor scroll container is what
+        // guarantees that instead of two independently-scrolled children
+        // that could drift out of sync with each other.
+        val scrollState = rememberScrollState()
         Column {
-            ScrubRuler(
-                totalFrames = totalFrames,
-                scrubFrame = scrubFrame,
-                widthPx = widthPx,
-                enabled = enabled,
-                onScrubChange = onScrubChange,
-            )
-            Spacer(Modifier.height(TrackRowSpacing))
-
-            Box {
-                Column(verticalArrangement = Arrangement.spacedBy(TrackRowSpacing)) {
-                    tracks.forEachIndexed { trackIndex, track ->
-                        TimelineTrackRow(
-                            engine = engine,
-                            trackIndex = trackIndex,
-                            track = track,
-                            totalFrames = totalFrames,
-                            widthPx = widthPx,
-                            enabled = enabled,
-                            onClipChange = onClipChange,
-                        )
-                    }
-                }
-
-                val rowsHeight = TrackRowHeight * tracks.size + TrackRowSpacing * (tracks.size - 1)
-
-                if (bpm > 0.0) {
-                    Canvas(modifier = Modifier.fillMaxWidth().height(rowsHeight)) {
-                        drawBeatGrid(totalFrames, bpm, beatsPerBar, beatGridColor, barGridColor)
-                    }
-                }
-
-                val markerFrame = playbackFrame ?: scrubFrame
-                val markerColor = if (playbackFrame != null) PlayheadColor else ScrubColor
-                val fraction = (markerFrame.toFloat() / totalFrames.toFloat()).coerceIn(0f, 1f)
-                Box(
-                    modifier = Modifier
-                        .offset { IntOffset((widthPx * fraction).toInt(), 0) }
-                        .width(2.dp)
-                        .height(rowsHeight)
-                        .background(markerColor),
+        // fillMaxWidth here is load-bearing, not decorative -- without it,
+        // this Box (whose only child is wider than the viewport once
+        // zoomed) has nothing forcing it to report the bounded VIEWPORT
+        // width to its own Column parent, and things measuring against
+        // that Column's width (the zoom scrollbar below, via its own
+        // fillMaxWidth) could end up sized against the wrong number.
+        Box(modifier = Modifier.fillMaxWidth().horizontalScroll(scrollState)) {
+            Column(modifier = Modifier.width(contentWidth)) {
+                ScrubRuler(
+                    totalFrames = totalFrames,
+                    scrubFrame = scrubFrame,
+                    widthPx = widthPx,
+                    enabled = enabled,
+                    onScrubChange = onScrubChange,
+                    bpm = bpm,
+                    beatsPerBar = beatsPerBar,
+                    labelColor = rulerLabelColor,
+                    tickColor = barGridColor,
                 )
+                Spacer(Modifier.height(TrackRowSpacing))
+
+                Box {
+                    Column(verticalArrangement = Arrangement.spacedBy(TrackRowSpacing)) {
+                        tracks.forEachIndexed { trackIndex, track ->
+                            TimelineTrackRow(
+                                engine = engine,
+                                trackIndex = trackIndex,
+                                track = track,
+                                totalFrames = totalFrames,
+                                widthPx = widthPx,
+                                enabled = enabled,
+                                onClipChange = onClipChange,
+                            )
+                        }
+                    }
+
+                    val rowsHeight = TrackRowHeight * tracks.size + TrackRowSpacing * (tracks.size - 1)
+
+                    if (bpm > 0.0) {
+                        Canvas(modifier = Modifier.width(contentWidth).height(rowsHeight)) {
+                            drawBeatGrid(totalFrames, bpm, beatsPerBar, beatGridColor, barGridColor)
+                        }
+                    }
+
+                    val markerFrame = playbackFrame ?: scrubFrame
+                    val markerColor = if (playbackFrame != null) PlayheadColor else ScrubColor
+                    val fraction = (markerFrame.toFloat() / totalFrames.toFloat()).coerceIn(0f, 1f)
+                    val flagWidthPx = with(density) { PlayheadFlagWidth.toPx() }
+                    Box(
+                        modifier = Modifier
+                            .offset { IntOffset((widthPx * fraction - flagWidthPx / 2f).toInt(), 0) }
+                            .width(PlayheadFlagWidth)
+                            .height(rowsHeight),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .width(2.dp)
+                                .fillMaxHeight()
+                                .background(markerColor),
+                        )
+                        // A small downward-pointing flag right where the line
+                        // meets the ruler above -- makes the marker read as a
+                        // playhead at a glance rather than just a stray line,
+                        // the same cue a desktop DAW's own playhead uses.
+                        Canvas(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .size(width = PlayheadFlagWidth, height = PlayheadFlagHeight),
+                        ) {
+                            drawPlayheadFlag(markerColor)
+                        }
+                    }
+                }
             }
         }
+        // Only the ruler's own tap (jump-to-frame) and each clip's own
+        // drag (move/trim) exist as gestures within the zoomed content --
+        // neither is a pan, and a plain swipe over either resolves as its
+        // own gesture rather than scrolling (a swipe on the ruler lands as
+        // a tap at the release point; a swipe starting on a clip moves it).
+        // A separate scrollbar thumb, with no other gesture on the same
+        // surface to arbitrate against, is what actually lets you reach
+        // timeline content past the first screen's width once zoomed in.
+        if (zoom > TimelineMinZoom) {
+            Spacer(Modifier.height(6.dp))
+            ZoomScrollbar(scrollState = scrollState, modifier = Modifier.fillMaxWidth())
+        }
+        }
     }
+}
+
+/**
+ * A minimal draggable thumb over the zoomed [Timeline] content's scroll
+ * range — its own isolated gesture surface, deliberately separate from the
+ * ruler (tap-to-scrub) and clips (drag-to-move/trim) it sits below, so
+ * panning never has to arbitrate against either of those for the same
+ * touch. Thumb width mirrors the viewport's fraction of the full zoomed
+ * content, same visual language as a browser's own horizontal scrollbar.
+ */
+@Composable
+private fun ZoomScrollbar(scrollState: ScrollState, modifier: Modifier = Modifier) {
+    val maxValue = scrollState.maxValue
+    if (maxValue <= 0) return // content still fits entirely -- nothing to scroll
+    val scope = rememberCoroutineScope()
+    BoxWithConstraints(modifier = modifier.height(6.dp)) {
+        val density = LocalDensity.current
+        val trackWidthPx = with(density) { maxWidth.toPx() }
+        // viewport width == trackWidthPx (this scrollbar spans the same
+        // width the scrollable content's own viewport does) and the full
+        // scrollable extent is trackWidthPx + maxValue -- their ratio is
+        // the same fraction the viewport occupies of the total content.
+        val thumbWidthPx = (trackWidthPx * trackWidthPx / (trackWidthPx + maxValue)).coerceIn(24f, trackWidthPx)
+        val maxThumbOffsetPx = (trackWidthPx - thumbWidthPx).coerceAtLeast(1f)
+        val thumbOffsetPx = (scrollState.value.toFloat() / maxValue) * maxThumbOffsetPx
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(RoundedCornerShape(3.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+        )
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(thumbOffsetPx.toInt(), 0) }
+                .width(with(density) { thumbWidthPx.toDp() })
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(3.dp))
+                .background(MaterialTheme.colorScheme.primary)
+                .pointerInput(maxValue, trackWidthPx) {
+                    detectDragGestures { change, dragAmount ->
+                        change.consume()
+                        // Dragging the thumb across its own (short) track
+                        // needs to move the (much wider) content by more
+                        // pixels per pixel of drag -- scaled by how much
+                        // bigger the scrollable range is than the room the
+                        // thumb has to move in.
+                        val scale = maxValue / maxThumbOffsetPx
+                        scope.launch { scrollState.scrollBy(dragAmount.x * scale) }
+                    }
+                },
+        )
+    }
+}
+
+private fun DrawScope.drawPlayheadFlag(color: Color) {
+    val path = Path().apply {
+        moveTo(0f, 0f)
+        lineTo(size.width, 0f)
+        lineTo(size.width / 2f, size.height)
+        close()
+    }
+    drawPath(path, color)
 }
 
 /**
@@ -211,6 +358,11 @@ private fun DrawScope.drawBeatGrid(
  * Kept as its own gesture surface (rather than layering a tap detector onto
  * the track rows themselves) so it never has to arbitrate against a clip's
  * own drag/trim gestures underneath the same touch point.
+ *
+ * Also draws bar-number labels and beat tick marks (heavier at each bar
+ * start, matching [drawBeatGrid]'s own downbeat-vs-regular distinction) —
+ * this is what actually reads as ruler markings rather than a bare strip
+ * with a scrub indicator on it.
  */
 @Composable
 private fun ScrubRuler(
@@ -219,8 +371,13 @@ private fun ScrubRuler(
     widthPx: Float,
     enabled: Boolean,
     onScrubChange: (Long) -> Unit,
+    bpm: Double,
+    beatsPerBar: Int,
+    labelColor: Color,
+    tickColor: Color,
 ) {
     val framesPerPx = totalFrames.toFloat() / widthPx
+    val textMeasurer = rememberTextMeasurer()
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -229,7 +386,11 @@ private fun ScrubRuler(
             .background(MaterialTheme.colorScheme.surface)
             .then(
                 if (enabled) {
-                    Modifier.pointerInput(totalFrames) {
+                    // widthPx (not just totalFrames) is a key here -- zooming
+                    // changes it, and framesPerPx is captured into the tap
+                    // lambda below, so a stale detector from before a zoom
+                    // change would map taps to the wrong frame otherwise.
+                    Modifier.pointerInput(totalFrames, widthPx) {
                         detectTapGestures(
                             onTap = { offset ->
                                 onScrubChange((offset.x * framesPerPx).toLong().coerceIn(0L, totalFrames))
@@ -241,6 +402,11 @@ private fun ScrubRuler(
                 },
             ),
     ) {
+        if (bpm > 0.0) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                drawRulerMarks(totalFrames, bpm, beatsPerBar, textMeasurer, labelColor, tickColor)
+            }
+        }
         val fraction = (scrubFrame.toFloat() / totalFrames.toFloat()).coerceIn(0f, 1f)
         Box(
             modifier = Modifier
@@ -249,6 +415,57 @@ private fun ScrubRuler(
                 .fillMaxHeight()
                 .background(ScrubColor),
         )
+    }
+}
+
+/**
+ * Bar-number label plus a tick mark at every beat, drawn at the ruler's own
+ * width (== the zoomed [Timeline] content width, not the viewport) — reuses
+ * [drawBeatGrid]'s exact `beatIntervalFrames`/bar-start math so the ruler's
+ * marks always line up with the grid lines drawn over the track rows below.
+ */
+private fun DrawScope.drawRulerMarks(
+    totalFrames: Long,
+    bpm: Double,
+    beatsPerBar: Int,
+    textMeasurer: TextMeasurer,
+    labelColor: Color,
+    tickColor: Color,
+) {
+    val beatIntervalFrames = (kSampleRate * 60.0 / bpm).roundToLong()
+    if (beatIntervalFrames <= 0) return
+    val safeBeatsPerBar = beatsPerBar.coerceAtLeast(1)
+    val widthPx = size.width
+
+    var beatFrame = 0L
+    var beatIndex = 0
+    var barNumber = 1
+    while (beatFrame < totalFrames) {
+        val x = widthPx * beatFrame.toFloat() / totalFrames.toFloat()
+        val isBarStart = beatIndex % safeBeatsPerBar == 0
+        if (isBarStart) {
+            drawLine(
+                color = tickColor,
+                start = Offset(x, size.height - 10f),
+                end = Offset(x, size.height),
+                strokeWidth = 2f,
+            )
+            val layout = textMeasurer.measure(
+                text = barNumber.toString(),
+                style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.Bold, color = labelColor),
+            )
+            drawText(layout, topLeft = Offset(x + 3f, 2f))
+            barNumber++
+        } else {
+            drawLine(
+                color = tickColor.copy(alpha = tickColor.alpha * 0.5f),
+                start = Offset(x, size.height - 6f),
+                end = Offset(x, size.height),
+                strokeWidth = 1f,
+            )
+        }
+        beatFrame += beatIntervalFrames
+        beatIndex++
     }
 }
 

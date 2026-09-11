@@ -6,7 +6,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
-import net.sqlcipher.database.SupportFactory
+import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
 /**
  * v1 -> v2 (Phase 7): adds `rev`/`deletedAt`/`pendingSync` to `songs` for the
@@ -74,13 +74,19 @@ abstract class SongDatabase : RoomDatabase() {
          * exists to prevent; see its own doc comment.
          */
         fun open(context: Context, dbKey: ByteArray): SongDatabase {
-            net.sqlcipher.database.SQLiteDatabase.loadLibs(context.applicationContext)
+            // `net.zetetic:sqlcipher-android` (the maintained artifact, which
+            // replaced the deprecated `android-database-sqlcipher` here) drops
+            // the old `SQLiteDatabase.loadLibs(context)` helper -- loading the
+            // native library is a plain System.loadLibrary call now, and it
+            // needs no Context at all. The on-disk database format is unchanged
+            // across that switch, so an existing songs.db opens normally.
+            System.loadLibrary("sqlcipher")
             return Room.databaseBuilder(
                 context.applicationContext,
                 SongDatabase::class.java,
                 DB_NAME,
             )
-                .openHelperFactory(SupportFactory(dbKey))
+                .openHelperFactory(SupportOpenHelperFactory(dbKey))
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
         }
@@ -102,8 +108,41 @@ abstract class SongDatabase : RoomDatabase() {
          */
         fun getInstance(context: Context): SongDatabase =
             INSTANCE ?: synchronized(this) {
-                INSTANCE ?: open(context.applicationContext, KeystoreDbKeyProvider(context.applicationContext).getOrCreateDbKey())
-                    .also { INSTANCE = it }
+                INSTANCE ?: buildInstance(context.applicationContext).also { INSTANCE = it }
             }
+
+        /**
+         * Resolves the DB key and, if the Keystore key was lost, discards the
+         * database it can no longer open before handing the fresh key to [open].
+         *
+         * Without this step the app is bricked rather than degraded: the key
+         * returned after a Keystore loss cannot decrypt the `songs.db` sitting
+         * on disk, so Room throws on the first query of every launch, forever,
+         * with no in-app way out. Deleting the orphaned file is not destroying
+         * recoverable data -- that data was already unrecoverable the moment the
+         * Keystore entry went away; the only question is whether the app also
+         * stops working. It shouldn't.
+         *
+         * The loss IS still real for any song that was never synced, so it's
+         * recorded in [LocalDataResetStore] for the UI to surface rather than
+         * swallowed.
+         */
+        private fun buildInstance(context: Context): SongDatabase {
+            val keyResult = KeystoreDbKeyProvider(context).getOrCreateDbKey()
+            if (keyResult is DbKeyResult.RecreatedAfterKeyLoss) {
+                val hadDatabase = context.getDatabasePath(DB_NAME).exists()
+                // deleteDatabase() also removes the -wal/-shm sidecars, which a
+                // bare File.delete() on the main file would strand -- SQLCipher
+                // would then find leftover journal state for a database that no
+                // longer exists.
+                context.deleteDatabase(DB_NAME)
+                // Only flag it if there was actually something to lose. A fresh
+                // install whose Keystore entry was somehow unusable reaches this
+                // branch too, and telling that user their songs were reset would
+                // be a lie.
+                if (hadDatabase) LocalDataResetStore(context).markReset()
+            }
+            return open(context, keyResult.key)
+        }
     }
 }

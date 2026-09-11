@@ -253,6 +253,50 @@ reimplement.
 > `WorkRequest` on Android and none is planned; that's a rejected design, not
 > a deferred one.
 
+### Threat model: what the crypto does and doesn't cover
+
+Written down explicitly (2026-08-27) because the boundary is easy to
+overstate, and both clients share it.
+
+**Covered.** Song content is encrypted client-side under the account DEK
+before it ever reaches Supabase, so a database compromise, a leaked backup,
+or a misissued `service_role` key yields ciphertext and nothing else. The DEK
+itself is only ever stored wrapped, under a KEK derived from the account
+password (Argon2id, m=64 MiB/t=3/p=1) or from a ~100-bit recovery code. RLS
+scopes every row to its owner, and `envelope_rev`/`rev` optimistic
+concurrency stops a blind overwrite of the one row whose loss is
+unrecoverable. Locally, SQLCipher encrypts the whole database under a key
+that lives wrapped in hardware-backed Keystore.
+
+**Not covered: a malicious or compromised *server*.** Both clients read
+`user_keys.envelope` and trust it. The DEK verifier proves the unwrapped key
+matches *that envelope*, not that the envelope is the one the account owner
+created — a backend that served a substituted envelope would hand the client
+a DEK the attacker knows, and every song pushed afterwards would be readable.
+There is no trust-on-first-use pin on `dekId`, and adding one is a real
+design change (it has to survive legitimate DEK rotation via
+`rotateAndPurge`), not a small patch. Mitigating factors as things stand:
+`user_keys_history` archives every previous envelope, so a substitution is
+detectable after the fact rather than silent; and the substituted envelope
+cannot decrypt anything written under the *old* DEK, so existing content
+stays confidential. This is a deliberate, documented limit of a design where
+the server holds the envelope — not an oversight.
+
+**Not covered: a compromised device.** The DEK lives in process memory while
+unlocked ([`KeySession`]), and root or a malicious debugger reaches it.
+
+**Not covered: password strength below the policy floor.** The account
+password is a KDF input, attackable offline by anyone holding the
+`user_keys` table. `PasswordPolicy` (client) and the Supabase dashboard
+minimum (binding) are the only things setting that floor — see
+`PasswordPolicy.kt`'s doc comment.
+
+**Bounded, not trusted: KDF parameters.** Envelope KDF params arrive from
+the server and are validated against `KdfLimits` before reaching Argon2id or
+PBKDF2. Those are DoS/structural guards, deliberately *not* a security floor
+— WIRE-FORMAT-v2 §3.3 requires below-policy wraps to stay readable so they
+can be upgraded on unlock.
+
 ---
 
 ## Phases

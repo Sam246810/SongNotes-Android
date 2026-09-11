@@ -24,6 +24,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.songnotes.core.data.PasswordPolicy
 import com.songnotes.core.data.RecoveryCodeMismatchException
 import com.songnotes.core.data.SupabaseAuthRepository
 import kotlinx.coroutines.launch
@@ -76,6 +77,18 @@ fun RecoveryUnlockScreen(newPassword: String, onDone: () -> Unit, onCancel: () -
             enabled = !isLoading && recoveryCode.isNotBlank(),
             modifier = Modifier.fillMaxWidth(),
             onClick = {
+                // [newPassword] is whatever was typed on the sign-in form,
+                // and recoverWithRecoveryCode SETS it as the account password
+                // -- so this is a set-path and has to meet the policy, even
+                // though the sign-in field it came from deliberately doesn't
+                // check length. Caught here rather than at the field, since
+                // that field is shared with the sign-in path where a short
+                // legacy password is perfectly valid.
+                PasswordPolicy.validateNewPassword(newPassword)?.let {
+                    errorText = "$it Go back and use a longer password -- recovering sets it " +
+                        "as your new account password."
+                    return@Button
+                }
                 isLoading = true
                 errorText = null
                 scope.launch {
@@ -87,7 +100,7 @@ fun RecoveryUnlockScreen(newPassword: String, onDone: () -> Unit, onCancel: () -
                     } catch (e: RecoveryCodeMismatchException) {
                         errorText = e.message
                     } catch (e: Exception) {
-                        errorText = e.message ?: "Something went wrong"
+                        errorText = reportAuthFailure("Recovering access", e)
                     } finally {
                         isLoading = false
                     }

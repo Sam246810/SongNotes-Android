@@ -9,6 +9,34 @@ plugins {
     alias(libs.plugins.androidx.baselineprofile)
 }
 
+// Release signing credentials. The keystore and its passwords never enter the
+// repo -- they come from local.properties (gitignored, the same convention
+// supabase.url/supabase.anonKey already use in core/data/build.gradle.kts), or
+// from environment variables so CI can supply them without a file on disk.
+//
+// This replaces the debug-keystore placeholder that used to sit on the release
+// build type. The Android debug key is a single well-known keypair shipped with
+// every SDK install: anything signed with it can be tampered with and re-signed
+// by anyone, so a release artifact carrying that signature has no integrity
+// guarantee at all. Absent credentials now fail a release build loudly (see the
+// assembleRelease/bundleRelease doFirst check near the bottom of this file)
+// instead of silently falling back to it.
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+
+fun signingProperty(key: String, env: String): String? =
+    localProperties.getProperty(key)?.takeIf { it.isNotBlank() }
+        ?: System.getenv(env)?.takeIf { it.isNotBlank() }
+
+val releaseStoreFile = signingProperty("release.storeFile", "SONGNOTES_RELEASE_STORE_FILE")
+val releaseStorePassword = signingProperty("release.storePassword", "SONGNOTES_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = signingProperty("release.keyAlias", "SONGNOTES_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = signingProperty("release.keyPassword", "SONGNOTES_RELEASE_KEY_PASSWORD")
+val hasReleaseSigning = releaseStoreFile != null && releaseStorePassword != null &&
+    releaseKeyAlias != null && releaseKeyPassword != null
+
 android {
     namespace = "com.songnotes.android"
     compileSdk = 36
@@ -21,6 +49,27 @@ android {
         versionName = "0.0.1-phase0"
     }
 
+    signingConfigs {
+        // Only created when real credentials are actually present. Declaring it
+        // unconditionally with empty strings would let a release build get all
+        // the way to the signing step before failing with an opaque keystore
+        // error; this way the build type simply has no signing config, and the
+        // check wired up at the bottom of this file explains what is missing.
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                // Both signature schemes: v1 is what lets older tooling verify
+                // the APK at all, v2+ is what Play and modern Android actually
+                // check.
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -29,12 +78,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // TEMPORARY placeholder so a release-configured build can be
-            // installed and verified on-device at all (an unsigned release
-            // APK can't be adb-installed). Phase 11 replaces this with a
-            // real release signingConfig -- see
-            // docs/handoff/PHASE-11-prep-navigation.md.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
@@ -74,6 +118,13 @@ dependencies {
     // since Phase 13 is the first real dependency on it).
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.activity.compose)
+    // Pinned above whatever androidx.biometric:1.1.0 pulls in transitively
+    // (fragment 1.2.5) -- that ancient FragmentActivity throws
+    // "IllegalArgumentException: Can only use lower 16 bits for requestCode"
+    // against the request codes activity-compose's rememberLauncherForActivityResult
+    // generates, crashing on the very first permission request (RECORD_AUDIO,
+    // for the Scratchpad's mic permission). Fixed upstream well before this version.
+    implementation(libs.androidx.fragment.ktx)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
@@ -88,6 +139,45 @@ dependencies {
     baselineProfile(project(":baselineprofile"))
 }
 
+// Without this, a release build with no configured keystore doesn't fail -- AGP
+// just emits an unsigned APK with a warning that's easy to miss in CI output,
+// and an unsigned artifact is indistinguishable at a glance from a correctly
+// signed one until someone tries to install it. Fail at the start of the task
+// instead, and say exactly what to do about it.
+tasks.matching { it.name.startsWith("assembleRelease") || it.name.startsWith("bundleRelease") }
+    .configureEach {
+        doFirst {
+            if (!hasReleaseSigning) {
+                throw GradleException(
+                    """
+                    Release signing is not configured, so this build would produce an UNSIGNED artifact.
+
+                    Create a keystore (once -- keep it somewhere safe and backed up, outside this repo).
+                    New apps ship as AAB and are enrolled in Play App Signing, so this is an UPLOAD key:
+                    Google holds the real app signing key, and a lost upload key can be reset via Play
+                    support. Still back it up -- a reset is a support round-trip, not a click:
+
+                      keytool -genkeypair -v -keystore songnotes-release.jks                         -alias songnotes -keyalg RSA -keysize 4096 -validity 10000
+
+                    Then add these to local.properties (gitignored, never committed) --
+                    see local.properties.example:
+
+                      release.storeFile=../songnotes-release.jks
+                      release.storePassword=...
+                      release.keyAlias=songnotes
+                      release.keyPassword=...
+
+                    CI can supply the same four values as SONGNOTES_RELEASE_STORE_FILE,
+                    SONGNOTES_RELEASE_STORE_PASSWORD, SONGNOTES_RELEASE_KEY_ALIAS and
+                    SONGNOTES_RELEASE_KEY_PASSWORD instead.
+
+                    Debug builds are unaffected: ./gradlew assembleDebug still works with no keystore.
+                    """.trimIndent(),
+                )
+            }
+        }
+    }
+
 // docs/PLAN.md's "Module layout" section called this out from day one: "Every
 // `.so` must build with `-Wl,-z,max-page-size=16384`... add Google's
 // `check_elf_alignment.sh` to CI on day one — SQLCipher's prebuilt is the
@@ -101,10 +191,14 @@ tasks.register("checkElfAlignment") {
     dependsOn("assembleDebug")
 
     // Prebuilt .so files this project doesn't build from source and can't fix directly.
-    // Confirmed misaligned via llvm-readelf on 2026-08-15 -- see
-    // docs/handoff/PHASE-11.md's "What's NOT done". Drop an entry here once its upstream
-    // ships a 16 KB-aligned build (re-run this task to confirm before removing).
-    val knownMisaligned = setOf("libsqlcipher.so")
+    // Empty as of 2026-08-27: the sole entry was libsqlcipher.so, and migrating off the
+    // deprecated `net.zetetic:android-database-sqlcipher` 4.5.4 onto the maintained
+    // `net.zetetic:sqlcipher-android` 4.17.0 resolved it -- this task reported the
+    // library as "now 16 KB-aligned but still listed in the allowlist" and it was
+    // removed on that evidence, not on the assumption that a newer version would fix it.
+    // Keep this set empty unless a genuinely unfixable upstream gap reappears; a new
+    // entry is a deliberate decision to ship something Play will reject on Android 15+.
+    val knownMisaligned = emptySet<String>()
     val requiredAlignment = 0x4000L // 16 KB
 
     val apkFile = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk")

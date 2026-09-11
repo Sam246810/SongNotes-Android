@@ -58,6 +58,20 @@ class SongRepository(private val dao: SongDao) {
     suspend fun getById(id: String): Song? = dao.getById(id)?.toDomain()
 
     /**
+     * Whether Room knows this id at all, **tombstones included** -- unlike
+     * [getById], which excludes them.
+     *
+     * Exists for the legacy-plaintext cleanup in `SongListScreen`, where the
+     * question isn't "can the user open this song" but "has this song's content
+     * definitely reached the encrypted database, such that the plaintext JSON
+     * original is safe to delete". A tombstoned song answers yes to that: it
+     * migrated successfully and was then deleted, so the plaintext copy is
+     * unambiguously redundant -- and, being the lyrics of a song the user chose
+     * to delete, is the copy that most wants removing.
+     */
+    suspend fun existsIncludingDeleted(id: String): Boolean = dao.getByIdIncludingDeleted(id) != null
+
+    /**
      * Phase 13 fix for three defects [SongEntity.fromDomain] alone can't avoid,
      * all present since Phase 7/8 and all made much worse under manual-only
      * sync (see `docs/handoff/PHASE-13-local-first.md`'s "Part 0"):

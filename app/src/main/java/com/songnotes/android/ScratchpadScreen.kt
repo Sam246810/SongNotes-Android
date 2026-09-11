@@ -3,6 +3,7 @@ package com.songnotes.android
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -11,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,10 +24,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -35,6 +39,7 @@ import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Headset
 import androidx.compose.material.icons.filled.HeadsetOff
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
@@ -43,6 +48,7 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -60,6 +66,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -77,6 +84,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -117,10 +125,13 @@ private fun formatBpm(bpm: Double): String =
  * "does the engine work reachable from actual UI," the same bar every
  * other phase's diagnostics-screen verification held itself to.
  *
- * Persisted via [MultitrackProjectStorage]: auto-loaded once when this
- * screen first composes, auto-saved after every mutation that matters
- * (a committed recording, adding/removing a track) so closing the app
- * mid-session doesn't lose a take, plus an explicit "Save" button for
+ * Persisted via [MultitrackProjectStorage], scoped to [songId] — every song
+ * gets its own scratchpad session, not one shared project app-wide, since
+ * this only ever opens from inside that song's own editor now (see
+ * [SongEditorScreen]; there is no other way to reach this screen). Auto-loaded
+ * once when this screen first composes, auto-saved after every mutation that
+ * matters (a committed recording, adding/removing a track) so closing the
+ * app mid-session doesn't lose a take, plus an explicit "Save" button for
  * gain/mute/solo tweaks — those aren't auto-saved on every slider drag
  * tick (that would mean a file write per pixel of drag), so a deliberate
  * Save is how those specifically get persisted.
@@ -133,13 +144,43 @@ private fun formatBpm(bpm: Double): String =
  * folded into a collapsible card (the plan's "DAW collapsible to tempo/BPM/
  * start-stop" polish item) since they're set once per session and don't
  * need to stay visible while recording.
+ *
+ * [SongEditorScreen] composes this UNCONDITIONALLY (not `if (scratchpadOpen)`
+ * as an earlier pass had it) and instead toggles [visible] — every bit of
+ * state here (`isRecording`, `project`, the [engineState] poll loop) lives as
+ * long as the editor screen itself does, not as long as the scratchpad's own
+ * UI happens to be on top. That's what makes "close the scratchpad to glance
+ * at the lyrics while a take is still rolling" possible at all: hiding this
+ * screen ([visible] going false, via [onDone]) never touches [isRecording] or
+ * calls [AudioEngine.stopRecording] — only the explicit Record/Stop button
+ * does that (see [onRecordPressed]) or this whole composable actually leaving
+ * composition (the editor itself closing — see the `DisposableEffect` below).
+ * While hidden and still recording, a small persistent bubble renders instead
+ * of nothing (see the bottom of this function) — tapping it calls [onExpand]
+ * to bring the full UI back.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
+fun ScratchpadScreen(
+    engine: AudioEngine,
+    songId: String,
+    visible: Boolean,
+    onDone: () -> Unit,
+    onExpand: () -> Unit,
+    onRecordingChanged: (Boolean) -> Unit = {},
+) {
     val context = LocalContext.current
-    var project by remember { mutableStateOf(MultitrackProject()) }
-    var selectedTrackIndex by remember { mutableStateOf<Int?>(null) }
+    // A brand-new project starts with one track already there, selected as
+    // the default record target -- not zero tracks with Record itself
+    // conjuring one into existence on first tap, which read as unexpected
+    // (per direct feedback: "a bit unexpected when record also spawns a new
+    // track"). This is only a *starting* default, not an enforced floor --
+    // removing every track back down to zero is allowed (see TrackRow's
+    // onRemove below); Record/Play/Export just disable themselves in that
+    // state (see ScratchpadTransportBar's hasTracks), leaving Add track as
+    // the only enabled action, same as an untouched fresh project would show.
+    var project by remember { mutableStateOf(MultitrackProject().addTrack()) }
+    var selectedTrackIndex by remember { mutableStateOf<Int?>(0) }
     // Text-field buffer for editing project.bpm — kept in sync with it (see
     // the LaunchedEffect(Unit) load below), not the source of truth itself,
     // so bpm actually persists via MultitrackProjectStorage now instead of
@@ -153,10 +194,26 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     var engineState by remember { mutableStateOf(EngineState.idle()) }
     var settingsExpanded by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
-    val storage = remember { MultitrackProjectStorage(context) }
+    val storage = remember(songId) { MultitrackProjectStorage(context, songId) }
     val inputPreference = remember { RecordingInputPreference(context) }
     var forceBuiltinMic by remember { mutableStateOf(false) }
     var currentInputRoute by remember { mutableStateOf<AudioRoute?>(null) }
+    // Dismissible per screen-visit (not persisted) -- reappears next time the
+    // scratchpad is opened, since it's a fact about whatever's connected
+    // *right now*, not a one-time tip to permanently silence.
+    var bluetoothNoticeDismissed by remember { mutableStateOf(false) }
+    // The auto-calibration wizard already exists (CalibrationWizardScreen)
+    // but was only ever reachable through the debug-only Diagnostics menu --
+    // unusable by anyone outside a debug build. Surfaced here as a
+    // same-overlay pattern as the scratchpad itself now uses inside the song
+    // editor: shows on top, closes back to exactly this screen's state.
+    var showCalibration by remember { mutableStateOf(false) }
+    BackHandler(enabled = showCalibration) { showCalibration = false }
+    // 1f = the whole project fit to the screen's width (unchanged from
+    // before zoom existed) -- deliberately UI-only state, not persisted or
+    // reset by anything else on this screen, since it's about how you're
+    // currently looking at the timeline, not part of the project itself.
+    var timelineZoom by remember { mutableStateOf(TimelineMinZoom) }
 
     var hasRecordPermission by remember {
         mutableStateOf(
@@ -172,11 +229,16 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     // Auto-load once when the screen first composes — before this, the
     // scratchpad started empty every time, even with a previously saved
     // project sitting on disk.
-    LaunchedEffect(Unit) {
+    LaunchedEffect(songId) {
         val loaded = withContext(Dispatchers.Default) { storage.load() }
         if (loaded != null) {
+            // Unlike the fresh-project default above, a *loaded* project is
+            // shown exactly as it was left -- including genuinely empty (the
+            // user deliberately removed every track last time), which is a
+            // real, allowed state, not one to silently patch back to one track.
             project = loaded
             bpmText = formatBpm(loaded.bpm)
+            selectedTrackIndex = if (loaded.tracks.isEmpty()) null else 0
         }
     }
 
@@ -258,14 +320,19 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
     }
 
     fun beginRecording() {
+        // The transport bar disables Record entirely once every track has
+        // been removed (see ScratchpadTransportBar's hasTracks) -- Add
+        // track is the only way back from zero, never Record itself. This
+        // is just the defensive backstop, not the normal path there.
+        if (project.tracks.isEmpty()) return
         if (project.bpm <= 0.0) {
             statusMessage = "Enter a valid BPM before recording."
             return
         }
-        val targetIndex = selectedTrackIndex ?: run {
-            project = project.addTrack()
-            project.tracks.size - 1
-        }
+        // Nothing explicitly selected (e.g. deselected by tapping the
+        // selected row) still needs a real target -- defaults to the first
+        // track rather than Record spawning a new one itself.
+        val targetIndex = selectedTrackIndex ?: 0
         selectedTrackIndex = targetIndex
 
         val route = AudioRouteDetector(context).currentInputRoute()
@@ -364,13 +431,39 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
         }
     }
 
+    // Lets SongEditorScreen tell "minimized but still recording" apart from
+    // "nothing going on" for its own BackHandler -- isRecording itself stays
+    // private to this composable otherwise; this is a one-way notification,
+    // not a hoisted source of truth.
+    LaunchedEffect(isRecording) { onRecordingChanged(isRecording) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+    if (visible) {
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Scratchpad") },
                 navigationIcon = {
-                    IconButton(onClick = onDone) {
-                        Icon(Icons.Filled.Close, contentDescription = "Done")
+                    // A bare X reads as "close/discard" -- exactly wrong while
+                    // a take is rolling, since onDone never actually stops it
+                    // (see this function's own doc comment). Spelled out as a
+                    // real label specifically while recording so it's obvious
+                    // this is a safe "go look at the lyrics" action, not an
+                    // interrupt-the-take one.
+                    if (isRecording) {
+                        TextButton(onClick = onDone) {
+                            Icon(
+                                Icons.Filled.ArrowBack,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Back to lyrics")
+                        }
+                    } else {
+                        IconButton(onClick = onDone) {
+                            Icon(Icons.Filled.Close, contentDescription = "Done")
+                        }
                     }
                 },
                 actions = {
@@ -382,6 +475,7 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
         },
         bottomBar = {
             ScratchpadTransportBar(
+                hasTracks = project.tracks.isNotEmpty(),
                 isRecording = isRecording,
                 isPlaying = isPlaying,
                 isExporting = isExporting,
@@ -408,6 +502,62 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
+            // Bluetooth audio (both directions -- the click you hear AND
+            // whatever gets captured) carries real, inconsistent latency on
+            // top of everything CalibrationStore can already correct for
+            // per-route -- see CalibrationWizardScreen's own
+            // BluetoothWarningStep, which says as much before letting
+            // someone calibrate against a Bluetooth route anyway. Surfaced
+            // here too, not just inside that wizard, since a lot of people
+            // will hit Record long before ever opening Calibrate — this is
+            // the point they're most likely to actually read it.
+            if (currentInputRoute?.isBluetooth == true && !bluetoothNoticeDismissed) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Icon(
+                            Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Bluetooth audio has latency",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            )
+                            Text(
+                                "Wired headphones (or the phone's own speaker/mic) are the easiest way to " +
+                                    "stay tightly synced with the metronome. If you're sticking with Bluetooth, " +
+                                    "run Calibrate below first.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            )
+                            TextButton(
+                                onClick = { showCalibration = true },
+                                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
+                            ) { Text("Calibrate") }
+                        }
+                        IconButton(onClick = { bluetoothNoticeDismissed = true }, modifier = Modifier.size(24.dp)) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Dismiss",
+                                tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+
             statusMessage?.let { message ->
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -450,14 +600,23 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
 
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    Text(
-                        if (project.tracks.isEmpty()) {
-                            "Timeline"
-                        } else {
-                            "${project.tracks.size} track(s) · ${"%.1f".format(project.totalFrames / kSampleRate.toDouble())}s total"
-                        },
-                        style = MaterialTheme.typography.titleSmall,
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            if (project.tracks.isEmpty()) {
+                                "Timeline"
+                            } else {
+                                "${project.tracks.size} track(s) · ${"%.1f".format(project.totalFrames / kSampleRate.toDouble())}s total"
+                            },
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        if (project.tracks.isNotEmpty()) {
+                            TimelineZoomControls(zoom = timelineZoom, onZoomChange = { timelineZoom = it })
+                        }
+                    }
                     Spacer(Modifier.height(8.dp))
 
                     if (project.tracks.isEmpty()) {
@@ -473,7 +632,7 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
                             )
                             Spacer(Modifier.width(8.dp))
                             Text(
-                                "No tracks yet — tap Record below to create one.",
+                                "No tracks yet — tap Add track below to create one.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -489,6 +648,7 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
                             scrubFrame = scrubFrame,
                             onScrubChange = { scrubFrame = it },
                             enabled = !isRecording && !isPlaying,
+                            zoom = timelineZoom,
                             onClipChange = { trackIndex, clipIndex, transform ->
                                 project = project.withClipTransform(engine, trackIndex, clipIndex, transform)
                                 persist(project)
@@ -532,6 +692,10 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
                     onMutedChange = { project = project.withTrackMuted(index, it) },
                     onSoloedChange = { project = project.withTrackSoloed(index, it) },
                     onRemove = {
+                        // Removing every track, down to zero, is allowed --
+                        // the transport bar just disables Record/Play/Export
+                        // in that state (see ScratchpadTransportBar's
+                        // hasTracks), leaving Add track as the way back.
                         project = project.removeTrack(index)
                         // selectedTrackIndex is a list position, not a stable
                         // track identity — removing a track shifts every later
@@ -551,6 +715,21 @@ fun ScratchpadScreen(engine: AudioEngine, onDone: () -> Unit) {
             // the fixed transport bar.
             Spacer(Modifier.height(8.dp))
         }
+    }
+
+    if (showCalibration) {
+        CalibrationWizardScreen(engine = engine, onDone = { showCalibration = false })
+    }
+    } else if (isRecording) {
+        MinimizedRecordingBubble(
+            elapsedSeconds = engineState.framesRecorded / kSampleRate,
+            onClick = onExpand,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 16.dp),
+        )
+    }
     }
 }
 
@@ -674,6 +853,34 @@ private fun SessionSettingsCard(
                 }
             }
         }
+    }
+}
+
+/**
+ * +/- stepper over [Timeline]'s own [TimelineMinZoom]/[TimelineMaxZoom]
+ * range, same visual language as [SessionSettingsCard]'s beats-per-bar
+ * stepper. 100% (fit-to-width) has nothing to zoom out further into, so "−"
+ * disables right at that floor rather than wrapping or going negative.
+ */
+@Composable
+private fun TimelineZoomControls(zoom: Float, onZoomChange: (Float) -> Unit) {
+    val step = 0.5f
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(
+            enabled = zoom > TimelineMinZoom,
+            onClick = { onZoomChange((zoom - step).coerceAtLeast(TimelineMinZoom)) },
+        ) { Text("−", style = MaterialTheme.typography.titleMedium) }
+        Text(
+            "${(zoom * 100).toInt()}%",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.width(38.dp),
+        )
+        IconButton(
+            enabled = zoom < TimelineMaxZoom,
+            onClick = { onZoomChange((zoom + step).coerceAtMost(TimelineMaxZoom)) },
+        ) { Text("+", style = MaterialTheme.typography.titleMedium) }
     }
 }
 
@@ -821,6 +1028,7 @@ private fun TrackRow(
  */
 @Composable
 private fun ScratchpadTransportBar(
+    hasTracks: Boolean,
     isRecording: Boolean,
     isPlaying: Boolean,
     isExporting: Boolean,
@@ -870,7 +1078,12 @@ private fun ScratchpadTransportBar(
                 TransportAction(
                     icon = if (isPlaying) Icons.Filled.Stop else Icons.Filled.PlayArrow,
                     label = if (isPlaying) "Stop" else "Play",
-                    enabled = !isRecording,
+                    // Once playback's actually running it stays stoppable
+                    // regardless of hasTracks -- that can only go false via
+                    // removing a track, which is itself disabled while
+                    // playing (see TrackRow's `enabled` below), so this
+                    // never has to disable an in-flight Stop out from under it.
+                    enabled = !isRecording && (isPlaying || hasTracks),
                     size = 56.dp,
                     iconSize = 28.dp,
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -880,7 +1093,7 @@ private fun ScratchpadTransportBar(
                 TransportAction(
                     icon = if (isRecording) Icons.Filled.Stop else Icons.Filled.FiberManualRecord,
                     label = if (isRecording) "Stop" else "Record",
-                    enabled = !isPlaying,
+                    enabled = !isPlaying && (isRecording || hasTracks),
                     size = 64.dp,
                     iconSize = 30.dp,
                     containerColor = MaterialTheme.colorScheme.error,
@@ -890,7 +1103,7 @@ private fun ScratchpadTransportBar(
                 TransportAction(
                     icon = Icons.Filled.SaveAlt,
                     label = if (isExporting) "Exporting…" else "Export",
-                    enabled = !isRecording && !isPlaying && !isExporting,
+                    enabled = !isRecording && !isPlaying && !isExporting && hasTracks,
                     loading = isExporting,
                     onClick = onExport,
                 )
@@ -933,5 +1146,40 @@ private fun TransportAction(
         }
         Spacer(Modifier.height(4.dp))
         Text(label, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+/** "0:07" — matches a phone call timer's own format, the same category of ongoing-background-activity indicator this bubble borrows its whole idea from. */
+private fun formatElapsed(seconds: Int): String = "%d:%02d".format(seconds / 60, seconds % 60)
+
+/**
+ * The whole point of [ScratchpadScreen] staying composed (not disposed) once
+ * hidden: something has to tell the user a take is still rolling in the
+ * background, or "Back to lyrics" would look indistinguishable from having
+ * silently stopped it. Deliberately small and easy to ignore — a pill, not a
+ * banner — since the person tapped away specifically to focus on the lyrics,
+ * not to be told repeatedly that recording is still happening. Tapping it is
+ * the fast way back to the full transport if they need to stop early.
+ */
+@Composable
+private fun MinimizedRecordingBubble(elapsedSeconds: Int, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.error,
+        contentColor = MaterialTheme.colorScheme.onError,
+        shadowElevation = 6.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.Mic, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(formatElapsed(elapsedSeconds), style = MaterialTheme.typography.labelLarge)
+            Spacer(Modifier.width(8.dp))
+            Text("Recording — tap to view", style = MaterialTheme.typography.labelMedium)
+        }
     }
 }

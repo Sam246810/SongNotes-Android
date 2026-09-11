@@ -3,6 +3,9 @@ package com.songnotes.android
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -16,17 +19,27 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -40,6 +53,7 @@ import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -52,6 +66,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextMeasurer
@@ -68,6 +83,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.data.SongRepository
 import com.songnotes.core.domain.ChordBarre
 import com.songnotes.core.domain.ChordVoicing
@@ -85,6 +101,7 @@ import com.songnotes.core.domain.transposeChordsLine
 import java.util.UUID
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -124,11 +141,16 @@ import org.json.JSONObject
  * this pass touches that boundary.
  */
 
-private val ParchmentBg = Color(0xFFF7F1E6)
-private val ChordColor = Color(0xFFB45309)
-private val LyricColor = Color(0xFF2A221B)
-private val TextMuted = Color(0xFF8A7663)
-private val PaperLine = Color(0xFFB45309).copy(alpha = 0.16f)
+// The parchment palette moved into the theme (see Theme.kt) so it can have a
+// Cozy Dark variant, matching the web app's own long-standing light/dark toggle.
+// These stay here as @Composable accessors with the same names, so every call
+// site below reads exactly as it did when they were plain constants -- the
+// values are now looked up per-composition instead of being fixed at class-init.
+private val ParchmentBg: Color @Composable get() = SongNotesTheme.colors.parchment
+private val ChordColor: Color @Composable get() = SongNotesTheme.colors.chord
+private val LyricColor: Color @Composable get() = SongNotesTheme.colors.lyric
+private val TextMuted: Color @Composable get() = SongNotesTheme.colors.muted
+private val PaperLine: Color @Composable get() = SongNotesTheme.colors.paperLine
 
 /** How long a lyrics line must sit still before the width-triggered auto-wrap (or its reverse, auto-merge) runs — see [handleLyricsChange]. */
 private const val SPLIT_DEBOUNCE_MS = 180L
@@ -376,7 +398,7 @@ private fun wrapLineByWidth(line: EditorLine, style: TextStyle, maxWidthPx: Int,
 }
 
 @Composable
-fun SongEditorScreen(songId: String, onDone: () -> Unit) {
+fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
     val context = LocalContext.current
     val repo = remember { SongRepository(context) }
     val sessionStore = remember { EditorSessionStore(context) }
@@ -427,9 +449,33 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     // risks Bundle's ~500KB TransactionTooLargeException on a long song for
     // no benefit over what the autosaver + lifecycle flush already guarantee.
     var activeChordName by rememberSaveable { mutableStateOf<String?>(null) }
+    // The scratchpad opens as a full-screen overlay right on top of this
+    // composable rather than as a separate MainActivity `screen` -- the
+    // whole point (per direct product feedback) is that jumping into the
+    // scratchpad to record an idea and back out to the lyrics never tears
+    // down the editor underneath: undo history, unsaved-but-debounced text,
+    // caret position, all of it is still exactly as it was the instant the
+    // scratchpad's Close button is tapped, since this composable never left
+    // composition. This flag means "is the scratchpad's full UI showing,"
+    // not "does a scratchpad session exist" -- ScratchpadScreen itself is
+    // ALWAYS composed below regardless of this value, specifically so an
+    // in-progress recording survives hiding the UI (see its own doc comment).
+    var scratchpadOpen by rememberSaveable { mutableStateOf(false) }
+    // Mirrors ScratchpadScreen's own private isRecording -- surfaced here
+    // only so the BackHandler below can tell "minimized but still
+    // recording" apart from "nothing going on," not general-purpose state
+    // this composable otherwise reads or displays.
+    var isScratchpadRecording by remember { mutableStateOf(false) }
     var fontScale by rememberSaveable { mutableStateOf(1f) }
     var linesAreaWidthPx by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
+
+    // Hands-free autoscroll (the same concept as Ultimate Guitar's, not its
+    // UI) -- lets someone playing an instrument keep both hands busy while
+    // the page scrolls itself instead of having to reach over and swipe.
+    val lazyListState = rememberLazyListState()
+    var autoscrollEnabled by rememberSaveable { mutableStateOf(false) }
+    var autoscrollSpeed by rememberSaveable { mutableStateOf(1f) }
 
     // Undo/redo over the text content only (title/meta/lines/customChords) --
     // deliberately separate from Room/the autosaver, which stay the durable
@@ -461,6 +507,34 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
             undoStack = (undoStack + lastHistorySnapshot).takeLast(MAX_HISTORY)
             lastHistorySnapshot = current
             redoStack = emptyList()
+        }
+    }
+
+    // Drives the actual scrolling, one real display-frame delta at a time
+    // (withFrameNanos, not a fixed-interval delay loop) so the rate stays
+    // correct regardless of the device's refresh rate. Restarts cleanly
+    // whenever autoscrollEnabled/autoscrollSpeed change since both are
+    // LaunchedEffect keys -- toggling off cancels this coroutine outright
+    // (the `if (!autoscrollEnabled) return@LaunchedEffect` guard), so
+    // there's never a stray scroll loop running after the button says off.
+    LaunchedEffect(autoscrollEnabled, autoscrollSpeed) {
+        if (!autoscrollEnabled) return@LaunchedEffect
+        // Tuned as a comfortable baseline reading pace at 1x, not derived
+        // from the song's own BPM -- this scrolls prose/lyrics, not a
+        // metronome, and UG's own autoscroll speed is independently tunable
+        // for the same reason (a fast song's lyric density and its tempo
+        // aren't the same thing).
+        val basePixelsPerSecond = 18f
+        var lastFrameNanos = withFrameNanos { it }
+        while (isActive) {
+            val frameNanos = withFrameNanos { it }
+            val deltaSeconds = (frameNanos - lastFrameNanos) / 1_000_000_000f
+            lastFrameNanos = frameNanos
+            lazyListState.scrollBy(basePixelsPerSecond * autoscrollSpeed * deltaSeconds)
+            if (!lazyListState.canScrollForward) {
+                autoscrollEnabled = false
+                break
+            }
         }
     }
 
@@ -496,6 +570,22 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
     }
 
     BackHandler { finish() }
+    // Registered after (so it sits higher on the dispatcher's back stack)
+    // and enabled whenever there's a scratchpad state back should protect --
+    // the UI showing, OR (this is the part that isn't just the mirror image
+    // of opening it) a take still recording in the background after the
+    // user already minimized it once. Without the second condition, a
+    // second back-press while minimized+recording fell through to finish(),
+    // which leaves the song entirely -- disposing this whole composable's
+    // ScratchpadScreen child and hitting its DisposableEffect's "abandon an
+    // in-progress recording" safety net, silently DROPPING the take rather
+    // than stopping it cleanly. Caught by testing this exact sequence
+    // on-device. `!scratchpadOpen` as the action (not a hardcoded `true`) is
+    // deliberate: the only two states this handler is ever enabled for are
+    // "showing" (toggle closes it) and "hidden but recording" (toggle
+    // re-opens it so Stop is reachable) -- never both false, since then this
+    // whole handler is disabled and back correctly falls through to finish().
+    BackHandler(enabled = scratchpadOpen || isScratchpadRecording) { scratchpadOpen = !scratchpadOpen }
 
     val chordStyle = baseChordTextStyle.copy(fontSize = baseChordTextStyle.fontSize * fontScale)
     val lyricStyle = baseLyricTextStyle.copy(fontSize = baseLyricTextStyle.fontSize * fontScale)
@@ -742,8 +832,19 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
                 modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = { copySongTextToClipboard(context, currentSong()) }) { Text("Export text", color = ChordColor) }
-                TextButton(onClick = { shareSongAsPdf(context, currentSong()) }) { Text("Export PDF", color = ChordColor) }
+                TextButton(onClick = { copySongTextToClipboard(context, currentSong()) }) { Text("Copy", color = ChordColor) }
+                TextButton(onClick = { shareSongAsText(context, currentSong()) }) { Text(".txt", color = ChordColor) }
+                TextButton(onClick = { shareSongAsPdf(context, currentSong()) }) { Text("PDF", color = ChordColor) }
+            }
+            // A labeled button, not a bare icon -- GraphicEq alone tested as
+            // "pretty random" (direct feedback): nothing about a graphic-
+            // equalizer glyph reads as "record a quick idea for this song"
+            // at a glance. Mic + a real word fixes that without needing to
+            // invent a new icon.
+            TextButton(onClick = { scratchpadOpen = true }) {
+                Icon(Icons.Filled.Mic, contentDescription = null, tint = ChordColor, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Scratchpad", color = ChordColor)
             }
             TextButton(onClick = { finish() }) { Text("Done", fontWeight = FontWeight.Bold, color = ChordColor) }
         }
@@ -792,10 +893,30 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
         Spacer(Modifier.height(4.dp))
 
         LazyColumn(
+            state = lazyListState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 16.dp)
-                .onGloballyPositioned { linesAreaWidthPx = it.size.width },
+                .onGloballyPositioned { linesAreaWidthPx = it.size.width }
+                // Any manual touch on the lyrics themselves cancels
+                // autoscroll -- reaching in to nudge/correct the scroll
+                // position by hand implicitly means "I'll take it from
+                // here," the same assumption UG's own autoscroll makes.
+                // requireUnconsumed = false and never calling .consume()
+                // means this never interferes with the LazyColumn's own
+                // normal scroll/tap handling underneath.
+                .then(
+                    if (autoscrollEnabled) {
+                        Modifier.pointerInput(Unit) {
+                            awaitEachGesture {
+                                awaitFirstDown(requireUnconsumed = false)
+                                autoscrollEnabled = false
+                            }
+                        }
+                    } else {
+                        Modifier
+                    },
+                ),
         ) {
             items(lines, key = { it.id }) { line ->
                 LineRow(
@@ -838,6 +959,34 @@ fun SongEditorScreen(songId: String, onDone: () -> Unit) {
             onDismiss = { activeChordName = null },
         )
     }
+
+    // Drawn before ScratchpadScreen/ChordVoicingPanel below so either one's
+    // full-screen surface naturally covers this button when showing --
+    // never needs its own extra "hide me" condition for that.
+    AutoscrollControls(
+        enabled = autoscrollEnabled,
+        onToggle = { autoscrollEnabled = !autoscrollEnabled },
+        speed = autoscrollSpeed,
+        onSpeedChange = { autoscrollSpeed = it },
+        modifier = Modifier
+            .align(Alignment.BottomEnd)
+            .navigationBarsPadding()
+            .padding(16.dp),
+    )
+
+    // Unconditional -- NOT `if (scratchpadOpen)` -- so a take can keep
+    // recording in the background while this composable's `visible = false`
+    // just hides its UI (see ScratchpadScreen's own doc comment for the full
+    // reasoning). `scratchpadOpen` now means "is the full scratchpad UI on
+    // top," not "does a scratchpad session exist at all."
+    ScratchpadScreen(
+        engine = engine,
+        songId = songId,
+        visible = scratchpadOpen,
+        onRecordingChanged = { isScratchpadRecording = it },
+        onDone = { scratchpadOpen = false },
+        onExpand = { scratchpadOpen = true },
+    )
     }
 }
 
@@ -847,10 +996,14 @@ private val baseChordTextStyle = TextStyle(
     fontWeight = FontWeight.Bold,
     letterSpacing = 0.4.sp,
 )
-private val baseLyricTextStyle = TextStyle(
-    fontSize = 15.sp,
-    color = LyricColor,
-)
+// Composable, unlike baseChordTextStyle above, purely because it carries a
+// colour and colours are now theme-dependent -- the chord style gets its colour
+// applied at each use site instead, so it can stay a plain constant.
+private val baseLyricTextStyle: TextStyle
+    @Composable get() = TextStyle(
+        fontSize = 15.sp,
+        color = LyricColor,
+    )
 
 @Composable
 private fun LineRow(
@@ -1032,6 +1185,58 @@ private fun ChordTokenRow(
                     },
                 )
             }
+        }
+    }
+}
+
+/**
+ * Autoscroll's whole UI footprint: a round toggle button (Play while off,
+ * Pause while on), with a small speed pill above it that only appears while
+ * running -- a stepped +/- rather than a drag slider, matching the same
+ * "tap targets, not fine gestures" language [TimelineZoomControls] in
+ * `ScratchpadScreen.kt` already established for a very similar "adjust a
+ * number in small steps" control. Deliberately no persistent settings
+ * screen for this: the concept UG's autoscroll is chasing is "one tap
+ * before I start playing," not a configuration surface.
+ */
+@Composable
+private fun AutoscrollControls(
+    enabled: Boolean,
+    onToggle: () -> Unit,
+    speed: Float,
+    onSpeedChange: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(horizontalAlignment = Alignment.End, modifier = modifier) {
+        if (enabled) {
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 4.dp,
+                modifier = Modifier.padding(bottom = 8.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 4.dp)) {
+                    IconButton(
+                        enabled = speed > 0.25f,
+                        onClick = { onSpeedChange((speed - 0.25f).coerceAtLeast(0.25f)) },
+                    ) { Text("−", style = MaterialTheme.typography.titleMedium) }
+                    Text(
+                        "%.2fx".format(speed),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.width(42.dp),
+                    )
+                    IconButton(
+                        enabled = speed < 3f,
+                        onClick = { onSpeedChange((speed + 0.25f).coerceAtMost(3f)) },
+                    ) { Text("+", style = MaterialTheme.typography.titleMedium) }
+                }
+            }
+        }
+        FilledIconButton(onClick = onToggle) {
+            Icon(
+                if (enabled) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                contentDescription = if (enabled) "Stop autoscroll" else "Start autoscroll",
+            )
         }
     }
 }

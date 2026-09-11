@@ -6,11 +6,12 @@ drafted (not submitted). Real release signing, the internal testing track,
 and a multi-device matrix are still open — see "What's NOT done" below.**
 
 **Update (2026-08-15):** account deletion implemented (see "What's NOT
-done" below); 16 KB ELF alignment picked up and mostly resolved — only
-`libsqlcipher.so` is a genuine remaining gap (upstream, not fixable
-here), the other four libraries the on-device warning names were false
-positives, and a `checkElfAlignment` Gradle task now guards against
-regressions. Full detail in "What's NOT done".
+done" below); 16 KB ELF alignment picked up and resolved, and a
+`checkElfAlignment` Gradle task now guards against regressions. The four
+other libraries the on-device warning names were false positives;
+`libsqlcipher.so` was a real gap until 2026-08-27, when migrating to the
+maintained `net.zetetic:sqlcipher-android` artifact fixed it and emptied
+the allowlist. Full detail in "What's NOT done".
 
 The navigation/dev-screen-gating gap found while scoping this phase was
 already fixed and documented separately in
@@ -153,11 +154,21 @@ verified**, so the account-access blocker on the bullets below is cleared —
 what's left on those is doing the actual submission work, not waiting on
 Google.
 
-- **Real release signing.** `release { signingConfig }` still points at
-  the temporary debug-signing placeholder from
-  `docs/handoff/PHASE-11-prep-navigation.md`, put there only so a
-  release-configured build could be installed and verified on-device at
-  all. A real signing key/config is still needed before any Play upload.
+- **Real release signing.** ~~`release { signingConfig }` still points at
+  the temporary debug-signing placeholder~~ **Update (2026-08-27):** the
+  debug-keystore placeholder is gone. `app/build.gradle.kts` now builds a
+  real `release` signing config from `release.storeFile` /
+  `release.storePassword` / `release.keyAlias` / `release.keyPassword` in
+  the gitignored `local.properties` (or the matching
+  `SONGNOTES_RELEASE_*` environment variables for CI), documented in
+  `local.properties.example`. When those are absent, `assembleRelease`
+  and `bundleRelease` now **fail** with the `keytool` command and the
+  exact property names, rather than quietly emitting an unsigned APK.
+  **You still need to generate the keystore yourself** — it must never
+  live in this repo. Note it is an *upload* key, not the app signing key:
+  new apps ship as AAB and are therefore enrolled in Play App Signing,
+  where Google holds the signing key and a lost upload key can be reset
+  through Play support. Back it up regardless.
 - **Account deletion feature.** ~~Surfaced above — needs actual
   implementation~~ **Update (2026-08-15):** implemented as a web page
   (`/delete-account` in the SongNotes web repo, commit `afa651c`) that
@@ -218,3 +229,40 @@ Google.
     strict 16 KB enforcement, which is why `checkElfAlignment` exists —
     to catch a regression (or SQLCipher's eventual fix) automatically
     rather than relying on someone reading a debug-only warning dialog.
+  - **Update (2026-08-27): resolved, and the allowlist is now empty.**
+    The re-check above was looking at the wrong artifact. Zetetic
+    deprecated `net.zetetic:android-database-sqlcipher` (which is indeed
+    frozen at 4.5.4 forever) in favour of
+    **`net.zetetic:sqlcipher-android`**, which is actively released and
+    ships a 16 KB-aligned `libsqlcipher.so`. Migrated to it at 4.17.0 —
+    not the latest (4.18.0), which pulls `kotlin-stdlib` 2.2.10 and
+    fails against this project's pinned Kotlin 2.0.21 with the same
+    metadata-version conflict already documented for supabase-kt and
+    Room's schema export; 4.17.0 is the newest version that doesn't.
+    The migration needs two source changes: the import in
+    `SongDatabase.kt` (`net.sqlcipher.database.SupportFactory` →
+    `net.zetetic.database.sqlcipher.SupportOpenHelperFactory`), and
+    dropping the old `SQLiteDatabase.loadLibs(context)` call, which the
+    new artifact replaces with a plain `System.loadLibrary("sqlcipher")`.
+    `app/proguard-rules.pro`'s keep rule moved to `net.zetetic.database.**`
+    to match.
+    **Verified, not assumed:** `checkElfAlignment` itself reported
+    `libsqlcipher.so` as "now 16 KB-aligned but still listed in this
+    task's allowlist", and it was removed on that evidence. The task now
+    passes with `knownMisaligned` empty, and a signed release build
+    (R8 on) was produced and confirmed to contain the library.
+    **Update (2026-09-11): the on-device upgrade check is now done too.**
+    A debug build of the pre-migration commit was installed under a
+    throwaway `applicationIdSuffix` (so the real app's data was never
+    involved), a song was written through the UI, and its `songs.db`
+    fingerprinted. The post-migration build was then installed *over it*
+    as an update and launched. Results: the database and `db_key.wrapped`
+    were byte-identical (md5) to what 4.5.4 had written, both the title
+    and the lyric line read back correctly, no `SQLiteException` or
+    "file is not a database" appeared in logcat, and a song written
+    afterwards by the new artifact survived a force-stop and relaunch
+    alongside the old one. `db_key.wrapped` was unchanged throughout,
+    which is the specific evidence that the new artifact genuinely
+    decrypted the existing file rather than the key-loss path firing and
+    recreating it. The two builds were also confirmed to differ as
+    expected: `libsqlcipher.so` `p_align` 0x1000 before, 0x4000 after.

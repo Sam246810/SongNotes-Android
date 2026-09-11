@@ -19,15 +19,16 @@ import org.json.JSONObject
  * no front-loaded data layer" precedent — just applied to bigger (audio)
  * data instead of a few key-value pairs.
  *
- * A single fixed project directory for now
- * (`context.filesDir/scratchpad/`) — there's no multi-project management
- * UI yet (see `docs/handoff/PHASE-10.md`'s "What's left"), so "the
- * scratchpad" is the only project this needs to hold. Multi-project
- * support would mean parameterizing this by project name/id, not a
- * different storage mechanism.
+ * One project directory per [songId] (`context.filesDir/scratchpad/<songId>/`)
+ * — every song gets its own scratchpad session rather than the whole app
+ * sharing a single one, so opening the scratchpad from song A never shows
+ * (or, worse, silently overwrites) a take recorded from song B. `songId`
+ * is always a `UUID.randomUUID()` string (see `Song.id`'s callers in
+ * `:core:data`), so it's already filesystem-safe as a bare directory name
+ * with no sanitizing needed.
  */
-class MultitrackProjectStorage(context: Context) {
-    private val projectDir = File(context.filesDir, "scratchpad")
+class MultitrackProjectStorage(context: Context, songId: String) {
+    private val projectDir = File(File(context.filesDir, "scratchpad"), songId)
     private val clipsDir = File(projectDir, "clips")
     private val manifestFile = File(projectDir, "manifest.json")
 
