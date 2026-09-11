@@ -1,9 +1,12 @@
 package com.songnotes.android
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.unit.dp
 
 /**
  * Phase 13: delete confirmation, with copy that depends on whether the song
@@ -82,5 +85,47 @@ fun SignOutConfirmDialog(unsyncedCount: Int, onConfirm: () -> Unit, onDismiss: (
         },
         confirmButton = { TextButton(onClick = onConfirm) { Text("Sign out") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/**
+ * Shown once after local storage had to be discarded because the Android
+ * Keystore key protecting it was lost (a restored backup, a device transfer,
+ * occasionally an OS update) -- see `LocalDataResetStore` and
+ * `SongDatabase.getInstance`.
+ *
+ * Deliberately states the loss plainly instead of softening it. The app has
+ * already recovered by the time this appears -- it resets rather than
+ * crash-looping, which is the right trade -- but for a local-first app that
+ * expects to hold songs which were never pushed anywhere, a silent reset would
+ * mean the user's work vanishing with no explanation and no reason to suspect
+ * one exists. The only genuinely actionable thing is stated last: anything that
+ * had been synced is still on the account and comes back with a Sync press.
+ */
+@Composable
+fun LocalDataResetDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Songs on this device were reset") },
+        text = {
+            // Two Text composables rather than one string with embedded
+            // newlines: the paragraph break is a layout concern, and Column
+            // spacing expresses it without baking hard line breaks into copy
+            // that should re-flow to whatever width the device gives it.
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "This app's encrypted storage is protected by a key held in this device's " +
+                        "secure hardware, and that key is gone -- which usually means the app data " +
+                        "was restored from a backup or moved from another device. Without it, the " +
+                        "songs stored here could no longer be read by anything, so they've been cleared.",
+                )
+                Text(
+                    "If you'd signed in and synced, your songs are safe on your account: sign in " +
+                        "and press Sync to bring them back. Anything that was only ever on this " +
+                        "device, and never synced, is gone.",
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("OK") } },
     )
 }

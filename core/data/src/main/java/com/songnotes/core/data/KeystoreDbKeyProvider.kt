@@ -12,6 +12,28 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
+ * The outcome of asking for the database key, not just the key itself.
+ *
+ * The distinction exists because "here is a working key" and "here is a working
+ * key, but everything previously written under the old one is now unreadable"
+ * are wildly different facts for the caller, and the old `ByteArray` return type
+ * could not tell them apart -- see [KeystoreDbKeyProvider.getOrCreateDbKey].
+ */
+sealed interface DbKeyResult {
+    val key: ByteArray
+
+    /** The normal path: a first-run key, or the existing one unwrapped successfully. */
+    data class Ready(override val key: ByteArray) : DbKeyResult
+
+    /**
+     * The Keystore wrap key was gone while a wrapped-key file (and a database)
+     * still existed, so a replacement was minted. Any pre-existing `songs.db` is
+     * permanently undecryptable and must be discarded before use.
+     */
+    data class RecreatedAfterKeyLoss(override val key: ByteArray) : DbKeyResult
+}
+
+/**
  * Produces the raw passphrase [SongDatabase.open] encrypts the whole SQLCipher
  * database file with. Per the plan: "SQLCipher, keyed by a random DB key wrapped
  * in Keystore -- not by the DEK, so the DB opens before unlock." This key is
@@ -31,19 +53,39 @@ class KeystoreDbKeyProvider(private val context: Context) {
     private val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
     private val wrappedKeyFile = File(context.filesDir, WRAPPED_KEY_FILE_NAME)
 
-    /** Returns the raw 256-bit DB key, generating and wrapping a new one on first call. */
-    fun getOrCreateDbKey(): ByteArray {
-        if (!wrappedKeyFile.exists()) return createAndPersistDbKey()
+    /**
+     * Returns the raw 256-bit DB key, generating and wrapping a new one on first
+     * call.
+     *
+     * The interesting case is the Keystore key vanishing (factory reset
+     * protection, a backup restored onto a different device, some OS updates)
+     * while the wrapped-key file survives: those wrapped bytes are then
+     * permanently unreadable, and so is any database encrypted under them.
+     *
+     * This used to quietly mint a fresh key and return it, with a comment noting
+     * that "callers needing to distinguish 'fresh install' from 'lost key' should
+     * check DB file existence themselves before calling this." No caller ever
+     * did -- so the real behavior was: hand back a key that cannot open the
+     * database that's sitting right there, and let Room throw a cryptic
+     * "file is not a database" on the first query, on every launch, forever.
+     * A permanent crash loop with no path out except clearing app data.
+     *
+     * Now the condition is detected here and reported as
+     * [DbKeyResult.RecreatedAfterKeyLoss], leaving the (correct) decision about
+     * what to do with the orphaned database to [SongDatabase.getInstance], which
+     * is the layer that actually knows about database files.
+     */
+    fun getOrCreateDbKey(): DbKeyResult {
+        if (!wrappedKeyFile.exists()) return DbKeyResult.Ready(createAndPersistDbKey())
         return try {
-            unwrapDbKey()
+            DbKeyResult.Ready(unwrapDbKey())
         } catch (e: Exception) {
-            // The Keystore key vanished (factory reset protection, backup restored to a
-            // different device, etc.) while the wrapped file survived -- the wrapped bytes
-            // are permanently unreadable at that point. Treat it the same as first run:
-            // mint a fresh key. (This does mean any existing SQLCipher DB file becomes
-            // unreadable too -- callers needing to distinguish "fresh install" from "lost
-            // key" should check DB file existence themselves before calling this.)
-            createAndPersistDbKey()
+            // Deliberately covers every failure mode of the unwrap -- a missing
+            // Keystore entry, a corrupt wrapped-key file, an AEADBadTagException
+            // from a key that was regenerated under the same alias. They differ
+            // in cause but not in consequence: whatever is on disk cannot be
+            // decrypted, and the only way forward is a new key.
+            DbKeyResult.RecreatedAfterKeyLoss(createAndPersistDbKey())
         }
     }
 
@@ -72,7 +114,11 @@ class KeystoreDbKeyProvider(private val context: Context) {
     }
 
     private fun getOrCreateWrapKey(): SecretKey {
-        (keyStore.getKey(WRAP_KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        // Not `?.let { return it }` on the existing entry: reaching here from the
+        // key-loss path means the old entry is either gone or unusable, and
+        // reusing an unusable one would just fail again at the next doFinal.
+        // Deleting first makes "mint a fresh key" actually mean that.
+        runCatching { keyStore.deleteEntry(WRAP_KEY_ALIAS) }
         val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
         val spec = KeyGenParameterSpec.Builder(WRAP_KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
