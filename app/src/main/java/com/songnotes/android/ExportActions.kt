@@ -42,8 +42,14 @@ private val TitlePaint = Paint().apply {
     isAntiAlias = true
 }
 
-// Same chord/lyric colors SongEditorScreen.kt uses on-screen (ChordColor/LyricColor),
-// so the exported PDF looks like the same document, not a generic reformat.
+// Same chord/lyric colors SongEditorScreen.kt uses on-screen in its Warm Light
+// theme, so the exported PDF looks like the same document, not a generic reformat.
+//
+// Deliberately NOT wired to the app theme (Theme.kt), even though the on-screen
+// palette now is: a PDF is paper. Cozy Dark's lighter amber and cream exist to
+// hold contrast against a dark page, and printing them onto a white one would
+// make an export unreadable for anyone whose phone happened to be in dark mode
+// when they tapped the button. These stay fixed at the light values.
 private val ChordPaint = Paint().apply {
     color = Color.parseColor("#B45309")
     textSize = 12f
@@ -55,6 +61,37 @@ private val LyricPaint = Paint().apply {
     textSize = 13f
     typeface = Typeface.DEFAULT
     isAntiAlias = true
+}
+
+/**
+ * Shares [song] as a real `.txt` file, through the same [FileProvider] +
+ * share-sheet path as [shareSongAsPdf].
+ *
+ * Distinct from [copySongTextToClipboard], which produces the same text but
+ * only as far as the clipboard. The web app's export menu offers both a
+ * clipboard-free `.txt` download and a PDF (`downloadText` / `exportToPdf` in
+ * `src/utils/export.js`); Android had the PDF and the clipboard but no way to
+ * actually hand someone a text file -- awkward for the exact thing plain text
+ * is good at, like mailing a chord sheet to a bandmate or dropping it into a
+ * setlist folder. Same [formatSongAsText] output as the clipboard path, so the
+ * two can never drift.
+ */
+fun shareSongAsText(context: Context, song: Song) {
+    val title = song.title.ifBlank { "Untitled" }
+    val exportsDir = File(context.cacheDir, "exports").apply { mkdirs() }
+    val file = File(exportsDir, "${sanitizeFilename(title)}.txt")
+    file.writeText(formatSongAsText(song))
+
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        // Some targets (mail clients especially) read the subject rather than
+        // the filename -- without this the share arrives titled "exports".
+        putExtra(Intent.EXTRA_SUBJECT, title)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share $title"))
 }
 
 /**
