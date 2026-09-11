@@ -13,7 +13,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BrightnessAuto
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -53,8 +60,8 @@ private sealed interface Screen {
     data object Songs : Screen
     data class SongEditor(val songId: String) : Screen
     data object Auth : Screen
+    data object Account : Screen
     data object Unlock : Screen
-    data object Scratchpad : Screen
     data object Piano : Screen
     data object Diagnostics : Screen
     data object Wizard : Screen
@@ -79,6 +86,8 @@ class MainActivity : FragmentActivity() {
             val statusRepo = remember { SyncStatusRepository(context) }
             val sessionStore = remember { EditorSessionStore(context) }
             val repo = remember { SongRepository(context) }
+            val themePreference = remember { ThemePreference(context) }
+            var themeMode by remember { mutableStateOf(themePreference.mode) }
 
             // No navigation library wired up yet — just several screens, so a
             // plain sealed-interface toggle is the honest amount of
@@ -103,7 +112,7 @@ class MainActivity : FragmentActivity() {
                 }
             }
 
-            MaterialTheme {
+            SongNotesTheme(mode = themeMode) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     when (val current = screen) {
                         Screen.Songs -> {
@@ -153,6 +162,11 @@ class MainActivity : FragmentActivity() {
                                     status = status,
                                     syncController = syncController,
                                     onSignInClick = onSignInClick,
+                                    onAccountClick = { screen = Screen.Account },
+                                    themeMode = themeMode,
+                                    onCycleTheme = {
+                                        themeMode = themeMode.next().also { themePreference.mode = it }
+                                    },
                                 )
                                 // The only remaining way to reach Diagnostics (and
                                 // transitively Wizard/Manual/TapAlong) in a real
@@ -174,7 +188,6 @@ class MainActivity : FragmentActivity() {
                                     onSyncClick = onSyncClick,
                                     onSignInClick = onSignInClick,
                                     onOpenSong = { id -> screen = Screen.SongEditor(id) },
-                                    onOpenScratchpad = { screen = Screen.Scratchpad },
                                     onOpenPiano = { screen = Screen.Piano },
                                     modifier = Modifier.weight(1f),
                                 )
@@ -182,11 +195,16 @@ class MainActivity : FragmentActivity() {
                         }
                         is Screen.SongEditor -> SongEditorScreen(
                             songId = current.songId,
+                            engine = audioEngine,
                             onDone = { screen = Screen.Songs },
                         )
                         Screen.Auth -> {
                             BackHandler { screen = Screen.Songs }
                             AuthScreen(onDone = { screen = Screen.Songs })
+                        }
+                        Screen.Account -> {
+                            BackHandler { screen = Screen.Songs }
+                            AccountScreen(onDone = { screen = Screen.Songs })
                         }
                         Screen.Unlock -> {
                             BackHandler { screen = Screen.Songs }
@@ -219,10 +237,6 @@ class MainActivity : FragmentActivity() {
                         Screen.TapAlong -> {
                             BackHandler { screen = Screen.Diagnostics }
                             TapAlongCalibrationScreen(engine = audioEngine, onDone = { screen = Screen.Diagnostics })
-                        }
-                        Screen.Scratchpad -> {
-                            BackHandler { screen = Screen.Songs }
-                            ScratchpadScreen(engine = audioEngine, onDone = { screen = Screen.Songs })
                         }
                         Screen.Piano -> {
                             BackHandler { screen = Screen.Songs }
@@ -297,6 +311,9 @@ private fun SyncHeader(
     status: SyncStatus,
     syncController: SyncController,
     onSignInClick: () -> Unit,
+    onAccountClick: () -> Unit,
+    themeMode: ThemeMode,
+    onCycleTheme: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -316,8 +333,17 @@ private fun SyncHeader(
         )
     }
 
+    // statusBarsPadding() is load-bearing, same reasoning SongEditorScreen's
+    // top bar already documents: targetSdk 36 (Android 15+) enforces
+    // edge-to-edge with no opt-out, and this screen had zero WindowInsets
+    // handling, so its first row drew under the status bar. That was latent
+    // while "Not signed in" fitted on one line and became visible the moment
+    // this row gained a third child -- found on-device, not by reading.
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(horizontal = 24.dp, vertical = 16.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -347,10 +373,17 @@ private fun SyncHeader(
                 // deletion path beyond sign-out; this links out to the web
                 // app's own delete flow rather than reimplementing it here
                 // (see WebLinks.kt's WEB_DELETE_ACCOUNT_URL doc comment).
-                TextButton(onClick = {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(WEB_DELETE_ACCOUNT_URL)))
-                }) {
-                    Text("Delete account", style = MaterialTheme.typography.labelSmall)
+                Row {
+                    // Recovery-code regeneration and password change, both of
+                    // which the web app has had all along -- see AccountScreen.
+                    TextButton(onClick = onAccountClick) {
+                        Text("Account", style = MaterialTheme.typography.labelSmall)
+                    }
+                    TextButton(onClick = {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(WEB_DELETE_ACCOUNT_URL)))
+                    }) {
+                        Text("Delete account", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             } else {
                 Text(
@@ -360,10 +393,34 @@ private fun SyncHeader(
                 )
             }
         }
-        Button(onClick = {
-            if (authRepo.isSignedIn) showSignOutDialog = true else onSignInClick()
-        }) {
-            Text(if (authRepo.isSignedIn) "Sign out" else "Enable sync")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // Cycles system -> light -> dark. A three-state cycle rather than a
+            // two-state switch because "follow the device" is a real, distinct
+            // choice and the default -- a plain light/dark toggle would make it
+            // unreachable once touched.
+            //
+            // An IconButton, not a TextButton reading "Theme: system": this Row
+            // lays out its non-weighted children at natural width FIRST and
+            // gives the remainder to the account Column, so every pixel spent
+            // here is taken from the email/status text. A ~120px label was
+            // enough to wrap "Not signed in" onto two lines and push it into
+            // the status bar. The icon carries the same state in a fixed,
+            // predictable width.
+            IconButton(onClick = onCycleTheme) {
+                Icon(
+                    imageVector = when (themeMode) {
+                        ThemeMode.SYSTEM -> Icons.Filled.BrightnessAuto
+                        ThemeMode.LIGHT -> Icons.Filled.LightMode
+                        ThemeMode.DARK -> Icons.Filled.DarkMode
+                    },
+                    contentDescription = themeMode.label,
+                )
+            }
+            Button(onClick = {
+                if (authRepo.isSignedIn) showSignOutDialog = true else onSignInClick()
+            }) {
+                Text(if (authRepo.isSignedIn) "Sign out" else "Enable sync")
+            }
         }
     }
 }

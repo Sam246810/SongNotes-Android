@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -19,6 +18,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,14 +32,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.songnotes.core.audio.MultitrackProjectStorage
 import com.songnotes.core.data.LocalDataResetStore
 import com.songnotes.core.data.SongListItem
 import com.songnotes.core.data.SongRepository
 import com.songnotes.core.data.SyncPreferences
 import com.songnotes.core.data.SyncStatus
 import com.songnotes.core.domain.Song
+import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Phase 5.5's entry screen: every locally-saved [Song], newest-edited
@@ -60,7 +64,6 @@ fun SongListScreen(
     onSyncClick: () -> Unit,
     onSignInClick: () -> Unit,
     onOpenSong: (songId: String) -> Unit,
-    onOpenScratchpad: () -> Unit,
     onOpenPiano: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -77,10 +80,21 @@ fun SongListScreen(
     // it's on screen.
     val resetStore = remember { LocalDataResetStore(context) }
     var showLocalDataResetNotice by remember { mutableStateOf(resetStore.wasReset) }
+    var searchQuery by remember { mutableStateOf("") }
+
+    // Title substring, case-insensitive -- matching the web app's Dashboard
+    // filter exactly. Deliberately not a full-text search over lyrics: the web
+    // app doesn't do that either, and matching its behaviour keeps "I searched
+    // for this on my laptop and it found it" true on both.
+    val visibleItems = remember(items, searchQuery) {
+        val query = searchQuery.trim()
+        if (query.isEmpty()) items else items.filter { it.song.title.contains(query, ignoreCase = true) }
+    }
 
     LaunchedEffect(Unit) {
         migrateFromSongStorageIfNeeded(context, repo, syncPrefs)
         sweepMigratedLegacyJson(context, repo)
+        sweepOrphanedScratchpads(context, repo)
         repo.observeAllWithSyncState().collect { items = it }
     }
 
@@ -98,7 +112,21 @@ fun SongListScreen(
             title = target.song.title,
             isOnAccount = target.isOnAccount,
             onConfirm = {
-                scope.launch { repo.deleteRespectingSync(target.song) }
+                val songId = target.song.id
+                scope.launch {
+                    repo.deleteRespectingSync(target.song)
+                    // Scratchpad recordings live outside Room entirely (raw
+                    // audio + a manifest on disk, keyed by songId -- see
+                    // MultitrackProjectStorage), so deleting the song row
+                    // alone leaves that folder behind forever. Deliberately
+                    // AFTER the repo delete, not before or in parallel: if
+                    // the process dies between the two steps, worst case is
+                    // today's existing gap (an orphaned folder, harmless
+                    // besides wasted space) -- clearing the audio FIRST
+                    // risks the opposite, worse failure: a song that still
+                    // shows up in the list with its recordings silently gone.
+                    withContext(Dispatchers.Default) { MultitrackProjectStorage(context, songId).clear() }
+                }
                 deleteTarget = null
             },
             onDismiss = { deleteTarget = null },
@@ -124,9 +152,6 @@ fun SongListScreen(
             ) {
                 Text("Songs", style = MaterialTheme.typography.headlineSmall)
                 Row {
-                    IconButton(onClick = onOpenScratchpad) {
-                        Icon(Icons.Filled.GraphicEq, contentDescription = "Scratchpad")
-                    }
                     IconButton(onClick = onOpenPiano) {
                         Icon(Icons.Filled.Piano, contentDescription = "Piano")
                     }
@@ -138,14 +163,33 @@ fun SongListScreen(
             }
             Spacer(Modifier.height(16.dp))
 
+            // Only worth the vertical space once there's enough to search
+            // through -- same reasoning as the web app, which hides its own
+            // search box until at least one song exists.
+            if (items.size > 1) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Search songs…") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(16.dp))
+            }
+
             if (items.isEmpty()) {
                 Text(
                     "No songs yet — tap \"New song\" to write your first one.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
+            } else if (visibleItems.isEmpty()) {
+                Text(
+                    "No songs match \"${searchQuery.trim()}\".",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             } else {
                 LazyColumn {
-                    items(items, key = { it.song.id }) { item ->
+                    items(visibleItems, key = { it.song.id }) { item ->
                         SongRow(
                             item = item,
                             onOpen = { onOpenSong(item.song.id) },
@@ -246,5 +290,29 @@ private suspend fun sweepMigratedLegacyJson(context: android.content.Context, re
     val storage = SongStorage(context)
     for (song in storage.list()) {
         if (repo.existsIncludingDeleted(song.id)) storage.delete(song.id)
+    }
+}
+
+/**
+ * Scratchpad recordings live outside Room entirely (raw audio + a manifest
+ * on disk, keyed by songId -- see [MultitrackProjectStorage]). Deleting a
+ * song through THIS screen's own delete flow already clears its folder
+ * directly (see `deleteTarget`'s `onConfirm` above), but a song deleted on
+ * a *different* device and pulled down here as a tombstone during sync
+ * bypasses that entirely -- `SyncEngine` writes straight to Room and never
+ * goes through this screen. Rather than reach into `:core:data` from here
+ * (or worse, give it a dependency on `:core:audio` just to delete some
+ * files), this runs as a lazy, self-healing sweep on every visit to the
+ * list instead: cheap (one folder listing plus one already-tombstone-aware
+ * [SongRepository.getById] lookup per entry, and the folder count here is
+ * always small), and correct regardless of *how* a song's row ended up
+ * gone or tombstoned rather than needing every possible deletion path
+ * individually hooked.
+ */
+private suspend fun sweepOrphanedScratchpads(context: android.content.Context, repo: SongRepository) {
+    val scratchpadRoot = File(context.filesDir, "scratchpad")
+    val songDirs = scratchpadRoot.listFiles { file -> file.isDirectory } ?: return
+    for (dir in songDirs) {
+        if (repo.getById(dir.name) == null) dir.deleteRecursively()
     }
 }
