@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -45,7 +46,7 @@ import kotlinx.coroutines.launch
  * Phase 13: local-first, opt-in, strictly manual sync. This screen no longer
  * enqueues any sync -- neither sign-in nor sign-up ever pushes or pulls a
  * single song; the ONLY thing that does is the user's own Sync press
- * (`SyncController.requestSync`, wired from `SyncBanner`/`SyncHeader`). A
+ * (`SyncController.requestSync`, wired from `SyncStatusInline`/`SyncHeader`). A
  * successful sign-in/sign-up instead calls `SyncController.enableSyncFor`,
  * which is device-local bookkeeping only. Sign-up additionally requires
  * acknowledging [SyncOptInExplainer] first (unless already acknowledged on
@@ -126,7 +127,7 @@ fun AuthScreen(onDone: () -> Unit) {
     }
 
     if (!SupabaseClientProvider.isConfigured) {
-        Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
             Text("Accounts aren't configured", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text(
@@ -162,7 +163,7 @@ fun AuthScreen(onDone: () -> Unit) {
     }
 
     if (needsEmailConfirmation) {
-        Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
             Text("Check your email", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text(
@@ -189,7 +190,7 @@ fun AuthScreen(onDone: () -> Unit) {
         // The one screen in this app that genuinely warrants it -- see
         // SecureScreen's doc comment for why this isn't Activity-wide.
         SecureScreen()
-        Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
             Text("Save your recovery code", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text(
@@ -214,7 +215,7 @@ fun AuthScreen(onDone: () -> Unit) {
         return
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+    Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,

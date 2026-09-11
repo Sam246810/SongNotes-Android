@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -32,6 +33,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.FilledIconButton
@@ -61,6 +63,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -461,6 +464,12 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
     // ALWAYS composed below regardless of this value, specifically so an
     // in-progress recording survives hiding the UI (see its own doc comment).
     var scratchpadOpen by rememberSaveable { mutableStateOf(false) }
+    // The piano moved here from the song list's header, where it sat beside
+    // "Songs" as a top-level destination. It is a songwriting aid -- you reach
+    // for it to find a chord for the song you are writing -- so it belongs
+    // inside a song, not next to the list of them. Same overlay treatment as
+    // the scratchpad: shown on top, closes back to exactly this editor state.
+    var pianoOpen by rememberSaveable { mutableStateOf(false) }
     // Mirrors ScratchpadScreen's own private isRecording -- surfaced here
     // only so the BackHandler below can tell "minimized but still
     // recording" apart from "nothing going on," not general-purpose state
@@ -846,6 +855,13 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
                 Spacer(Modifier.width(4.dp))
                 Text("Scratchpad", color = ChordColor)
             }
+            // Icon-only, unlike Scratchpad above: the argument there was that
+            // a graphic-equalizer glyph says nothing about "record an idea".
+            // A keyboard reads as "piano" on sight, and this row is already
+            // carrying two labelled buttons.
+            IconButton(onClick = { pianoOpen = true }) {
+                Icon(Icons.Filled.Piano, contentDescription = "Piano", tint = ChordColor, modifier = Modifier.size(20.dp))
+            }
             TextButton(onClick = { finish() }) { Text("Done", fontWeight = FontWeight.Bold, color = ChordColor) }
         }
         BasicTextField(
@@ -979,6 +995,13 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
     // just hides its UI (see ScratchpadScreen's own doc comment for the full
     // reasoning). `scratchpadOpen` now means "is the full scratchpad UI on
     // top," not "does a scratchpad session exist at all."
+    // Registered after the scratchpad's handlers so it sits higher on the
+    // back stack and closes the piano first when both could apply.
+    BackHandler(enabled = pianoOpen) { pianoOpen = false }
+    if (pianoOpen) {
+        PianoScreen(engine = engine, onDone = { pianoOpen = false })
+    }
+
     ScratchpadScreen(
         engine = engine,
         songId = songId,
@@ -1060,6 +1083,14 @@ private fun LineRow(
         if (chordEditMode) chordsFocus.requestFocus()
     }
 
+    // A placeholder is a prompt to start typing; once the caret is in the
+    // field it has done its job, and leaving it up means the caret is drawn
+    // straight through the first glyph -- the "C" of Chords and the "L" of
+    // Lyrics both sit at x=0, exactly where the caret parks. Reported as the
+    // letters looking broken while editing; they were, by a bar through them.
+    var chordsFocused by remember { mutableStateOf(false) }
+    var lyricsFocused by remember { mutableStateOf(false) }
+
     Column(modifier = Modifier.fillMaxWidth()) {
         // Chord track: plain text field while editing, colored token row otherwise.
         if (chordEditMode) {
@@ -1070,6 +1101,9 @@ private fun LineRow(
                     onChordsChange(chordsField.text)
                 },
                 textStyle = chordStyle.copy(color = ChordColor),
+                // Without this the caret is BasicTextField's default black,
+                // which on the Cozy Dark parchment is all but invisible.
+                cursorBrush = SolidColor(ChordColor),
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next, autoCorrectEnabled = false),
                 keyboardActions = KeyboardActions(onNext = { lyricsFocus.requestFocus() }),
@@ -1079,6 +1113,7 @@ private fun LineRow(
                     .padding(vertical = 1.dp)
                     .focusRequester(chordsFocus)
                     .onFocusChanged { focusState ->
+                        chordsFocused = focusState.isFocused
                         if (focusState.isFocused) {
                             chordFieldHasGainedFocus = true
                         } else if (chordFieldHasGainedFocus) {
@@ -1097,8 +1132,22 @@ private fun LineRow(
                         }
                     },
                 decorationBox = { inner ->
-                    if (chordsField.text.isEmpty()) Text("Chords…", style = chordStyle.copy(color = TextMuted))
-                    inner()
+                    // Bottom-aligned to match ChordTokenRow, which this field
+                    // swaps places with on tap. The row is a Row with
+                    // verticalAlignment = Bottom inside the same 24.dp min
+                    // height, so a top-aligned field made the chord text jump
+                    // up ~17px the instant you tapped it and drop back on
+                    // blur. Bottom is also the right resting place: chords
+                    // want to sit close to the lyric line they annotate.
+                    Box(
+                        modifier = Modifier.fillMaxWidth().fillMaxHeight(),
+                        contentAlignment = Alignment.BottomStart,
+                    ) {
+                        if (chordsField.text.isEmpty() && !chordsFocused) {
+                            Text("Chords…", style = chordStyle.copy(color = TextMuted))
+                        }
+                        inner()
+                    }
                 },
             )
         } else {
@@ -1118,6 +1167,7 @@ private fun LineRow(
                 onLyricsChange(new.text, new.selection.start)
             },
             textStyle = lyricStyle,
+            cursorBrush = SolidColor(LyricColor),
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
             keyboardActions = KeyboardActions(onNext = { onEnter() }),
@@ -1126,6 +1176,7 @@ private fun LineRow(
                 .heightIn(min = 28.dp)
                 .padding(vertical = 1.dp)
                 .focusRequester(lyricsFocus)
+                .onFocusChanged { lyricsFocused = it.isFocused }
                 .onPreviewKeyEvent { event ->
                     if (event.type == KeyEventType.KeyDown && event.key == Key.Backspace &&
                         lyricsField.selection.start == 0 && lyricsField.selection.end == 0
@@ -1137,7 +1188,9 @@ private fun LineRow(
                     }
                 },
             decorationBox = { inner ->
-                if (line.lyrics.isEmpty()) Text("Lyrics…", style = lyricStyle.copy(color = TextMuted))
+                if (line.lyrics.isEmpty() && !lyricsFocused) {
+                    Text("Lyrics…", style = lyricStyle.copy(color = TextMuted))
+                }
                 inner()
             },
         )
