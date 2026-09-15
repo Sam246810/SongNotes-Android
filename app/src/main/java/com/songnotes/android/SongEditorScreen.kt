@@ -167,7 +167,21 @@ private const val SPLIT_DEBOUNCE_MS = 180L
 private const val HISTORY_DEBOUNCE_MS = 600L
 private const val MAX_HISTORY = 100
 
-private data class EditorLine(val id: String, val chords: String, val lyrics: String)
+/**
+ * [hardBreak] distinguishes a real line boundary (the user pressed
+ * Enter/Next, pasted a literal newline, tapped "+ Add line", or this line
+ * simply came from the saved song) from a boundary [wrapLineByWidth] created
+ * purely because a line overflowed the screen width. Defaults to true --
+ * only the continuation piece(s) [wrapLineByWidth] splits off get it set to
+ * false. [performReflowIfNeeded] uses this to decide whether it's safe to
+ * silently re-merge a line into the one above it just because the combined
+ * text would now fit: safe for a soft wrap shrinking back down, wrong for
+ * two lines the user (or the song) deliberately kept separate -- without
+ * this, any two adjacent short-enough lines got silently merged the moment
+ * either was edited, e.g. hitting Next to start a new line and typing into
+ * it merged it straight back into the previous line.
+ */
+private data class EditorLine(val id: String, val chords: String, val lyrics: String, val hardBreak: Boolean = true)
 private enum class Track { Chords, Lyrics }
 private data class PendingFocus(val lineId: String, val track: Track, val caretIndex: Int? = null)
 
@@ -313,8 +327,10 @@ private fun splitLineAt(line: EditorLine, splitIndex: Int): Pair<EditorLine, Edi
     val lyrics2 = line.lyrics.sliceSafe(splitIndex)
     val chords1 = line.chords.sliceSafe(0, splitIndex)
     val chords2 = line.chords.sliceSafe(splitIndex)
-    val first = EditorLine(line.id, alignChordsWithLyrics(chords1, lyrics1), lyrics1)
-    val second = EditorLine(UUID.randomUUID().toString(), chords2, lyrics2)
+    val first = EditorLine(line.id, alignChordsWithLyrics(chords1, lyrics1), lyrics1, hardBreak = line.hardBreak)
+    // The tail is always a pure wrap continuation -- splitLineAt only ever
+    // runs from wrapLineByWidth, never from a real Enter/paste break.
+    val second = EditorLine(UUID.randomUUID().toString(), chords2, lyrics2, hardBreak = false)
     return first to second
 }
 
@@ -322,7 +338,7 @@ private fun mergeWithPrevious(prev: EditorLine, curr: EditorLine): EditorLine {
     val alignedPrevChords = alignChordsWithLyrics(prev.chords, prev.lyrics)
     val mergedChords = alignedPrevChords + curr.chords
     val mergedLyrics = prev.lyrics + curr.lyrics
-    return EditorLine(prev.id, alignChordsWithLyrics(mergedChords, mergedLyrics), mergedLyrics)
+    return EditorLine(prev.id, alignChordsWithLyrics(mergedChords, mergedLyrics), mergedLyrics, hardBreak = prev.hardBreak)
 }
 
 /**
@@ -719,7 +735,7 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
         if (idx == -1) return
         val curr = lines[idx]
 
-        if (idx > 0) {
+        if (idx > 0 && !curr.hardBreak) {
             val prev = lines[idx - 1]
             // Keep curr's id on the merged result, not prev's -- same
             // reasoning as wrapLineByWidth: curr is where the caret (and
