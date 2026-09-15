@@ -6,6 +6,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 /**
@@ -21,7 +22,14 @@ fun DeleteSongDialog(title: String, isOnAccount: Boolean, onConfirm: () -> Unit,
     val shownTitle = title.ifBlank { "Untitled" }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Delete \"$shownTitle\"?") },
+        // A pathologically long title (a huge paste landing in the Title
+        // field, say) must not push the confirm/cancel buttons below the
+        // dialog's own bounds -- AlertDialog doesn't scroll its title slot,
+        // so an unbounded title here isn't just ugly, it makes the dialog
+        // impossible to dismiss or confirm at all. Reproduced directly:
+        // pasting ~650 characters into a song's title made this exact
+        // dialog unreachable.
+        title = { Text("Delete \"$shownTitle\"?", maxLines = 2, overflow = TextOverflow.Ellipsis) },
         text = {
             Text(
                 if (isOnAccount) {

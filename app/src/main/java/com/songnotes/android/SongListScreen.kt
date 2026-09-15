@@ -28,6 +28,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.songnotes.core.audio.MultitrackProjectStorage
 import com.songnotes.core.data.LocalDataResetStore
@@ -222,6 +223,8 @@ private fun SongRow(item: SongListItem, onOpen: () -> Unit, onDelete: () -> Unit
                 Text(
                     song.title.ifBlank { "Untitled" },
                     style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 val preview = song.lines.firstOrNull { it.lyrics.isNotBlank() }?.lyrics
                 if (preview != null) {

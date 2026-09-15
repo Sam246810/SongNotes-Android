@@ -293,6 +293,26 @@ private fun String.sliceSafe(start: Int, end: Int = length): String {
 }
 
 /**
+ * Unlike the lyrics track, the chords track has no width-based wrap/reflow —
+ * it's a run of chord names with alignment spacing, not prose, so there's no
+ * sensible word-boundary or per-character split point to carry a chord onto
+ * a second line. Without a cap, a very long line of chords (or, worse, a
+ * large accidental paste — e.g. an entire clipboard's worth of text landing
+ * in the wrong field) just grows the single-line field indefinitely, forcing
+ * it to auto-scroll horizontally to keep the caret visible with no way back
+ * except backspacing it all out again. Capping the raw length here is
+ * simpler and more predictable than trying to wrap chords the way lyrics
+ * wrap: input simply stops being accepted past the limit, same as a form
+ * field's maxlength — never scrolls, never spills onto another line.
+ */
+private const val MAX_CHORDS_LENGTH = 60
+
+private fun TextFieldValue.capLength(max: Int): TextFieldValue {
+    if (text.length <= max) return this
+    return TextFieldValue(text.take(max), TextRange(selection.end.coerceIn(0, max)))
+}
+
+/**
  * Undoes the soft keyboard's "double space -> period" auto-punctuation on
  * the chords track, where a run of spaces is meaningful alignment against
  * the lyrics below, not prose — per direct feedback after it kept firing
@@ -1153,7 +1173,7 @@ private fun LineRow(
             BasicTextField(
                 value = chordsField,
                 onValueChange = { candidate ->
-                    chordsField = suppressDoubleSpacePeriod(chordsField, candidate)
+                    chordsField = suppressDoubleSpacePeriod(chordsField, candidate).capLength(MAX_CHORDS_LENGTH)
                     onChordsChange(chordsField.text)
                 },
                 textStyle = chordStyle.copy(color = ChordColor),
