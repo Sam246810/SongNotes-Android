@@ -830,6 +830,50 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
     }
 
     /**
+     * Re-validates every line against the CURRENT [lyricStyle]/[linesAreaWidthPx]
+     * — unlike [performReflowIfNeeded], which only re-checks the one line just
+     * edited. Needed because nothing else re-runs wrapping when the rendering
+     * context itself changes rather than the text: a line that fit fine at
+     * the old font scale or screen width can silently overflow off the edge
+     * of its single-line field at the new one, with no visual indication
+     * (no scroll hint, no ellipsis) that the rest of the line still exists.
+     * Reproduced directly by bumping font size up with A+ on a line that was
+     * already close to the edge.
+     *
+     * Rebuilds from scratch rather than patching in place: first collapses
+     * every run of soft-wrap continuation pieces (`!hardBreak`) back onto
+     * the hardBreak line that started them -- undoing every prior wrap --
+     * then re-wraps each resulting logical line fresh. Simpler and more
+     * reliably correct than trying to adjust existing split points for a
+     * width or font change that could as easily need MORE splits as fewer.
+     *
+     * No `pendingFocus` here -- unlike an edit, there's no caret to keep
+     * following, since this runs from a discrete UI action (a button tap,
+     * a rotation), never mid-keystroke. `suppressNextHistoryPush` so a pure
+     * re-layout -- the lyrics content itself never changes, only how it's
+     * split across lines -- doesn't become an Undo-able step.
+     */
+    fun reflowAllLines() {
+        val logical = mutableListOf<EditorLine>()
+        for (line in lines) {
+            if (!line.hardBreak && logical.isNotEmpty()) {
+                logical[logical.lastIndex] = mergeWithPrevious(logical.last(), line)
+            } else {
+                logical += line
+            }
+        }
+        val rewrapped = logical.flatMap { wrapLineByWidth(it, lyricStyle, linesAreaWidthPx, textMeasurer) }
+        if (rewrapped == lines) return
+        suppressNextHistoryPush = true
+        lines = rewrapped
+        persist()
+    }
+
+    LaunchedEffect(linesAreaWidthPx, fontScale) {
+        if (linesAreaWidthPx > 0) reflowAllLines()
+    }
+
+    /**
      * Handles every edit to a line's lyrics, including a large paste — not
      * just the character-at-a-time case a single width check used to
      * assume. A paste can contain literal newlines (the lyrics field is
