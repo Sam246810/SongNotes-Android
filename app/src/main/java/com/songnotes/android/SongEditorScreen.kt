@@ -322,15 +322,19 @@ private fun suppressDoubleSpacePeriod(old: TextFieldValue, new: TextFieldValue):
     return TextFieldValue(corrected, TextRange(prefix + 2))
 }
 
-private fun splitLineAt(line: EditorLine, splitIndex: Int): Pair<EditorLine, EditorLine> {
+/**
+ * [secondHardBreak] defaults to false (a pure wrap continuation, [wrapLineByWidth]'s
+ * only use of this) -- pass true for an explicit user-invoked split (Enter/Next
+ * mid-line, see [handleEnterFromLyrics]), where the tail is a real line the
+ * user deliberately started, not a wrap artifact eligible for silent re-merging.
+ */
+private fun splitLineAt(line: EditorLine, splitIndex: Int, secondHardBreak: Boolean = false): Pair<EditorLine, EditorLine> {
     val lyrics1 = line.lyrics.sliceSafe(0, splitIndex)
     val lyrics2 = line.lyrics.sliceSafe(splitIndex)
     val chords1 = line.chords.sliceSafe(0, splitIndex)
     val chords2 = line.chords.sliceSafe(splitIndex)
     val first = EditorLine(line.id, alignChordsWithLyrics(chords1, lyrics1), lyrics1, hardBreak = line.hardBreak)
-    // The tail is always a pure wrap continuation -- splitLineAt only ever
-    // runs from wrapLineByWidth, never from a real Enter/paste break.
-    val second = EditorLine(UUID.randomUUID().toString(), chords2, lyrics2, hardBreak = false)
+    val second = EditorLine(UUID.randomUUID().toString(), chords2, lyrics2, hardBreak = secondHardBreak)
     return first to second
 }
 
@@ -679,12 +683,28 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
         persist()
     }
 
-    fun handleEnterFromLyrics(afterId: String) {
+    /**
+     * Splits the line at [caretIndex] -- same as pressing Enter mid-text in any
+     * other editor, not just a "start a blank line after this one" shortcut.
+     * Everything from the caret onward moves to the new line below (empty
+     * when the caret was already at the end, which is the common case and
+     * matches the old always-blank-line behavior exactly). Both halves are
+     * run through [wrapLineByWidth] since a split can leave either one still
+     * too long for the screen on its own -- e.g. splitting a single very long
+     * word-free run roughly in half.
+     */
+    fun handleEnterFromLyrics(afterId: String, caretIndex: Int) {
         val idx = lines.indexOfFirst { it.id == afterId }
         if (idx == -1) return
-        val newLine = EditorLine(UUID.randomUUID().toString(), "", "")
-        lines = lines.toMutableList().apply { add(idx + 1, newLine) }
-        pendingFocus = PendingFocus(newLine.id, Track.Lyrics)
+        val line = lines[idx]
+        val (first, second) = splitLineAt(line, caretIndex, secondHardBreak = true)
+        val producedFirst = wrapLineByWidth(first, lyricStyle, linesAreaWidthPx, textMeasurer)
+        val producedSecond = wrapLineByWidth(second, lyricStyle, linesAreaWidthPx, textMeasurer)
+        lines = lines.toMutableList().apply {
+            removeAt(idx)
+            addAll(idx, producedFirst + producedSecond)
+        }
+        pendingFocus = PendingFocus(producedSecond.first().id, Track.Lyrics, 0)
         persist()
     }
 
@@ -695,11 +715,30 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
         val curr = lines[idx]
         val caret = prev.lyrics.length
         val merged = mergeWithPrevious(prev, curr)
+        // Immediate, not debounced like performReflowIfNeeded's forward split --
+        // this is a one-shot event (a backspace), not a run of keystrokes to
+        // coalesce. Without this, joining two lines whose combined text
+        // overflows the width left it sitting in the single-line field
+        // clipped/scrolled off past the right edge instead of wrapping back
+        // onto its own row(s), same as it would if typed that long directly.
+        val produced = wrapLineByWidth(merged, lyricStyle, linesAreaWidthPx, textMeasurer)
         lines = lines.toMutableList().apply {
             removeAt(idx)
-            set(idx - 1, merged)
+            removeAt(idx - 1)
+            addAll(idx - 1, produced)
         }
-        pendingFocus = PendingFocus(merged.id, Track.Lyrics, caret)
+        var remaining = caret
+        var chosen = produced.last()
+        var localCaret = chosen.lyrics.length
+        for (p in produced) {
+            if (remaining <= p.lyrics.length) {
+                chosen = p
+                localCaret = remaining.coerceAtLeast(0)
+                break
+            }
+            remaining -= p.lyrics.length
+        }
+        pendingFocus = PendingFocus(chosen.id, Track.Lyrics, localCaret)
         persist()
     }
 
@@ -961,7 +1000,7 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
                     onConsumedPendingFocus = { pendingFocus = null },
                     onChordsChange = { updated -> updateLine(line.id) { it.copy(chords = updated) } },
                     onLyricsChange = { updated, caret -> handleLyricsChange(line, updated, caret) },
-                    onEnter = { handleEnterFromLyrics(line.id) },
+                    onEnter = { caret -> handleEnterFromLyrics(line.id, caret) },
                     onBackspaceMerge = { handleMergeWithPrevious(line.id) },
                     onBackspaceDeleteEmpty = { handleDeleteLine(line.id) },
                     onDelete = { handleDeleteLine(line.id) },
@@ -1022,6 +1061,7 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
         engine = engine,
         songId = songId,
         visible = scratchpadOpen,
+        songBpm = meta.bpm,
         onRecordingChanged = { isScratchpadRecording = it },
         onDone = { scratchpadOpen = false },
         onExpand = { scratchpadOpen = true },
@@ -1055,7 +1095,7 @@ private fun LineRow(
     onConsumedPendingFocus: () -> Unit,
     onChordsChange: (String) -> Unit,
     onLyricsChange: (String, caretIndex: Int) -> Unit,
-    onEnter: () -> Unit,
+    onEnter: (caretIndex: Int) -> Unit,
     onBackspaceMerge: () -> Unit,
     onBackspaceDeleteEmpty: () -> Unit,
     onDelete: () -> Unit,
@@ -1186,7 +1226,7 @@ private fun LineRow(
             cursorBrush = SolidColor(LyricColor),
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-            keyboardActions = KeyboardActions(onNext = { onEnter() }),
+            keyboardActions = KeyboardActions(onNext = { onEnter(lyricsField.selection.start) }),
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 28.dp)

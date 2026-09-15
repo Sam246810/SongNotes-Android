@@ -165,6 +165,13 @@ fun ScratchpadScreen(
     engine: AudioEngine,
     songId: String,
     visible: Boolean,
+    /**
+     * The song's own chart tempo, from [com.songnotes.core.domain.SongMeta.bpm]
+     * on the lyrics/editor screen (0 means unset there). The source of truth
+     * for tempo is the editor, not this screen — see the `LaunchedEffect(songBpm)`
+     * below, which keeps [project]'s bpm following it live.
+     */
+    songBpm: Int,
     onDone: () -> Unit,
     onExpand: () -> Unit,
     onRecordingChanged: (Boolean) -> Unit = {},
@@ -236,9 +243,29 @@ fun ScratchpadScreen(
             // shown exactly as it was left -- including genuinely empty (the
             // user deliberately removed every track last time), which is a
             // real, allowed state, not one to silently patch back to one track.
-            project = loaded
-            bpmText = formatBpm(loaded.bpm)
+            // bpm is the one field NOT left as-loaded -- the editor's chart
+            // tempo (songBpm) is the source of truth, see the sync effect below.
+            project = if (songBpm > 0) loaded.copy(bpm = songBpm.toDouble()) else loaded
+            bpmText = formatBpm(project.bpm)
             selectedTrackIndex = if (loaded.tracks.isEmpty()) null else 0
+        } else if (songBpm > 0) {
+            project = project.copy(bpm = songBpm.toDouble())
+            bpmText = formatBpm(project.bpm)
+        }
+    }
+
+    // Keeps this screen's tempo following the editor's chart BPM live, not
+    // just at load -- editing BPM on the lyrics page while the scratchpad is
+    // open (it's composed the whole time the editor is, per this function's
+    // doc comment, whether or not [visible]) should retune the metronome/
+    // beat grid immediately, the same way the two fields read as "the same
+    // number" to a user. One-directional (editor -> scratchpad) per direct
+    // request -- recording-only tempo tweaks in the scratchpad's own tempo
+    // card are NOT pushed back up into the song's chart BPM.
+    LaunchedEffect(songBpm) {
+        if (songBpm > 0 && project.bpm != songBpm.toDouble()) {
+            project = project.copy(bpm = songBpm.toDouble())
+            bpmText = formatBpm(project.bpm)
         }
     }
 
