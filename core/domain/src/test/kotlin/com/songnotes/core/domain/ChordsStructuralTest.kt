@@ -130,20 +130,4 @@ class ChordsStructuralTest {
         assertNull(parseFretsInput("x 3 2 0 1"))
         assertNull(parseFretsInput("x 3 2 0 1 0 3"))
     }
-
-    // ── alignChordsWithLyrics ────────────────────────────────────────
-
-    @Test
-    fun `chords longer than lyrics with only trailing whitespace are trimmed to the lyric length`() {
-        assertEquals("C ", alignChordsWithLyrics("C    ", "Hi"))
-        assertEquals("C G  ", alignChordsWithLyrics("C G   ", "Hello"))
-    }
-
-    @Test
-    fun `chords longer than lyrics with real trailing content are never trimmed or dropped`() {
-        // The extra characters past the lyric length are real chord symbols
-        // here, not padding — trimming them would silently lose data.
-        assertEquals("C    G", alignChordsWithLyrics("C    G", "Hi"))
-        assertEquals("C  Am  ", alignChordsWithLyrics("C  Am  ", "Hi"))
-    }
 }

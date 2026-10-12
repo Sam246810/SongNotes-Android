@@ -324,24 +324,3 @@ fun parseFretsInput(raw: String?): FretsInput? {
     val baseFret = if (played.isEmpty() || played.max() <= 4) 1 else played.min()
     return FretsInput(frets = frets, baseFret = baseFret)
 }
-
-/**
- * Ensures a chords line aligns in length with a lyrics line: pads with
- * trailing spaces if chords are shorter, trims trailing spaces if chords
- * are longer (but only if the extra characters are all whitespace — real
- * chord symbols past the lyrics' length are never silently dropped).
- */
-fun alignChordsWithLyrics(chords: String?, lyrics: String?): String {
-    val chordsStr = chords ?: ""
-    val lyricsStr = lyrics ?: ""
-    if (chordsStr.length < lyricsStr.length) {
-        return chordsStr + " ".repeat(lyricsStr.length - chordsStr.length)
-    }
-    if (chordsStr.length > lyricsStr.length) {
-        val extra = chordsStr.substring(lyricsStr.length)
-        if (extra.isBlank()) {
-            return chordsStr.substring(0, lyricsStr.length)
-        }
-    }
-    return chordsStr
-}

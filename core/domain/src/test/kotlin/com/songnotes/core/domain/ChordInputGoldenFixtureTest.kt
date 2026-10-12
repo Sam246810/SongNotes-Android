@@ -5,9 +5,8 @@ import org.junit.Test
 
 /**
  * Same cross-check strategy as [ChordsGoldenFixtureTest], applied to
- * [formatFretsForInput], [parseFretsInput], and [alignChordsWithLyrics] —
- * the custom-voicing-entry and chord/lyric-alignment helpers that round
- * out `chords.js`'s fully portable surface (everything except
+ * [formatFretsForInput] and [parseFretsInput] — the custom-voicing-entry
+ * helpers that round out `chords.js`'s portable surface (everything except
  * `lookupChord` and the real `CHORD_DB` voicing/fret data, both deferred
  * to Phase 8 — see `Chords.kt`'s own doc comment).
  */
@@ -76,32 +75,6 @@ class ChordInputGoldenFixtureTest {
         }
         assertEquals(
             "parseFretsInput disagreed with the JS fixtures on $failures/${fixtures.size} cases:\n$failureExamples",
-            0,
-            failures,
-        )
-    }
-
-    @Test
-    fun `alignChordsWithLyrics matches the JS fixtures exactly`() {
-        val fixtures = loadFixtures("/spec/align-chords-with-lyrics.json")
-        assertEquals("expected a non-trivial fixture set", true, fixtures.isNotEmpty())
-
-        var failures = 0
-        val failureExamples = StringBuilder()
-        for (fixture in fixtures) {
-            val chords = fixture["chords"] as String?
-            val lyrics = fixture["lyrics"] as String?
-            val expected = fixture["output"] as String
-            val actual = alignChordsWithLyrics(chords, lyrics)
-            if (actual != expected) {
-                failures++
-                if (failures <= 20) {
-                    failureExamples.appendLine("  chords=$chords lyrics=$lyrics expected=$expected actual=$actual")
-                }
-            }
-        }
-        assertEquals(
-            "alignChordsWithLyrics disagreed with the JS fixtures on $failures/${fixtures.size} cases:\n$failureExamples",
             0,
             failures,
         )

@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -18,13 +19,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,6 +41,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -47,21 +53,23 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
@@ -71,16 +79,25 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -88,14 +105,15 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.data.SongRepository
+import com.songnotes.core.domain.ChordAnchor
 import com.songnotes.core.domain.ChordBarre
 import com.songnotes.core.domain.ChordVoicing
 import com.songnotes.core.domain.Song
 import com.songnotes.core.domain.SongLine
 import com.songnotes.core.domain.SongMeta
-import com.songnotes.core.domain.alignChordsWithLyrics
 import com.songnotes.core.domain.anchorsToChordsLine
 import com.songnotes.core.domain.chordsLineToAnchors
+import com.songnotes.core.domain.cutIntoRows
 import com.songnotes.core.domain.formatFretsForInput
 import com.songnotes.core.domain.lookupChord
 import com.songnotes.core.domain.parseFretsInput
@@ -106,6 +124,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -124,24 +143,20 @@ import org.json.JSONObject
  * "ruled paper" cue — a more discreet nod to the theme that doesn't cost
  * layout width to maintain.
  *
- * Also replaces the fixed-character-count auto-split heuristic with one
- * based on actually measuring the line's rendered width
- * ([TextMeasurer]) against the real available width, for two reasons a
- * guessed character count got wrong in practice: it doesn't adapt to the
- * font-size control below, and worse, its "no good word-boundary found"
- * fallback could hard-split *inside* a word — never acceptable, per
- * direct feedback after it happened. The new version always finds an
- * actual space to split on, searching forward past the target width if
- * necessary rather than ever breaking a word — [findSplitIndex] only
- * reaches for a hard character-level cut once it's proven no space exists
- * anywhere left in the run, e.g. a pasted wall of characters with no
- * whitespace at all, where the alternative is the line silently
- * overflowing off the edge of the screen forever rather than a real word
- * getting mangled.
+ * Lyrics wrap the way Samsung Notes does (compared side by side on-device):
+ * each real line is a [Paragraph] whose rows are re-flowed from its whole
+ * text with Android's own line breaker ([breakParagraph]), so words move
+ * between rows as you type or delete, wrapped rows start flush, and
+ * backspace at the start of a wrapped row deletes the character before it
+ * rather than "joining" anything. Wrapping is display-only: each paragraph is
+ * saved as one [SongLine] and re-wrapped for whatever screen and font size
+ * opens it, and exports wrap it to the page. The chords track never wraps;
+ * it's hard-capped at what fits on screen ([chordCapacity]) so it never
+ * scrolls sideways. Lyrics and chords share one monospace glyph width, so a
+ * chord's column is exactly the lyric character it sits over.
  *
- * The wire-format anchor model ([ChordAnchor]) stays exactly as
- * demoted-to-storage-detail as the second pass left it — nothing about
- * this pass touches that boundary.
+ * The wire-format anchor model ([ChordAnchor]) is still a storage detail,
+ * plus how chords keep their place across a re-wrap.
  */
 
 // The parchment palette moved into the theme (see Theme.kt) so it can have a
@@ -155,7 +170,7 @@ private val LyricColor: Color @Composable get() = SongNotesTheme.colors.lyric
 private val TextMuted: Color @Composable get() = SongNotesTheme.colors.muted
 private val PaperLine: Color @Composable get() = SongNotesTheme.colors.paperLine
 
-/** How long a lyrics line must sit still before the width-triggered auto-wrap (or its reverse, auto-merge) runs — see [handleLyricsChange]. */
+/** How long a lyrics row must sit still before its paragraph is re-wrapped after typing — see [handleLyricsChange]. */
 private const val SPLIT_DEBOUNCE_MS = 180L
 
 /**
@@ -165,25 +180,23 @@ private const val SPLIT_DEBOUNCE_MS = 180L
  * every keystroke (which would make Undo only ever step back one character).
  */
 private const val HISTORY_DEBOUNCE_MS = 600L
+
+/** The autoscroll button's height plus its margins -- see [AutoscrollControls]. */
+private val AUTOSCROLL_BUTTON_CLEARANCE = 88.dp
 private const val MAX_HISTORY = 100
 
 /**
- * [hardBreak] distinguishes a real line boundary (the user pressed
- * Enter/Next, pasted a literal newline, tapped "+ Add line", or this line
- * simply came from the saved song) from a boundary [wrapLineByWidth] created
- * purely because a line overflowed the screen width. Defaults to true --
- * only the continuation piece(s) [wrapLineByWidth] splits off get it set to
- * false. [performReflowIfNeeded] uses this to decide whether it's safe to
- * silently re-merge a line into the one above it just because the combined
- * text would now fit: safe for a soft wrap shrinking back down, wrong for
- * two lines the user (or the song) deliberately kept separate -- without
- * this, any two adjacent short-enough lines got silently merged the moment
- * either was edited, e.g. hitting Next to start a new line and typing into
- * it merged it straight back into the previous line.
+ * One visual row of the editor. Consecutive rows sharing a [paragraphId] are
+ * one paragraph -- a real line the user made (Enter/Next, a pasted newline,
+ * "+ Add line") and the soft-wrap rows it needed to fit the screen width.
+ * Editing treats a paragraph's rows as one string, the way Samsung Notes (any
+ * text editor) treats a wrapped line, and each paragraph is saved as one
+ * [SongLine] whose id is [paragraphId] -- see [Paragraph]. [id] is only the
+ * row's on-screen identity (its composable key and focus target), which moves
+ * between rows as text re-wraps.
  */
-private data class EditorLine(val id: String, val chords: String, val lyrics: String, val hardBreak: Boolean = true)
-private enum class Track { Chords, Lyrics }
-private data class PendingFocus(val lineId: String, val track: Track, val caretIndex: Int? = null)
+private data class EditorLine(val id: String, val paragraphId: String, val chords: String, val lyrics: String)
+private data class PendingFocus(val lineId: String, val caretIndex: Int? = null)
 
 /** A point-in-time snapshot of everything Undo/Redo restores — deliberately NOT song metadata like id/createdAt, which never change from within the editor. */
 private data class EditorSnapshot(
@@ -231,7 +244,9 @@ private fun serializeSnapshot(snapshot: EditorSnapshot): String {
     )
     val linesArr = JSONArray()
     for (line in snapshot.lines) {
-        linesArr.put(JSONObject().put("id", line.id).put("chords", line.chords).put("lyrics", line.lyrics))
+        linesArr.put(
+            JSONObject().put("id", line.id).put("paragraphId", line.paragraphId).put("chords", line.chords).put("lyrics", line.lyrics),
+        )
     }
     obj.put("lines", linesArr)
     val customChordsObj = JSONObject()
@@ -254,7 +269,13 @@ private fun deserializeSnapshot(json: String): EditorSnapshot {
     val linesArr = obj.getJSONArray("lines")
     val lines = (0 until linesArr.length()).map { i ->
         val lineObj = linesArr.getJSONObject(i)
-        EditorLine(id = lineObj.getString("id"), chords = lineObj.getString("chords"), lyrics = lineObj.getString("lyrics"))
+        val id = lineObj.getString("id")
+        EditorLine(
+            id = id,
+            paragraphId = lineObj.optString("paragraphId", id),
+            chords = lineObj.getString("chords"),
+            lyrics = lineObj.getString("lyrics"),
+        )
     }
     val customChordsObj = obj.getJSONObject("customChords")
     val customChords = LinkedHashMap<String, ChordVoicing>()
@@ -280,36 +301,147 @@ private val editorSnapshotListSaver: Saver<List<EditorSnapshot>, Any> = listSave
     restore = { saved -> saved.mapNotNull { runCatching { deserializeSnapshot(it) }.getOrNull() } },
 )
 
+/**
+ * One unwrapped row per saved line (paragraph), shown only until the editor
+ * knows its width and wraps the song (see `wrapLoadedSong`).
+ */
 private fun songToEditorLines(song: Song): List<EditorLine> {
-    if (song.lines.isEmpty()) return listOf(EditorLine(UUID.randomUUID().toString(), "", ""))
-    return song.lines.map { EditorLine(it.id, anchorsToChordsLine(it.lyrics.length, it.chords), it.lyrics) }
+    if (song.lines.isEmpty()) return listOf(newEditorLine())
+    return song.lines.map { EditorLine(it.id, it.id, renderChordAnchors(it.chords, padTo = it.lyrics.length), it.lyrics) }
 }
 
-/** JS `String.slice`-style forgiving substring — never throws on an out-of-range index. */
-private fun String.sliceSafe(start: Int, end: Int = length): String {
-    val s = start.coerceIn(0, length)
-    val e = end.coerceIn(s, length)
-    return substring(s, e)
+/** A blank row starting a paragraph of its own. */
+private fun newEditorLine(): EditorLine = EditorLine(UUID.randomUUID().toString(), UUID.randomUUID().toString(), "", "")
+
+/** The saved form of [rows]: one [SongLine] per paragraph, wrapping undone. */
+private fun songLinesOf(rows: List<EditorLine>): List<SongLine> {
+    val out = mutableListOf<SongLine>()
+    var i = 0
+    while (i < rows.size) {
+        var end = i
+        while (end + 1 < rows.size && rows[end + 1].paragraphId == rows[i].paragraphId) end++
+        val p = paragraphOf(rows.subList(i, end + 1))
+        out += SongLine(id = p.id, lyrics = p.lyrics, chords = p.anchors.sortedBy { it.i })
+        i = end + 1
+    }
+    return out
 }
 
 /**
- * Unlike the lyrics track, the chords track has no width-based wrap/reflow —
- * it's a run of chord names with alignment spacing, not prose, so there's no
- * sensible word-boundary or per-character split point to carry a chord onto
- * a second line. Without a cap, a very long line of chords (or, worse, a
- * large accidental paste — e.g. an entire clipboard's worth of text landing
- * in the wrong field) just grows the single-line field indefinitely, forcing
- * it to auto-scroll horizontally to keep the caret visible with no way back
- * except backspacing it all out again. Capping the raw length here is
- * simpler and more predictable than trying to wrap chords the way lyrics
- * wrap: input simply stops being accepted past the limit, same as a form
- * field's maxlength — never scrolls, never spills onto another line.
+ * The chords track's hard length limit, in characters: as many monospace
+ * glyphs as fit across the lines area at the current font size, with room
+ * left for the caret. The chords field is single-line and never wraps (a run
+ * of chord names has no sensible place to break), so anything longer than
+ * this makes the field scroll sideways to keep the caret in view. A fixed
+ * character count can't prevent that, because how many characters fit
+ * depends on the screen width and the A-/A+ font size.
  */
-private const val MAX_CHORDS_LENGTH = 60
+private fun chordCapacity(charWidthPx: Float, maxWidthPx: Int, caretSlackPx: Int): Int =
+    if (maxWidthPx <= 0 || charWidthPx <= 0f) Int.MAX_VALUE else ((maxWidthPx - caretSlackPx) / charWidthPx).toInt().coerceAtLeast(1)
 
-private fun TextFieldValue.capLength(max: Int): TextFieldValue {
-    if (text.length <= max) return this
-    return TextFieldValue(text.take(max), TextRange(selection.end.coerceIn(0, max)))
+/** Advance of one glyph of a monospace [style], letter spacing included. */
+private fun monospaceAdvance(style: TextStyle, measurer: TextMeasurer): Float =
+    measurer.measure("M".repeat(100), style).size.width / 100f
+
+/**
+ * Applies [capacity] to a chords-field edit like a maxlength, with one
+ * allowance: spaces trailing after the edit are alignment padding (see
+ * [renderChordAnchors]), not content, so an insertion may consume them before
+ * anything is refused -- otherwise a chord line padded out under a long lyric
+ * line would refuse every keystroke. An insertion that only partly fits keeps
+ * what fits (a paste is truncated); one that can't fit at all is dropped and
+ * the field stays as it was. Edits that don't lengthen the line (deleting,
+ * replacing) always go through, so a line already over the limit -- old
+ * data, or the font just got bigger -- can still be shortened.
+ */
+private fun capChordInput(old: TextFieldValue, new: TextFieldValue, capacity: Int): TextFieldValue {
+    val oldText = old.text
+    val newText = new.text
+    if (newText.length <= capacity || newText.length <= oldText.length) return new
+
+    var prefix = 0
+    while (prefix < oldText.length && prefix < newText.length && oldText[prefix] == newText[prefix]) prefix++
+    val maxSuffix = minOf(oldText.length, newText.length) - prefix
+    var suffix = 0
+    while (suffix < maxSuffix && oldText[oldText.length - 1 - suffix] == newText[newText.length - 1 - suffix]) suffix++
+
+    val before = newText.substring(0, prefix)
+    var inserted = newText.substring(prefix, newText.length - suffix)
+    var after = newText.substring(newText.length - suffix)
+
+    val overBy = before.length + inserted.length + after.length - capacity
+    val trailingPadding = after.length - after.trimEnd().length
+    after = after.dropLast(minOf(overBy, trailingPadding))
+
+    val stillOver = before.length + inserted.length + after.length - capacity
+    if (stillOver > 0) {
+        var keep = (inserted.length - stillOver).coerceAtLeast(0)
+        if (keep > 0 && inserted[keep - 1].isHighSurrogate()) keep--
+        inserted = inserted.take(keep)
+    }
+    if (inserted.isEmpty()) return old
+    return TextFieldValue(before + inserted + after, TextRange(before.length + inserted.length))
+}
+
+/**
+ * Renders chord anchors as a chords-track string, padded with spaces to
+ * [padTo]. Unlike the wire format's [anchorsToChordsLine] -- where a later
+ * anchor overwrites an earlier one at a shared column -- an anchor that would
+ * collide with the one before it is nudged right instead: an editor must never
+ * fuse two chord names into one ("Am" + "G" -> "AG"). Collisions only arise
+ * when re-wrapping a paragraph lands chords from two different rows on one.
+ */
+private fun renderChordAnchors(anchors: List<ChordAnchor>, padTo: Int): String {
+    val sb = StringBuilder()
+    for (anchor in anchors.sortedBy { it.i }) {
+        val start = if (sb.isEmpty()) anchor.i else maxOf(anchor.i, sb.length + 1)
+        while (sb.length < start) sb.append(' ')
+        sb.append(anchor.c)
+    }
+    while (sb.length < padTo) sb.append(' ')
+    return sb.toString()
+}
+
+/**
+ * A lyrics row's chords after its lyrics went from [oldLyrics] to
+ * [newLyrics] by typing with the caret ending at [caret]: each chord stays
+ * over the character it was over, as the words it marks move. Without this,
+ * typing in the middle of a row left its chords at their old columns while
+ * the words shifted out from under them -- and once a paragraph re-wrapped,
+ * the chords on the edited row were over the wrong words while the rows
+ * below (re-wrapped by character offset) were right. Chords past the end of
+ * the lyrics (an ending chord) are placed by column, not by character, so
+ * typing at the end of the line doesn't shove them along.
+ */
+private fun chordsAfterLyricsEdit(chords: String, oldLyrics: String, newLyrics: String, caret: Int, cap: Int): String {
+    val delta = newLyrics.length - oldLyrics.length
+    // Where the edit happened: the caret pins it down even inside a run of
+    // repeated letters, where a plain text diff can't tell which one changed.
+    var start = if (delta > 0) caret - delta else caret
+    var oldEnd = if (delta > 0) start else caret - delta
+    val caretConsistent = start in 0..oldEnd && oldEnd <= oldLyrics.length &&
+        newLyrics.regionMatches(0, oldLyrics, 0, start) &&
+        newLyrics.regionMatches(newLyrics.length - (oldLyrics.length - oldEnd), oldLyrics, oldEnd, oldLyrics.length - oldEnd) &&
+        oldLyrics.length - oldEnd <= newLyrics.length - start
+    if (!caretConsistent) {
+        start = 0
+        while (start < oldLyrics.length && start < newLyrics.length && oldLyrics[start] == newLyrics[start]) start++
+        var suffix = 0
+        while (suffix < minOf(oldLyrics.length, newLyrics.length) - start &&
+            oldLyrics[oldLyrics.length - 1 - suffix] == newLyrics[newLyrics.length - 1 - suffix]
+        ) suffix++
+        oldEnd = oldLyrics.length - suffix
+    }
+    val anchors = chordsLineToAnchors(chords)
+    val moved = anchors.map { a ->
+        when {
+            a.i < start || a.i >= oldLyrics.length -> a
+            a.i >= oldEnd -> a.copy(i = a.i + delta)
+            else -> a.copy(i = start)
+        }
+    }
+    if (moved == anchors) return chords
+    return renderChordAnchors(moved, padTo = minOf(newLyrics.length, cap))
 }
 
 /**
@@ -343,103 +475,114 @@ private fun suppressDoubleSpacePeriod(old: TextFieldValue, new: TextFieldValue):
 }
 
 /**
- * [secondHardBreak] defaults to false (a pure wrap continuation, [wrapLineByWidth]'s
- * only use of this) -- pass true for an explicit user-invoked split (Enter/Next
- * mid-line, see [handleEnterFromLyrics]), where the tail is a real line the
- * user deliberately started, not a wrap artifact eligible for silent re-merging.
+ * One logical line of lyrics -- a hard-break row plus the soft-wrap rows
+ * after it -- flattened back into a single string, the way Samsung Notes (any
+ * text editor) holds a wrapped line: wrapping is only how a paragraph is
+ * drawn, never part of its text. Every structural edit (typing that changes
+ * the wrap, Enter, backspace across a row boundary, a multi-line paste, a font
+ * or width change) works on paragraphs and re-wraps them whole, so text
+ * always flows between rows instead of leaving ragged half-empty ones. Chords
+ * travel as anchors at paragraph-wide character offsets, so each stays above
+ * the same lyric character however its paragraph is re-wrapped. A paragraph
+ * is also exactly what gets saved: one [SongLine] with id [id].
  */
-private fun splitLineAt(line: EditorLine, splitIndex: Int, secondHardBreak: Boolean = false): Pair<EditorLine, EditorLine> {
-    val lyrics1 = line.lyrics.sliceSafe(0, splitIndex)
-    val lyrics2 = line.lyrics.sliceSafe(splitIndex)
-    val chords1 = line.chords.sliceSafe(0, splitIndex)
-    val chords2 = line.chords.sliceSafe(splitIndex)
-    val first = EditorLine(line.id, alignChordsWithLyrics(chords1, lyrics1), lyrics1, hardBreak = line.hardBreak)
-    val second = EditorLine(UUID.randomUUID().toString(), chords2, lyrics2, hardBreak = secondHardBreak)
-    return first to second
-}
+private class Paragraph(val id: String, val lyrics: String, val anchors: List<ChordAnchor>)
 
-private fun mergeWithPrevious(prev: EditorLine, curr: EditorLine): EditorLine {
-    val alignedPrevChords = alignChordsWithLyrics(prev.chords, prev.lyrics)
-    val mergedChords = alignedPrevChords + curr.chords
-    val mergedLyrics = prev.lyrics + curr.lyrics
-    return EditorLine(prev.id, alignChordsWithLyrics(mergedChords, mergedLyrics), mergedLyrics, hardBreak = prev.hardBreak)
+/**
+ * Flattens one paragraph's [rows]. A chord typed out past the end of a row's
+ * lyrics -- in the empty space a wrap leaves at the end of every row but the
+ * last -- has no paragraph offset of its own (that offset is the start of
+ * the next row), so it's pinned to the row's last character instead, the
+ * space the wrap hung there.
+ */
+private fun paragraphOf(rows: List<EditorLine>): Paragraph {
+    val lyrics = StringBuilder()
+    val anchors = mutableListOf<ChordAnchor>()
+    for ((k, row) in rows.withIndex()) {
+        val offset = lyrics.length
+        val lastCol = if (k < rows.lastIndex) maxOf(row.lyrics.length - 1, 0) else Int.MAX_VALUE
+        chordsLineToAnchors(row.chords).mapTo(anchors) { it.copy(i = minOf(it.i, lastCol) + offset) }
+        lyrics.append(row.lyrics)
+    }
+    return Paragraph(rows.first().paragraphId, lyrics.toString(), anchors)
 }
 
 /**
- * Finds where to split [text] so it fits within [maxWidthPx] at [style],
- * preferring a real space over breaking mid-word — the earlier
- * fixed-character-count heuristic's habit of hard-splitting *ordinary*
- * words it had simply misjudged the width of was rejected outright per
- * direct feedback, and that stands: any word a nearby space could resolve
- * is never cut. This only reaches for a hard character-level cut as the
- * last resort *after* [wrapLineByWidth] has proven no space exists
- * anywhere in the run being measured — a pasted wall of characters (a long
- * URL, mashed keys, no whitespace at all), not a real word a smarter split
- * point would have saved. Leaving that run untouched doesn't avoid
- * mangling a word; it just means the line silently overflows off the edge
- * of the screen forever, which is worse.
+ * Start offsets of the rows [text] wraps into at [maxWidthPx] -- Android's own
+ * greedy line breaker (the one Samsung Notes' text field uses), not a
+ * reimplementation of it: a word that doesn't fit moves down whole, the space
+ * before it hangs at the end of the row above so wrapped rows start flush,
+ * and a run with no space in it breaks at the last character that fits.
+ * [maxChars] also caps a row's length so its chords, which align to lyrics by
+ * character position, never need more room than the chords track has (see
+ * [chordCapacity]). Lyrics and chords share one glyph width, so this only
+ * bites when the caret's own room at the edge pushes the last character out.
+ * Spaces hanging at the end of a row are never counted, as on Android: a word
+ * that exactly fills the row stays there after you type the space after it.
  */
-private fun findSplitIndex(text: String, style: TextStyle, maxWidthPx: Int, measurer: TextMeasurer): Int? {
-    if (maxWidthPx <= 0 || text.isEmpty()) return null
-    val layout = measurer.measure(text, style)
-    if (layout.size.width <= maxWidthPx) return null
-    val boundary = layout.getOffsetForPosition(Offset(maxWidthPx.toFloat(), 0f)).coerceIn(0, text.length - 1)
-    val lastSpaceBefore = text.lastIndexOf(' ', boundary)
-    if (lastSpaceBefore > 0) return lastSpaceBefore
-    // No space before the target width at all — one very long leading
-    // word/token. Rather than break it, look forward for the next space
-    // so the whole word stays together, even if this line ends up a bit
-    // wider than the target.
-    val nextSpaceAfter = text.indexOf(' ', boundary)
-    if (nextSpaceAfter > 0) return nextSpaceAfter
-    // No space anywhere in this run, forward or back -- there is no word
-    // left to protect. Cut right at the measured boundary so the line
-    // makes progress instead of overflowing indefinitely; nudge off a
-    // surrogate-pair boundary (an emoji) so that doesn't get split in two.
-    if (boundary <= 0) return null // can't make forward progress at all
-    val cut = if (text[boundary].isLowSurrogate()) boundary - 1 else boundary
-    return if (cut > 0) cut else null
-}
-
-/**
- * Repeatedly applies [findSplitIndex]/[splitLineAt] until every resulting
- * piece fits within [maxWidthPx] — as opposed to a single split pass, which
- * only shortens a too-long line once and leaves it still overflowing when
- * it started out several multiples of the available width (the common case
- * for a large paste, rather than a line that only just grew past the edge
- * one keystroke at a time).
- *
- * [line]'s own id is reassigned to the LAST piece rather than the first.
- * [splitLineAt] hands the incoming id to the earlier half and mints a
- * fresh one for the tail on every pass, which is backwards for typing:
- * the tail is where the caret actually is, so as someone keeps typing
- * past the edge, every single threshold-crossing keystroke was spawning a
- * brand-new composable + FocusRequester under their still-live cursor and
- * reassigning focus to it. A keystroke that arrived before that focus
- * transfer finished landed on the old, about-to-be-abandoned field instead
- * — forking what they were typing across two rows, with the earlier one
- * left orphaned ("just sits there") — reproduced directly by typing fast
- * through a wrap boundary. Keeping the original id on the tail means the
- * actively-focused field never actually changes identity while someone is
- * mid-word; only the already-committed earlier piece(s) need a new one.
- */
-private fun wrapLineByWidth(line: EditorLine, style: TextStyle, maxWidthPx: Int, measurer: TextMeasurer): List<EditorLine> {
-    val pieces = mutableListOf<EditorLine>()
-    var current = line
-    while (true) {
-        val splitIdx = findSplitIndex(current.lyrics, style, maxWidthPx, measurer)
-        if (splitIdx == null) {
-            pieces += current
+private fun breakParagraph(text: String, style: TextStyle, maxWidthPx: Int, maxChars: Int, measurer: TextMeasurer, caretAtEnd: Boolean): List<Int> {
+    val starts = mutableListOf(0)
+    if (maxWidthPx <= 0) return starts
+    val greedy = style.copy(lineBreak = LineBreak.Simple)
+    var pos = 0
+    while (pos < text.length) {
+        val rest = text.substring(pos)
+        val layout = measurer.measure(rest, greedy, softWrap = true, constraints = Constraints(maxWidth = maxWidthPx))
+        var end = if (layout.lineCount > 1) layout.getLineEnd(0) else rest.length
+        // Spaces hanging at the row's end don't count -- see HangingSpacesHidden.
+        if (rest.substring(0, end).trimEnd(' ').length > maxChars) {
+            val space = rest.lastIndexOf(' ', maxChars - 1)
+            end = if (space > 0) space + 1 else maxChars
+            while (end < rest.length && rest[end] == ' ') end++
+            if (end < rest.length && rest[end].isLowSurrogate()) end--
+        }
+        if (end >= rest.length) {
+            // The caret sits after spaces hanging past a full row (the user
+            // just typed the space after the row's last word): it goes to the
+            // start of a fresh row, as in any text editor -- not parked at the
+            // edge until the next letter arrives, and not whisked up a row when
+            // the word after the space is backspaced. Only while the caret is
+            // there: anywhere else it'd just be a blank row in the song.
+            if (caretAtEnd && rest.length > maxChars && rest.endsWith(' ')) starts += text.length
             break
         }
-        val (first, second) = splitLineAt(current, splitIdx)
-        pieces += first
-        current = second
+        if (end <= 0) end = if (rest.length > 1 && rest[0].isHighSurrogate()) 2 else 1
+        pos += end
+        starts += pos
     }
-    if (pieces.size <= 1) return pieces
-    return pieces.mapIndexed { i, p -> p.copy(id = if (i == pieces.lastIndex) line.id else UUID.randomUUID().toString()) }
+    return starts
 }
 
+/**
+ * Draws a lyrics row without the spaces hanging past [capacity] at its end,
+ * with a caret after them shown at the edge -- what Android does with a
+ * wrapped line's trailing spaces. Drawn, they'd push the single-line field
+ * past its width and make it scroll sideways to keep the caret in view.
+ */
+private class HangingSpacesHidden(private val capacity: Int) : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val keep = maxOf(capacity, text.text.trimEnd(' ').length)
+        if (text.length <= keep) return TransformedText(text, OffsetMapping.Identity)
+        return TransformedText(
+            text.subSequence(0, keep),
+            object : OffsetMapping {
+                override fun originalToTransformed(offset: Int): Int = minOf(offset, keep)
+                override fun transformedToOriginal(offset: Int): Int = offset
+            },
+        )
+    }
+
+    override fun equals(other: Any?): Boolean = other is HangingSpacesHidden && other.capacity == capacity
+    override fun hashCode(): Int = capacity
+}
+
+/** Cuts [p] into rows at [starts]: (lyrics, chords) per row, each row's chords padded no wider than [chordCap]. */
+private fun layoutParagraph(p: Paragraph, starts: List<Int>, chordCap: Int): List<Pair<String, String>> =
+    cutIntoRows(p.lyrics, p.anchors, starts).map { row ->
+        row.lyrics to renderChordAnchors(row.chords, padTo = minOf(row.lyrics.length, chordCap))
+    }
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
     val context = LocalContext.current
@@ -566,6 +709,9 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
     // LaunchedEffect keys -- toggling off cancels this coroutine outright
     // (the `if (!autoscrollEnabled) return@LaunchedEffect` guard), so
     // there's never a stray scroll loop running after the button says off.
+    val lyricsAtEnd by remember { derivedStateOf { !lazyListState.canScrollForward } }
+    val lyricsCanScroll by remember { derivedStateOf { lazyListState.canScrollForward || lazyListState.canScrollBackward } }
+
     LaunchedEffect(autoscrollEnabled, autoscrollSpeed) {
         if (!autoscrollEnabled) return@LaunchedEffect
         // Tuned as a comfortable baseline reading pace at 1x, not derived
@@ -587,10 +733,13 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
         }
     }
 
-    // Per-line debounce jobs for the width-triggered auto-wrap -- see
+    // Per-row debounce jobs for re-wrapping after typing -- see
     // handleLyricsChange's doc comment for why this can't just run inline
     // on every keystroke.
     val splitJobs = remember { mutableMapOf<String, Job>() }
+    // The lyrics row that currently has focus, so a debounced re-wrap knows
+    // whether it's still allowed to place the caret (see reflowParagraphOf).
+    var focusedLyricsId by remember { mutableStateOf<String?>(null) }
     val textMeasurer = rememberTextMeasurer()
 
     // Phase 13: guarantees nothing typed is lost on any exit path, not just
@@ -636,14 +785,32 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
     // whole handler is disabled and back correctly falls through to finish().
     BackHandler(enabled = scratchpadOpen || isScratchpadRecording) { scratchpadOpen = !scratchpadOpen }
 
-    val chordStyle = baseChordTextStyle.copy(fontSize = baseChordTextStyle.fontSize * fontScale)
+    val density = LocalDensity.current
     val lyricStyle = baseLyricTextStyle.copy(fontSize = baseLyricTextStyle.fontSize * fontScale)
+    // Chords sit above lyrics by character column, so both tracks must share
+    // one glyph width or a chord drifts off its word further along the line
+    // (chords used to be monospace over proportional lyrics, and did). Both
+    // are monospace now; the chords, a size smaller and bold, get exactly the
+    // letter spacing that makes up the difference, measured rather than
+    // assumed since the system monospace font varies by device.
+    val glyphWidthPx = remember(fontScale, density) { monospaceAdvance(lyricStyle, textMeasurer) }
+    val chordStyle = remember(fontScale, density, glyphWidthPx) {
+        val unspaced = baseChordTextStyle.copy(fontSize = baseChordTextStyle.fontSize * fontScale, letterSpacing = 0.sp)
+        val gapPx = glyphWidthPx - monospaceAdvance(unspaced, textMeasurer)
+        unspaced.copy(letterSpacing = with(density) { gapPx.toSp() })
+    }
+    // The caret is drawn past the last glyph; leave room for it, or a chord
+    // line exactly at capacity would still scroll by the caret's width.
+    val caretSlackPx = with(density) { 2.dp.roundToPx() } + 1
+    val chordCap = remember(linesAreaWidthPx, glyphWidthPx, caretSlackPx) {
+        chordCapacity(glyphWidthPx, linesAreaWidthPx, caretSlackPx)
+    }
 
     fun currentSong(): Song = Song(
         id = songId,
         title = title,
         meta = meta,
-        lines = lines.map { SongLine(id = it.id, lyrics = it.lyrics, chords = chordsLineToAnchors(it.chords)) },
+        lines = songLinesOf(lines),
         customChords = customChords,
         createdAt = loaded.createdAt,
         updatedAt = System.currentTimeMillis(),
@@ -704,229 +871,280 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
     }
 
     /**
-     * Splits the line at [caretIndex] -- same as pressing Enter mid-text in any
-     * other editor, not just a "start a blank line after this one" shortcut.
-     * Everything from the caret onward moves to the new line below (empty
-     * when the caret was already at the end, which is the common case and
-     * matches the old always-blank-line behavior exactly). Both halves are
-     * run through [wrapLineByWidth] since a split can leave either one still
-     * too long for the screen on its own -- e.g. splitting a single very long
-     * word-free run roughly in half.
+     * Transposes each chord in place. Done per anchor rather than over the
+     * padded string, which would shift every later chord one column right
+     * each time a name got longer (F -> F#) and could push a full chord line
+     * past [chordCap]. Each token still goes through [transposeChordsLine] so
+     * non-chords (section labels, typos) are left alone, same as before.
      */
-    fun handleEnterFromLyrics(afterId: String, caretIndex: Int) {
-        val idx = lines.indexOfFirst { it.id == afterId }
-        if (idx == -1) return
-        val line = lines[idx]
-        val (first, second) = splitLineAt(line, caretIndex, secondHardBreak = true)
-        val producedFirst = wrapLineByWidth(first, lyricStyle, linesAreaWidthPx, textMeasurer)
-        val producedSecond = wrapLineByWidth(second, lyricStyle, linesAreaWidthPx, textMeasurer)
-        lines = lines.toMutableList().apply {
-            removeAt(idx)
-            addAll(idx, producedFirst + producedSecond)
+    fun transposeAll(semitones: Int) {
+        lines = lines.map { line ->
+            val anchors = chordsLineToAnchors(line.chords).map { it.copy(c = transposeChordsLine(it.c, semitones) ?: it.c) }
+            line.copy(chords = renderChordAnchors(anchors, padTo = minOf(line.lyrics.length, chordCap)))
         }
-        pendingFocus = PendingFocus(producedSecond.first().id, Track.Lyrics, 0)
         persist()
     }
 
-    fun handleMergeWithPrevious(lineId: String) {
-        val idx = lines.indexOfFirst { it.id == lineId }
-        if (idx <= 0) return // can't merge the first line
-        val prev = lines[idx - 1]
-        val curr = lines[idx]
-        val caret = prev.lyrics.length
-        val merged = mergeWithPrevious(prev, curr)
-        // Immediate, not debounced like performReflowIfNeeded's forward split --
-        // this is a one-shot event (a backspace), not a run of keystrokes to
-        // coalesce. Without this, joining two lines whose combined text
-        // overflows the width left it sitting in the single-line field
-        // clipped/scrolled off past the right edge instead of wrapping back
-        // onto its own row(s), same as it would if typed that long directly.
-        val produced = wrapLineByWidth(merged, lyricStyle, linesAreaWidthPx, textMeasurer)
-        lines = lines.toMutableList().apply {
-            removeAt(idx)
-            removeAt(idx - 1)
-            addAll(idx - 1, produced)
-        }
-        var remaining = caret
-        var chosen = produced.last()
-        var localCaret = chosen.lyrics.length
-        for (p in produced) {
-            if (remaining <= p.lyrics.length) {
-                chosen = p
-                localCaret = remaining.coerceAtLeast(0)
-                break
+    /** Indices of the rows of the paragraph containing `lines[idx]`. */
+    fun paragraphRange(idx: Int): IntRange {
+        val pid = lines[idx].paragraphId
+        var start = idx
+        while (start > 0 && lines[start - 1].paragraphId == pid) start--
+        var end = idx
+        while (end + 1 < lines.size && lines[end + 1].paragraphId == pid) end++
+        return start..end
+    }
+
+    /** Where row `lines[idx]` starts within its paragraph's flattened lyrics. */
+    fun offsetInParagraph(range: IntRange, idx: Int): Int = (range.first until idx).sumOf { lines[it].lyrics.length }
+
+    /**
+     * Wraps [paragraphs] into rows for the current width. [caret] is
+     * (paragraph index, offset within it); a caret sitting exactly on a row
+     * boundary belongs to the start of the next row, which is where Android
+     * draws it too. The caret's row gets [focusedId] -- the row being typed in
+     * keeps its identity, and therefore its focus, while text moves between
+     * rows around it (handing focus to a different composable mid-typing is
+     * what used to fork keystrokes across two rows). Every other row reuses
+     * [oldIds] in order. Returns the rows and where the caret landed.
+     */
+    fun buildRows(oldIds: List<String>, paragraphs: List<Paragraph>, caret: Pair<Int, Int>?, focusedId: String?): Pair<List<EditorLine>, PendingFocus?> {
+        val built = mutableListOf<Triple<String, String, String>>()
+        var caretRow = -1
+        var caretLocal = 0
+        for ((pi, p) in paragraphs.withIndex()) {
+            val caretAtEnd = caret != null && caret.first == pi && caret.second >= p.lyrics.length
+            val starts = breakParagraph(p.lyrics, lyricStyle, linesAreaWidthPx, chordCap, textMeasurer, caretAtEnd)
+            if (caret != null && caret.first == pi) {
+                val k = starts.indexOfLast { it <= caret.second }
+                caretRow = built.size + k
+                caretLocal = caret.second - starts[k]
             }
-            remaining -= p.lyrics.length
+            layoutParagraph(p, starts, chordCap).forEach { (lyrics, chords) -> built += Triple(p.id, lyrics, chords) }
         }
-        pendingFocus = PendingFocus(chosen.id, Track.Lyrics, localCaret)
-        persist()
-    }
-
-    fun handleDeleteLine(lineId: String) {
-        if (lines.size <= 1) return // keep at least one line
-        val idx = lines.indexOfFirst { it.id == lineId }
-        lines = lines.filterNot { it.id == lineId }
-        val target = lines.getOrNull((idx - 1).coerceAtLeast(0))
-        if (target != null) pendingFocus = PendingFocus(target.id, Track.Lyrics)
-        persist()
+        val keepFocusedId = focusedId != null && caretRow >= 0
+        val pool = ArrayDeque(if (keepFocusedId) oldIds.filter { it != focusedId } else oldIds)
+        val rows = built.mapIndexed { r, (paragraphId, lyrics, chords) ->
+            val id = if (keepFocusedId && r == caretRow) focusedId!! else pool.removeFirstOrNull() ?: UUID.randomUUID().toString()
+            EditorLine(id, paragraphId, chords, lyrics)
+        }
+        return rows to (if (caretRow >= 0) PendingFocus(rows[caretRow].id, caretLocal) else null)
     }
 
     /**
-     * Re-checks [lineId]'s *current* lyrics (read fresh from `lines`, not a
-     * captured snapshot) against the available width and reflows if
-     * needed — called only after [SPLIT_DEBOUNCE_MS] of no further edits
-     * to this line, per [handleLyricsChange]'s doc comment. Two directions:
-     *
-     * - Grown past the edge: split forward into wrapped pieces, same as
-     *   before.
-     * - Shrunk by backspacing far enough that it would now fit back onto
-     *   the previous line: merge into it, undoing an earlier split the
-     *   same way it happened — a few keystrokes of backspacing snap two
-     *   lines back into one instead of leaving a now-short orphan line
-     *   sitting there until it's explicitly joined at the very start.
-     *
-     * These are mutually exclusive (a line can't simultaneously overflow
-     * on its own and also fit combined with the one above it), so one
-     * function handles both rather than two independent checks.
+     * Swaps `lines[range]` -- always whole paragraphs -- for [paragraphs]
+     * re-wrapped; see [buildRows]. A true no-op when no text moved between
+     * rows (chord padding alone doesn't count): the debounced re-wrap lands
+     * here after every typing pause, and needlessly rewriting the row and
+     * re-placing the caret gave a keystroke arriving in that same frame a
+     * stale caret to type at. When something did move, the caret is always
+     * re-placed -- the focused field resyncs to its row's new text with the
+     * caret at the end, so leaving it there would send the next keystroke to
+     * the end of the row.
      */
-    fun performReflowIfNeeded(lineId: String, caretIndex: Int) {
-        val idx = lines.indexOfFirst { it.id == lineId }
-        if (idx == -1) return
-        val curr = lines[idx]
-
-        if (idx > 0 && !curr.hardBreak) {
-            val prev = lines[idx - 1]
-            // Keep curr's id on the merged result, not prev's -- same
-            // reasoning as wrapLineByWidth: curr is where the caret (and
-            // focus) already is, so the merge must not hand identity to a
-            // different, unfocused composable while backspacing continues.
-            val merged = mergeWithPrevious(prev, curr).copy(id = curr.id)
-            if (wrapLineByWidth(merged, lyricStyle, linesAreaWidthPx, textMeasurer).size <= 1) {
-                lines = lines.toMutableList().apply { removeAt(idx); set(idx - 1, merged) }
-                pendingFocus = PendingFocus(curr.id, Track.Lyrics, prev.lyrics.length + caretIndex)
-                persist()
-                return
-            }
+    fun replaceParagraphs(range: IntRange, paragraphs: List<Paragraph>, caret: Pair<Int, Int>?, focusedId: String?) {
+        val old = lines.slice(range)
+        val (rows, focus) = buildRows(old.map { it.id }, paragraphs, caret, focusedId)
+        val unchanged = rows.size == old.size && rows.indices.all { i ->
+            rows[i].id == old[i].id && rows[i].lyrics == old[i].lyrics && rows[i].paragraphId == old[i].paragraphId &&
+                chordsLineToAnchors(rows[i].chords) == chordsLineToAnchors(old[i].chords)
         }
-
-        val produced = wrapLineByWidth(curr, lyricStyle, linesAreaWidthPx, textMeasurer)
-        if (produced.size <= 1) return // still fits as-is -- nothing to do
-
-        lines = lines.toMutableList().apply { removeAt(idx); addAll(idx, produced) }
-
-        var remaining = caretIndex
-        var chosen = produced.last()
-        var localCaret = chosen.lyrics.length
-        for (p in produced) {
-            if (remaining <= p.lyrics.length) {
-                chosen = p
-                localCaret = remaining.coerceAtLeast(0)
-                break
-            }
-            remaining -= p.lyrics.length
-        }
-        pendingFocus = PendingFocus(chosen.id, Track.Lyrics, localCaret)
+        if (unchanged) return
+        lines = lines.subList(0, range.first) + rows + lines.subList(range.last + 1, lines.size)
+        if (focus != null) pendingFocus = focus
         persist()
     }
 
+    /** A structural edit is about to re-wrap paragraphs from the current text; a debounced re-wrap queued before it would only fight it. */
+    fun cancelPendingReflows() {
+        splitJobs.values.forEach { it.cancel() }
+        splitJobs.clear()
+    }
+
     /**
-     * Re-validates every line against the CURRENT [lyricStyle]/[linesAreaWidthPx]
-     * — unlike [performReflowIfNeeded], which only re-checks the one line just
-     * edited. Needed because nothing else re-runs wrapping when the rendering
-     * context itself changes rather than the text: a line that fit fine at
-     * the old font scale or screen width can silently overflow off the edge
-     * of its single-line field at the new one, with no visual indication
-     * (no scroll hint, no ellipsis) that the rest of the line still exists.
-     * Reproduced directly by bumping font size up with A+ on a line that was
-     * already close to the edge.
-     *
-     * Rebuilds from scratch rather than patching in place: first collapses
-     * every run of soft-wrap continuation pieces (`!hardBreak`) back onto
-     * the hardBreak line that started them -- undoing every prior wrap --
-     * then re-wraps each resulting logical line fresh. Simpler and more
-     * reliably correct than trying to adjust existing split points for a
-     * width or font change that could as easily need MORE splits as fewer.
-     *
-     * No `pendingFocus` here -- unlike an edit, there's no caret to keep
-     * following, since this runs from a discrete UI action (a button tap,
-     * a rotation), never mid-keystroke. `suppressNextHistoryPush` so a pure
-     * re-layout -- the lyrics content itself never changes, only how it's
-     * split across lines -- doesn't become an Undo-able step.
+     * Enter/Next in a lyrics row: splits the paragraph at the caret, like any
+     * text editor -- everything after the caret becomes a new paragraph below
+     * (empty when the caret was at the end), saved as a new line. The new
+     * paragraph's first row takes over the focused row's id so focus never
+     * has to move.
+     */
+    fun handleEnterFromLyrics(lineId: String, caretIndex: Int) {
+        cancelPendingReflows()
+        val idx = lines.indexOfFirst { it.id == lineId }
+        if (idx == -1) return
+        val range = paragraphRange(idx)
+        val p = paragraphOf(lines.slice(range))
+        val at = (offsetInParagraph(range, idx) + caretIndex).coerceIn(0, p.lyrics.length)
+        val before = Paragraph(p.id, p.lyrics.substring(0, at), p.anchors.filter { it.i < at })
+        val after = Paragraph(UUID.randomUUID().toString(), p.lyrics.substring(at), p.anchors.filter { it.i >= at }.map { it.copy(i = it.i - at) })
+        replaceParagraphs(range, listOf(before, after), caret = 1 to 0, focusedId = lineId)
+    }
+
+    /**
+     * Backspace with the caret at the very start of a lyrics row, matching
+     * Samsung Notes (checked side by side on-device):
+     * - At the start of a soft-wrapped row, the row boundary isn't a real
+     *   line break -- it's the same spot as the end of the row above, so
+     *   backspace deletes the character before it (normally the space the
+     *   wrap hung there), and the paragraph re-wraps.
+     * - At the start of a real line, it joins that whole line onto the end
+     *   of the line above, with nothing added or removed between them --
+     *   which is also how an empty line gets deleted.
+     * - At the start of the first line, nothing happens.
+     * Immediate, not debounced: a single backspace is a one-shot event with
+     * nothing in flight to race against.
+     */
+    fun handleLyricsBackspaceAtStart(lineId: String) {
+        cancelPendingReflows()
+        val idx = lines.indexOfFirst { it.id == lineId }
+        if (idx <= 0) return
+        if (lines[idx - 1].paragraphId == lines[idx].paragraphId) {
+            val range = paragraphRange(idx)
+            val p = paragraphOf(lines.slice(range))
+            val at = offsetInParagraph(range, idx)
+            if (at == 0) return
+            val del = if (at >= 2 && p.lyrics[at - 1].isLowSurrogate() && p.lyrics[at - 2].isHighSurrogate()) 2 else 1
+            // Chords after the deleted character shift with the text they sit
+            // above, so the rows below keep their chords lined up.
+            val anchors = p.anchors.map { if (it.i >= at) it.copy(i = it.i - del) else it }
+            replaceParagraphs(range, listOf(Paragraph(p.id, p.lyrics.removeRange(at - del, at), anchors)), 0 to at - del, lineId)
+        } else {
+            val prevRange = paragraphRange(idx - 1)
+            val currRange = paragraphRange(idx)
+            val above = paragraphOf(lines.slice(prevRange))
+            val below = paragraphOf(lines.slice(currRange))
+            // A chord sitting past the end of the line above's lyrics (an
+            // ending chord, or a chords-only line) keeps its place: the joined
+            // line's chords start after it rather than landing on top of it.
+            val chordShift = maxOf(above.lyrics.length, above.anchors.maxOfOrNull { it.i + it.c.length } ?: 0)
+            val joined = Paragraph(above.id, above.lyrics + below.lyrics, above.anchors + below.anchors.map { it.copy(i = it.i + chordShift) })
+            replaceParagraphs(prevRange.first..currRange.last, listOf(joined), 0 to above.lyrics.length, lineId)
+        }
+    }
+
+    /**
+     * Re-wraps the whole paragraph [lineId] belongs to, from its current text
+     * -- so typing in the middle of a wrapped paragraph pushes words down into
+     * the next row (and deleting pulls them back up), instead of only ever
+     * splitting the one row that was edited. The caret only follows along if
+     * that row still has focus; if the user has already moved on to another
+     * field, re-wrapping must not drag focus back.
+     */
+    fun reflowParagraphOf(lineId: String, caretIndex: Int) {
+        val idx = lines.indexOfFirst { it.id == lineId }
+        if (idx == -1) return
+        val range = paragraphRange(idx)
+        val stillFocused = focusedLyricsId == lineId
+        val caret = if (stillFocused) 0 to offsetInParagraph(range, idx) + caretIndex else null
+        replaceParagraphs(range, listOf(paragraphOf(lines.slice(range))), caret, if (stillFocused) lineId else null)
+    }
+
+    /**
+     * Re-wraps every paragraph for the current width and font size. Nothing
+     * else re-runs wrapping when the rendering context changes rather than
+     * the text: without this, a line that fit at 1.0x sat clipped mid-word off
+     * the right edge after A+, and a chord line that fit before could now
+     * scroll. Layout-only, so it isn't an undo step, and it only writes to
+     * storage when the saved form ([songLinesOf]) actually changed, which
+     * wrapping alone never does.
      */
     fun reflowAllLines() {
-        val logical = mutableListOf<EditorLine>()
-        for (line in lines) {
-            if (!line.hardBreak && logical.isNotEmpty()) {
-                logical[logical.lastIndex] = mergeWithPrevious(logical.last(), line)
-            } else {
-                logical += line
-            }
+        val rebuilt = mutableListOf<EditorLine>()
+        var i = 0
+        while (i < lines.size) {
+            val range = paragraphRange(i)
+            rebuilt += buildRows(lines.slice(range).map { it.id }, listOf(paragraphOf(lines.slice(range))), null, null).first
+            i = range.last + 1
         }
-        val rewrapped = logical.flatMap { wrapLineByWidth(it, lyricStyle, linesAreaWidthPx, textMeasurer) }
-        if (rewrapped == lines) return
+        if (rebuilt == lines) return
+        val storedFormChanged = songLinesOf(rebuilt) != songLinesOf(lines)
         suppressNextHistoryPush = true
-        lines = rewrapped
-        persist()
+        lines = rebuilt
+        if (storedFormChanged) persist()
+    }
+
+    /**
+     * The first wrap after opening a song, built from the saved chord anchors
+     * themselves rather than from the placeholder rows. Those rows hold a
+     * whole paragraph's chords as one string, where a chord ending one row and
+     * a chord starting the next are neighbours that collide -- and re-reading
+     * that string nudged the second one sideways, so a chord moved every time
+     * the song was reopened. Split into rows first, they never meet.
+     */
+    var loadedSongWrapped by remember { mutableStateOf(false) }
+    fun wrapLoadedSong() {
+        loadedSongWrapped = true
+        if (loaded.lines.isEmpty()) return
+        val paragraphs = loaded.lines.map { Paragraph(it.id, it.lyrics, it.chords) }
+        suppressNextHistoryPush = true
+        lines = buildRows(lines.map { it.id }, paragraphs, null, null).first
     }
 
     LaunchedEffect(linesAreaWidthPx, fontScale) {
-        if (linesAreaWidthPx > 0) reflowAllLines()
+        if (linesAreaWidthPx <= 0) return@LaunchedEffect
+        if (loadedSongWrapped) reflowAllLines() else wrapLoadedSong()
+    }
+
+    // "+ Add line" sits right under the last row, but when the keyboard comes
+    // up Compose only scrolls the focused field itself into view, leaving the
+    // button hidden just below the keyboard's edge. While the last row is being
+    // typed in, keep the list scrolled to its end -- where the button is --
+    // following the keyboard as it animates in and the paragraph as it wraps
+    // onto new rows. Only on those changes, so it never fights a manual scroll.
+    val typingOnLastRow = WindowInsets.isImeVisible && focusedLyricsId != null && focusedLyricsId == lines.lastOrNull()?.id
+    LaunchedEffect(typingOnLastRow, lines.size) {
+        if (!typingOnLastRow) return@LaunchedEffect
+        snapshotFlow { lazyListState.layoutInfo.viewportSize.height }.collect {
+            lazyListState.scrollToItem(lines.size)
+        }
     }
 
     /**
-     * Handles every edit to a line's lyrics, including a large paste — not
-     * just the character-at-a-time case a single width check used to
-     * assume. A paste can contain literal newlines (the lyrics field is
-     * `singleLine`, so those would otherwise sit inside one field and get
-     * visually swallowed rather than becoming separate lines) — handled
-     * immediately below, since a paste is a one-shot event.
+     * Every edit to a lyrics row. A paste containing newlines (the row's field
+     * is `singleLine`, so they'd otherwise sit invisibly inside one row) splits
+     * into paragraphs right away -- a paste is a one-shot event, and the caret
+     * lands at the end of what was pasted.
      *
-     * The far more common case — an ordinary line growing past the width
-     * one keystroke at a time — is deliberately NOT split inline here.
-     * [wrapLineByWidth] used to run on every keystroke, replacing the
-     * overflowing `EditorLine` with new pieces and moving focus to
-     * whichever one the caret landed in. Direct repro on a physical device
-     * (typing fast, not even a paste) showed why that's unsafe: Compose's
-     * recomposition and the lyrics field's own local `TextFieldValue` only
-     * catch up to a freshly-shortened `line.lyrics` on a later frame, so a
-     * keystroke that arrives before that catch-up lands on the field's
-     * still-stale (pre-split, longer) buffer instead — forking what was
-     * typed across an abandoned old row and a live new one. Debouncing the
-     * *reflow* (never the raw text update just below, which always applies
-     * immediately so nothing typed is ever lost) means the restructuring —
-     * splitting a line that grew past the edge, or, symmetrically,
-     * backspacing one back into the line above it once it fits again, see
-     * [performReflowIfNeeded] — only ever runs once typing has actually
-     * paused, when there's nothing left to race against it.
+     * Ordinary typing updates the row's text immediately, so nothing typed is
+     * ever lost, but re-wrapping its paragraph waits for [SPLIT_DEBOUNCE_MS] of
+     * quiet. Re-wrapping on every keystroke was reproduced on-device forking
+     * keystrokes across two rows: the field's own `TextFieldValue` only catches
+     * up to restructured `lines` a frame later, and a keystroke landing in that
+     * gap applied to the stale text.
      */
     fun handleLyricsChange(line: EditorLine, updatedLyrics: String, caretIndex: Int) {
         if (updatedLyrics.contains('\n')) {
-            splitJobs.remove(line.id)?.cancel()
+            cancelPendingReflows()
             val idx = lines.indexOfFirst { it.id == line.id }
             if (idx == -1) return
-            val rawSegments = updatedLyrics.split('\n')
-            val produced = rawSegments.flatMapIndexed { i, seg ->
-                val base = if (i == 0) {
-                    EditorLine(line.id, alignChordsWithLyrics(line.chords, seg), seg)
-                } else {
-                    EditorLine(UUID.randomUUID().toString(), "", seg)
-                }
-                wrapLineByWidth(base, lyricStyle, linesAreaWidthPx, textMeasurer)
+            val range = paragraphRange(idx)
+            val rows = lines.slice(range).map { if (it.id == line.id) it.copy(lyrics = updatedLyrics) else it }
+            val p = paragraphOf(rows)
+            val caretOffset = offsetInParagraph(range, idx) + caretIndex
+            val segments = p.lyrics.split('\n')
+            val paragraphs = mutableListOf<Paragraph>()
+            var caret: Pair<Int, Int>? = null
+            var segStart = 0
+            segments.forEachIndexed { k, seg ->
+                val segEnd = segStart + seg.length
+                val anchors = p.anchors
+                    .filter { it.i >= segStart && (k == segments.lastIndex || it.i <= segEnd) }
+                    .map { it.copy(i = it.i - segStart) }
+                paragraphs += Paragraph(if (k == 0) p.id else UUID.randomUUID().toString(), seg, anchors)
+                if (caret == null && caretOffset <= segEnd) caret = k to (caretOffset - segStart).coerceAtLeast(0)
+                segStart = segEnd + 1
             }
-            lines = lines.toMutableList().apply { removeAt(idx); addAll(idx, produced) }
-            // A multi-line paste lands the caret at the end of what was pasted.
-            pendingFocus = produced.last().let { PendingFocus(it.id, Track.Lyrics, it.lyrics.length) }
-            persist()
+            replaceParagraphs(range, paragraphs, caret, line.id)
             return
         }
 
-        updateLine(line.id) { it.copy(lyrics = updatedLyrics) }
+        updateLine(line.id) { it.copy(lyrics = updatedLyrics, chords = chordsAfterLyricsEdit(it.chords, it.lyrics, updatedLyrics, caretIndex, chordCap)) }
 
         splitJobs[line.id]?.cancel()
         splitJobs[line.id] = scope.launch {
             delay(SPLIT_DEBOUNCE_MS)
-            performReflowIfNeeded(line.id, caretIndex)
             splitJobs.remove(line.id)
+            reflowParagraphOf(line.id, caretIndex)
         }
     }
 
@@ -1008,14 +1226,8 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
                 Text("Redo", color = if (redoStack.isNotEmpty()) ChordColor else TextMuted)
             }
             Spacer(Modifier.width(8.dp))
-            TextButton(onClick = {
-                lines = lines.map { it.copy(chords = transposeChordsLine(it.chords, -1) ?: it.chords) }
-                persist()
-            }) { Text("Transpose -1", color = ChordColor) }
-            TextButton(onClick = {
-                lines = lines.map { it.copy(chords = transposeChordsLine(it.chords, 1) ?: it.chords) }
-                persist()
-            }) { Text("Transpose +1", color = ChordColor) }
+            TextButton(onClick = { transposeAll(-1) }) { Text("Transpose -1", color = ChordColor) }
+            TextButton(onClick = { transposeAll(1) }) { Text("Transpose +1", color = ChordColor) }
             Spacer(Modifier.width(8.dp))
             TextButton(onClick = { fontScale = (fontScale - 0.1f).coerceAtLeast(0.75f) }) {
                 Text("A-", color = TextMuted, fontWeight = FontWeight.Bold)
@@ -1029,8 +1241,17 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
 
         LazyColumn(
             state = lazyListState,
+            // Room past the last row to scroll it, and "+ Add line", clear of
+            // the autoscroll button floating over the bottom corner (hidden
+            // while the keyboard is up, so no room needed then).
+            contentPadding = PaddingValues(bottom = if (WindowInsets.isImeVisible) 8.dp else AUTOSCROLL_BUTTON_CLEARANCE),
             modifier = Modifier
                 .fillMaxSize()
+                // Edge-to-edge: without this the list ran on under the system
+                // navigation bar, and the last row and "+ Add line" sat behind
+                // its Back/Home buttons where they couldn't be tapped. (While
+                // the keyboard is up, the root's imePadding already covers it.)
+                .navigationBarsPadding()
                 .padding(horizontal = 16.dp)
                 .onGloballyPositioned { linesAreaWidthPx = it.size.width }
                 // Any manual touch on the lyrics themselves cancels
@@ -1053,30 +1274,43 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
                     },
                 ),
         ) {
-            items(lines, key = { it.id }) { line ->
+            itemsIndexed(lines, key = { _, line -> line.id }) { index, line ->
                 LineRow(
                     line = line,
+                    latestLine = { lines.firstOrNull { it.id == line.id } },
                     chordStyle = chordStyle,
                     lyricStyle = lyricStyle,
+                    chordCapacity = chordCap,
+                    glyphWidthPx = glyphWidthPx,
+                    wrapsOntoNextRow = lines.getOrNull(index + 1)?.paragraphId == line.paragraphId,
+                    isWrappedRow = lines.getOrNull(index - 1)?.paragraphId == line.paragraphId,
                     customChords = customChords,
                     onTapChord = { name -> activeChordName = name },
                     pendingFocus = pendingFocus,
                     onConsumedPendingFocus = { pendingFocus = null },
                     onChordsChange = { updated -> updateLine(line.id) { it.copy(chords = updated) } },
                     onLyricsChange = { updated, caret -> handleLyricsChange(line, updated, caret) },
+                    onLyricsFocusChanged = { focused ->
+                        if (focused) {
+                            focusedLyricsId = line.id
+                        } else if (focusedLyricsId == line.id) {
+                            focusedLyricsId = null
+                            // The empty row a trailing space opened for the caret
+                            // (see breakParagraph) goes once the caret leaves it.
+                            if (lines.firstOrNull { it.id == line.id }?.lyrics?.isEmpty() == true) reflowParagraphOf(line.id, 0)
+                        }
+                    },
                     onEnter = { caret -> handleEnterFromLyrics(line.id, caret) },
-                    onBackspaceMerge = { handleMergeWithPrevious(line.id) },
-                    onBackspaceDeleteEmpty = { handleDeleteLine(line.id) },
-                    onDelete = { handleDeleteLine(line.id) },
+                    onBackspaceAtStart = { handleLyricsBackspaceAtStart(line.id) },
                 )
             }
             item {
                 Spacer(Modifier.height(8.dp))
                 TextButton(
                     onClick = {
-                        val newLine = EditorLine(UUID.randomUUID().toString(), "", "")
+                        val newLine = newEditorLine()
                         lines = lines + newLine
-                        pendingFocus = PendingFocus(newLine.id, Track.Lyrics)
+                        pendingFocus = PendingFocus(newLine.id)
                         persist()
                     },
                 ) { Text("+ Add line", color = TextMuted) }
@@ -1097,17 +1331,37 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
 
     // Drawn before ScratchpadScreen/ChordVoicingPanel below so either one's
     // full-screen surface naturally covers this button when showing --
-    // never needs its own extra "hide me" condition for that.
-    AutoscrollControls(
-        enabled = autoscrollEnabled,
-        onToggle = { autoscrollEnabled = !autoscrollEnabled },
-        speed = autoscrollSpeed,
-        onSpeedChange = { autoscrollSpeed = it },
-        modifier = Modifier
-            .align(Alignment.BottomEnd)
-            .navigationBarsPadding()
-            .padding(16.dp),
-    )
+    // never needs its own extra "hide me" condition for that. Hidden while
+    // the keyboard is up: the screen ends at the keyboard, so the button would
+    // ride up over the row being typed in, and autoscroll is for playing, not
+    // writing.
+    if (!WindowInsets.isImeVisible) {
+        AutoscrollControls(
+            enabled = autoscrollEnabled,
+            atEnd = lyricsAtEnd,
+            canScroll = lyricsCanScroll,
+            onToggle = {
+                if (autoscrollEnabled) {
+                    autoscrollEnabled = false
+                } else {
+                    scope.launch {
+                        // Nothing left below: play from the top again, like
+                        // replaying a track, rather than starting and
+                        // stopping on the same frame (which only flashed the
+                        // speed pill up and away).
+                        if (!lazyListState.canScrollForward) lazyListState.animateScrollToItem(0)
+                        autoscrollEnabled = true
+                    }
+                }
+            },
+            speed = autoscrollSpeed,
+            onSpeedChange = { autoscrollSpeed = it },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .navigationBarsPadding()
+                .padding(16.dp),
+        )
+    }
 
     // Unconditional -- NOT `if (scratchpadOpen)` -- so a take can keep
     // recording in the background while this composable's `visible = false`
@@ -1142,27 +1396,36 @@ private val baseChordTextStyle = TextStyle(
 // Composable, unlike baseChordTextStyle above, purely because it carries a
 // colour and colours are now theme-dependent -- the chord style gets its colour
 // applied at each use site instead, so it can stay a plain constant.
+// Monospace so chord columns line up with lyric characters (the editor gives
+// the chords letter spacing to match this font's glyph width exactly); 14sp
+// rather than the 15sp it was as a proportional font, since monospace runs
+// wider and every glyph costs a little of the row.
 private val baseLyricTextStyle: TextStyle
     @Composable get() = TextStyle(
-        fontSize = 15.sp,
+        fontFamily = FontFamily.Monospace,
+        fontSize = 14.sp,
         color = LyricColor,
     )
 
 @Composable
 private fun LineRow(
     line: EditorLine,
+    latestLine: () -> EditorLine?,
     chordStyle: TextStyle,
     lyricStyle: TextStyle,
+    chordCapacity: Int,
+    glyphWidthPx: Float,
+    wrapsOntoNextRow: Boolean,
+    isWrappedRow: Boolean,
     customChords: Map<String, ChordVoicing>,
     onTapChord: (String) -> Unit,
     pendingFocus: PendingFocus?,
     onConsumedPendingFocus: () -> Unit,
     onChordsChange: (String) -> Unit,
     onLyricsChange: (String, caretIndex: Int) -> Unit,
+    onLyricsFocusChanged: (Boolean) -> Unit,
     onEnter: (caretIndex: Int) -> Unit,
-    onBackspaceMerge: () -> Unit,
-    onBackspaceDeleteEmpty: () -> Unit,
-    onDelete: () -> Unit,
+    onBackspaceAtStart: () -> Unit,
 ) {
     var chordEditMode by remember(line.id) { mutableStateOf(false) }
     // Guards against onFocusChanged's spurious isFocused=false callback,
@@ -1176,22 +1439,24 @@ private fun LineRow(
     val chordsFocus = remember(line.id) { FocusRequester() }
     val lyricsFocus = remember(line.id) { FocusRequester() }
 
+    // Pull external changes (a re-wrap, undo) into the fields. Compares against
+    // the row as it is *now*, not the `line` this effect launched with: in a
+    // quick burst, the effect launched for keystroke k can run after keystroke
+    // k+1 already landed, and comparing against its own stale snapshot reset
+    // the field to text k -- silently dropping k+1.
     LaunchedEffect(line.chords) {
-        if (chordsField.text != line.chords) chordsField = TextFieldValue(line.chords, TextRange(line.chords.length))
+        val now = latestLine()?.chords ?: return@LaunchedEffect
+        if (chordsField.text != now) chordsField = TextFieldValue(now, TextRange(now.length))
     }
     LaunchedEffect(line.lyrics) {
-        if (lyricsField.text != line.lyrics) lyricsField = TextFieldValue(line.lyrics, TextRange(line.lyrics.length))
+        val now = latestLine()?.lyrics ?: return@LaunchedEffect
+        if (lyricsField.text != now) lyricsField = TextFieldValue(now, TextRange(now.length))
     }
     LaunchedEffect(pendingFocus) {
         val pf = pendingFocus ?: return@LaunchedEffect
         if (pf.lineId != line.id) return@LaunchedEffect
-        if (pf.track == Track.Lyrics) {
-            lyricsFocus.requestFocus()
-            pf.caretIndex?.let { lyricsField = lyricsField.copy(selection = TextRange(it.coerceIn(0, lyricsField.text.length))) }
-        } else {
-            chordEditMode = true
-            chordsFocus.requestFocus()
-        }
+        lyricsFocus.requestFocus()
+        pf.caretIndex?.let { lyricsField = lyricsField.copy(selection = TextRange(it.coerceIn(0, lyricsField.text.length))) }
         onConsumedPendingFocus()
     }
     // Tapping the token-display row (below) sets chordEditMode = true to
@@ -1217,8 +1482,10 @@ private fun LineRow(
             BasicTextField(
                 value = chordsField,
                 onValueChange = { candidate ->
-                    chordsField = suppressDoubleSpacePeriod(chordsField, candidate).capLength(MAX_CHORDS_LENGTH)
-                    onChordsChange(chordsField.text)
+                    val accepted = capChordInput(chordsField, suppressDoubleSpacePeriod(chordsField, candidate), chordCapacity)
+                    val textChanged = accepted.text != chordsField.text
+                    chordsField = accepted
+                    if (textChanged) onChordsChange(accepted.text)
                 },
                 textStyle = chordStyle.copy(color = ChordColor),
                 // Without this the caret is BasicTextField's default black,
@@ -1240,17 +1507,9 @@ private fun LineRow(
                             chordEditMode = false
                             chordFieldHasGainedFocus = false
                         }
-                    }
-                    .onPreviewKeyEvent { event ->
-                        if (event.type == KeyEventType.KeyDown && event.key == Key.Backspace &&
-                            chordsField.selection.start == 0 && chordsField.selection.end == 0
-                        ) {
-                            if (line.chords.isBlank() && line.lyrics.isBlank()) onBackspaceDeleteEmpty()
-                            true
-                        } else {
-                            false
-                        }
                     },
+                // Deliberately no backspace-at-start handling: a chord line never
+                // joins the line above, so backspacing stops at column 0.
                 decorationBox = { inner ->
                     // Bottom-aligned to match ChordTokenRow, which this field
                     // swaps places with on tap. The row is a Row with
@@ -1274,8 +1533,19 @@ private fun LineRow(
             ChordTokenRow(
                 text = line.chords,
                 style = chordStyle,
+                // A wrapped row is the rest of the line above, not a line of its
+                // own to prompt for -- the empty row a trailing space opens
+                // would otherwise read as a blank new line.
+                showPlaceholder = !isWrappedRow,
                 customChords = customChords,
-                onClick = { chordEditMode = true },
+                onClick = { x ->
+                    // Caret at the tapped column, like tapping into any text
+                    // field -- not parked at the end of the alignment padding,
+                    // which on a full-width line is past where anything fits.
+                    val column = (x / glyphWidthPx).roundToInt().coerceIn(0, chordsField.text.length)
+                    chordsField = chordsField.copy(selection = TextRange(column))
+                    chordEditMode = true
+                },
                 onTapChord = onTapChord,
             )
         }
@@ -1283,10 +1553,19 @@ private fun LineRow(
         BasicTextField(
             value = lyricsField,
             onValueChange = { new ->
-                lyricsField = new
-                onLyricsChange(new.text, new.selection.start)
+                // A row that wraps onto the next one ends in the space the wrap
+                // hung there. Tapping past the end of the row must put the caret
+                // before that space, as Android does -- after it is logically the
+                // start of the next row's first word, so typing there would glue
+                // onto that word.
+                val caretPastHangingSpace = wrapsOntoNextRow && new.text == lyricsField.text && new.selection.collapsed &&
+                    new.selection.start == new.text.length && new.text.endsWith(' ')
+                val value = if (caretPastHangingSpace) new.copy(selection = TextRange(new.text.length - 1)) else new
+                lyricsField = value
+                onLyricsChange(value.text, value.selection.start)
             },
             textStyle = lyricStyle,
+            visualTransformation = HangingSpacesHidden(chordCapacity),
             cursorBrush = SolidColor(LyricColor),
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
@@ -1296,19 +1575,22 @@ private fun LineRow(
                 .heightIn(min = 28.dp)
                 .padding(vertical = 1.dp)
                 .focusRequester(lyricsFocus)
-                .onFocusChanged { lyricsFocused = it.isFocused }
+                .onFocusChanged {
+                    lyricsFocused = it.isFocused
+                    onLyricsFocusChanged(it.isFocused)
+                }
                 .onPreviewKeyEvent { event ->
                     if (event.type == KeyEventType.KeyDown && event.key == Key.Backspace &&
                         lyricsField.selection.start == 0 && lyricsField.selection.end == 0
                     ) {
-                        onBackspaceMerge()
+                        onBackspaceAtStart()
                         true
                     } else {
                         false
                     }
                 },
             decorationBox = { inner ->
-                if (line.lyrics.isEmpty() && !lyricsFocused) {
+                if (line.lyrics.isEmpty() && !lyricsFocused && !isWrappedRow) {
                     Text("Lyrics…", style = lyricStyle.copy(color = TextMuted))
                 }
                 inner()
@@ -1322,21 +1604,27 @@ private fun LineRow(
 private fun ChordTokenRow(
     text: String,
     style: TextStyle,
+    showPlaceholder: Boolean,
     customChords: Map<String, ChordVoicing>,
-    onClick: () -> Unit,
+    onClick: (x: Float) -> Unit,
     onTapChord: (String) -> Unit,
 ) {
     val tokens = remember(text, customChords) { tokenizeChordLine(text, customChords) }
+    val currentOnClick by rememberUpdatedState(onClick)
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 24.dp)
-            .clickable(onClick = onClick)
+            // A tap (rather than .clickable) so the edit field can open with
+            // its caret at the tapped column. Taps on a chord token itself are
+            // consumed by that token's own clickable and open its diagram.
+            .pointerInput(Unit) { detectTapGestures { currentOnClick(it.x) } }
+            .semantics { onClick(label = "Edit chords") { currentOnClick(Float.MAX_VALUE); true } }
             .padding(vertical = 1.dp),
         verticalAlignment = Alignment.Bottom,
     ) {
         if (tokens.isEmpty()) {
-            Text("Chords…", style = style.copy(color = TextMuted))
+            if (showPlaceholder) Text("Chords…", style = style.copy(color = TextMuted))
         } else {
             for (tok in tokens) {
                 Text(
@@ -1349,6 +1637,10 @@ private fun ChordTokenRow(
                         },
                         textDecoration = if (!tok.isWhitespace && !tok.looksLikeChord) TextDecoration.Underline else null,
                     ),
+                    // A line saved wider than today's limit (older data, or a
+                    // narrower screen) is clipped rather than wrapping tokens.
+                    softWrap = false,
+                    maxLines = 1,
                     // Whitespace tokens have no chordName and stay unclickable so a
                     // tap there still falls through to the Row's onClick (raw edit mode).
                     modifier = if (!tok.isWhitespace) {
@@ -1364,7 +1656,9 @@ private fun ChordTokenRow(
 
 /**
  * Autoscroll's whole UI footprint: a round toggle button (Play while off,
- * Pause while on), with a small speed pill above it that only appears while
+ * Pause while on, Replay at the end of the song -- it scrolls back to the top
+ * and plays from there -- and greyed out when the whole song fits on screen
+ * with nothing to scroll), with a small speed pill above it that only appears while
  * running -- a stepped +/- rather than a drag slider, matching the same
  * "tap targets, not fine gestures" language [TimelineZoomControls] in
  * `ScratchpadScreen.kt` already established for a very similar "adjust a
@@ -1375,6 +1669,8 @@ private fun ChordTokenRow(
 @Composable
 private fun AutoscrollControls(
     enabled: Boolean,
+    atEnd: Boolean,
+    canScroll: Boolean,
     onToggle: () -> Unit,
     speed: Float,
     onSpeedChange: (Float) -> Unit,
@@ -1405,10 +1701,18 @@ private fun AutoscrollControls(
                 }
             }
         }
-        FilledIconButton(onClick = onToggle) {
+        FilledIconButton(onClick = onToggle, enabled = enabled || canScroll) {
             Icon(
-                if (enabled) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                contentDescription = if (enabled) "Stop autoscroll" else "Start autoscroll",
+                when {
+                    enabled -> Icons.Filled.Pause
+                    atEnd && canScroll -> Icons.Filled.Replay
+                    else -> Icons.Filled.PlayArrow
+                },
+                contentDescription = when {
+                    enabled -> "Stop autoscroll"
+                    atEnd && canScroll -> "Autoscroll from the top"
+                    else -> "Start autoscroll"
+                },
             )
         }
     }

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
@@ -112,7 +113,13 @@ class MainActivity : FragmentActivity() {
             }
 
             SongNotesTheme(mode = themeMode) {
-                Surface(modifier = Modifier.fillMaxSize()) {
+                // Every screen ends where the keyboard begins. The manifest's
+                // adjustResize stops Android panning the whole window up to
+                // reveal a focused field (which pushed the editor's title and
+                // top bar under the status bar, and stacked with the editor's
+                // own keyboard handling into a dead gap above the keyboard);
+                // this is what takes its place, once, for every screen.
+                Surface(modifier = Modifier.fillMaxSize().imePadding()) {
                     when (val current = screen) {
                         Screen.Songs -> {
                             val status by statusRepo.observe().collectAsStateWithLifecycle(initialValue = SyncStatus.EMPTY)

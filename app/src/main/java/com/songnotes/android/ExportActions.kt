@@ -8,16 +8,33 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextPaint
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.songnotes.core.domain.Song
-import com.songnotes.core.domain.anchorsToChordsLine
 import com.songnotes.core.domain.formatSongAsText
+import com.songnotes.core.domain.wrapSongToColumns
 import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Copies [song] as plain text (via [formatSongAsText]) to the system
+ * Width plain-text exports wrap lines to. A saved line is a whole paragraph,
+ * as long as the user typed it, and its chords only line up while the chord
+ * line and the lyric line each stay on one line -- if whatever opens the file
+ * soft-wraps them, the chords end up over the wrong words. Wrapping ourselves
+ * at a width most viewers show unwrapped keeps them aligned; 60 is narrower
+ * than a desktop editor or a printed page and wide enough for a tablet or a
+ * phone in landscape.
+ */
+private const val TEXT_EXPORT_COLUMNS = 60
+
+/** The text Copy and .txt share: [song] wrapped to [TEXT_EXPORT_COLUMNS], formatted by [formatSongAsText]. */
+private fun songAsText(song: Song): String = formatSongAsText(wrapSongToColumns(song, TEXT_EXPORT_COLUMNS))
+
+/**
+ * Copies [song] as plain text (via [songAsText]) to the system
  * clipboard. Android 13+ already shows its own "Copied to clipboard" system
  * toast on [ClipboardManager.setPrimaryClip] -- the explicit [Toast] here is
  * still shown for older versions, which have no such built-in feedback.
@@ -25,7 +42,7 @@ import java.io.FileOutputStream
 fun copySongTextToClipboard(context: Context, song: Song) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     val label = song.title.ifBlank { "Song" }
-    clipboard.setPrimaryClip(ClipData.newPlainText(label, formatSongAsText(song)))
+    clipboard.setPrimaryClip(ClipData.newPlainText(label, songAsText(song)))
     Toast.makeText(context, "Copied to clipboard", Toast.LENGTH_SHORT).show()
 }
 
@@ -35,7 +52,7 @@ private const val PAGE_WIDTH = 612
 private const val PAGE_HEIGHT = 792
 private const val MARGIN = 54f
 
-private val TitlePaint = Paint().apply {
+private val TitlePaint = TextPaint().apply {
     color = Color.BLACK
     textSize = 20f
     typeface = Typeface.DEFAULT_BOLD
@@ -50,16 +67,20 @@ private val TitlePaint = Paint().apply {
 // hold contrast against a dark page, and printing them onto a white one would
 // make an export unreadable for anyone whose phone happened to be in dark mode
 // when they tapped the button. These stay fixed at the light values.
+//
+// Both monospace, like the editor: a chord's position is a lyric character
+// index, and drawing each chord at that character's column only lines up when
+// every lyric character is the same width.
 private val ChordPaint = Paint().apply {
     color = Color.parseColor("#B45309")
-    textSize = 12f
-    typeface = Typeface.MONOSPACE
+    textSize = 11f
+    typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
     isAntiAlias = true
 }
 private val LyricPaint = Paint().apply {
     color = Color.parseColor("#2A221B")
-    textSize = 13f
-    typeface = Typeface.DEFAULT
+    textSize = 12f
+    typeface = Typeface.MONOSPACE
     isAntiAlias = true
 }
 
@@ -73,14 +94,14 @@ private val LyricPaint = Paint().apply {
  * `src/utils/export.js`); Android had the PDF and the clipboard but no way to
  * actually hand someone a text file -- awkward for the exact thing plain text
  * is good at, like mailing a chord sheet to a bandmate or dropping it into a
- * setlist folder. Same [formatSongAsText] output as the clipboard path, so the
+ * setlist folder. Same [songAsText] output as the clipboard path, so the
  * two can never drift.
  */
 fun shareSongAsText(context: Context, song: Song) {
     val title = song.title.ifBlank { "Untitled" }
     val exportsDir = File(context.cacheDir, "exports").apply { mkdirs() }
     val file = File(exportsDir, "${sanitizeFilename(title)}.txt")
-    file.writeText(formatSongAsText(song))
+    file.writeText(songAsText(song))
 
     val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
     val intent = Intent(Intent.ACTION_SEND).apply {
@@ -96,18 +117,13 @@ fun shareSongAsText(context: Context, song: Song) {
 
 /**
  * Renders [song] as a paginated PDF (US Letter; title, then each line's
- * chords directly above its lyrics, same structure as [formatSongAsText]'s
- * plain-text export) and opens Android's share sheet so the user can save,
- * print, or send it. This is the mobile equivalent of the web app's
+ * chords directly above its lyrics, wrapped to the page width the same way
+ * the plain-text export wraps to [TEXT_EXPORT_COLUMNS]) and opens Android's
+ * share sheet so the user can save, print, or send it. This is the mobile equivalent of the web app's
  * `window.print()` "print to PDF" flow -- Android has no OS print-preview
  * dialog to lean on the same way, so this builds a real PDF file instead and
  * hands it to whatever app the user picks (Files, a printer app, Drive,
  * messaging, ...) via [FileProvider].
- *
- * No text wrapping: a chord/lyric line wider than the page simply runs off
- * the right edge. Matches this project's own "don't build what nothing
- * needs yet" discipline -- revisit only if a real song's lines are wide
- * enough to hit it in practice.
  */
 fun shareSongAsPdf(context: Context, song: Song) {
     val file = writeSongPdf(context, song)
@@ -123,27 +139,35 @@ fun shareSongAsPdf(context: Context, song: Song) {
 private fun writeSongPdf(context: Context, song: Song): File {
     val document = PdfDocument()
     val title = song.title.ifBlank { "Untitled" }
+    val contentWidth = PAGE_WIDTH - 2 * MARGIN
+    val glyphWidth = LyricPaint.measureText("M")
+    val columns = (contentWidth / glyphWidth).toInt()
     val chordLineHeight = ChordPaint.textSize * 1.4f
     val lyricLineHeight = LyricPaint.textSize * 1.4f
 
     var pageNumber = 1
     var page = document.startPage(PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNumber).create())
     var canvas = page.canvas
-    var y = MARGIN + TitlePaint.textSize
-    canvas.drawText(title, MARGIN, y, TitlePaint)
-    y += TitlePaint.textSize * 1.5f
+    // A long title wraps rather than running off the page.
+    val titleLayout = StaticLayout.Builder.obtain(title, 0, title.length, TitlePaint, contentWidth.toInt())
+        .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+        .build()
+    canvas.save()
+    canvas.translate(MARGIN, MARGIN)
+    titleLayout.draw(canvas)
+    canvas.restore()
+    var y = MARGIN + titleLayout.height + TitlePaint.textSize * 0.5f
 
     fun newPage() {
         document.finishPage(page)
         pageNumber++
         page = document.startPage(PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNumber).create())
         canvas = page.canvas
-        y = MARGIN + lyricLineHeight
+        y = MARGIN
     }
 
-    for (line in song.lines) {
-        val chords = anchorsToChordsLine(line.lyrics.length, line.chords)
-        val hasChords = chords.isNotBlank()
+    for (line in wrapSongToColumns(song, columns).lines) {
+        val hasChords = line.chords.isNotEmpty()
         val hasLyrics = line.lyrics.isNotBlank()
         if (!hasChords && !hasLyrics) {
             y += lyricLineHeight
@@ -153,7 +177,15 @@ private fun writeSongPdf(context: Context, song: Song): File {
         if (y + entryHeight > PAGE_HEIGHT - MARGIN) newPage()
         if (hasChords) {
             y += chordLineHeight
-            canvas.drawText(chords, MARGIN, y, ChordPaint)
+            // Each chord at its lyric character's column. One that would touch
+            // the chord before it moves right a column past it instead, so two
+            // chord names never print as one.
+            var nextFree = 0
+            for (anchor in line.chords.sortedBy { it.i }) {
+                val column = maxOf(anchor.i, nextFree)
+                canvas.drawText(anchor.c, MARGIN + column * glyphWidth, y, ChordPaint)
+                nextFree = column + anchor.c.length + 1
+            }
         }
         if (hasLyrics) {
             y += lyricLineHeight

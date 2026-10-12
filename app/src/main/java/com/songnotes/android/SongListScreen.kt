@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -192,7 +193,9 @@ fun SongListScreen(
                     style = MaterialTheme.typography.bodyMedium,
                 )
             } else {
-                LazyColumn {
+                // Ends above the system navigation bar (edge-to-edge), so the
+                // last song isn't sitting behind its Back/Home buttons.
+                LazyColumn(modifier = Modifier.navigationBarsPadding()) {
                     items(visibleItems, key = { it.song.id }) { item ->
                         SongRow(
                             item = item,
@@ -229,7 +232,8 @@ private fun SongRow(item: SongListItem, onOpen: () -> Unit, onDelete: () -> Unit
                 val preview = song.lines.firstOrNull { it.lyrics.isNotBlank() }?.lyrics
                 if (preview != null) {
                     Spacer(Modifier.height(4.dp))
-                    Text(preview, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                    // A saved line is a whole paragraph, often longer than the row.
+                    Text(preview, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
             TextButton(onClick = onDelete) {
