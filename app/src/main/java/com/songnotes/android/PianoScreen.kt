@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,6 +37,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowInsetsControllerCompat
 import com.songnotes.core.audio.AudioEngine
 
 /**
@@ -55,6 +57,30 @@ fun PianoScreen(engine: AudioEngine, onDone: () -> Unit) {
     var octave by remember { mutableStateOf(4) }
     var isLoading by remember { mutableStateOf(true) }
     var isLoaded by remember { mutableStateOf(false) }
+
+    // The app's light theme leaves Android drawing a light, translucent scrim
+    // behind the 3-button navigation bar -- a pale grey band under this dark
+    // keyboard (found on-device). While the piano is up, drop the scrim and
+    // use light bar icons; put both back as they were on the way out.
+    DisposableEffect(Unit) {
+        val window = (context as? android.app.Activity)?.window
+        if (window == null) {
+            onDispose { }
+        } else {
+            val controller = WindowInsetsControllerCompat(window, window.decorView)
+            val lightNav = controller.isAppearanceLightNavigationBars
+            val lightStatus = controller.isAppearanceLightStatusBars
+            val contrastEnforced = window.isNavigationBarContrastEnforced
+            controller.isAppearanceLightNavigationBars = false
+            controller.isAppearanceLightStatusBars = false
+            window.isNavigationBarContrastEnforced = false
+            onDispose {
+                controller.isAppearanceLightNavigationBars = lightNav
+                controller.isAppearanceLightStatusBars = lightStatus
+                window.isNavigationBarContrastEnforced = contrastEnforced
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         isLoading = true
@@ -76,9 +102,11 @@ fun PianoScreen(engine: AudioEngine, onDone: () -> Unit) {
             // enough to wrap "Oct +" one character per line. Found on-device.
             Text(
                 when {
-                    isLoading -> "Loading piano samples…"
+                    // Short: this shares the row with Done and the octave
+                    // buttons, and the long form ellipsized to "Loading piano sa…".
+                    isLoading -> "Loading…"
                     isLoaded -> "Piano — Octave $octave"
-                    else -> "Failed to load piano samples"
+                    else -> "Couldn't load piano"
                 },
                 color = Color.White,
                 style = MaterialTheme.typography.titleMedium,

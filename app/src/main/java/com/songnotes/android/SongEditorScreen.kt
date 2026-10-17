@@ -7,7 +7,6 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,17 +30,29 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldBuffer
+import androidx.compose.foundation.text.input.InputTransformation
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.FormatSize
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -82,6 +93,8 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
+import com.songnotes.core.domain.ChordToken
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextRange
@@ -90,6 +103,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.TransformedText
@@ -119,6 +133,10 @@ import com.songnotes.core.domain.lookupChord
 import com.songnotes.core.domain.parseFretsInput
 import com.songnotes.core.domain.tokenizeChordLine
 import com.songnotes.core.domain.transposeChordsLine
+import com.songnotes.core.domain.applyChordOverwrite
+import com.songnotes.core.domain.parseKey
+import com.songnotes.core.domain.prefersFlats
+import com.songnotes.core.domain.transposeKey
 import java.util.UUID
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -381,6 +399,33 @@ private fun capChordInput(old: TextFieldValue, new: TextFieldValue, capacity: In
     }
     if (inserted.isEmpty()) return old
     return TextFieldValue(before + inserted + after, TextRange(before.length + inserted.length))
+}
+
+/**
+ * The chord field's edit rules, applied inside each edit (see the chord
+ * field's TextFieldState comment for why not in onValueChange): undo the
+ * keyboard's double-space period, let chord names overwrite the spaces after
+ * them ([applyChordOverwrite]), then hold the line to [capacity]
+ * ([capChordInput]).
+ */
+private class ChordInputRules(private val capacity: Int) : InputTransformation {
+    override fun TextFieldBuffer.transformInput() {
+        val old = TextFieldValue(originalText.toString(), originalSelection)
+        val candidate = TextFieldValue(toString(), selection)
+        if (old.text == candidate.text) return
+        var value = suppressDoubleSpacePeriod(old, candidate)
+        if (value.selection.collapsed) {
+            val (text, caret) = applyChordOverwrite(old.text, value.text, value.selection.start)
+            value = TextFieldValue(text, TextRange(caret))
+        }
+        value = capChordInput(old, value, capacity)
+        if (value.text == old.text && value.text != candidate.text) {
+            revertAllChanges()
+            return
+        }
+        if (value.text != candidate.text) replace(0, length, value.text)
+        selection = value.selection
+    }
 }
 
 /**
@@ -659,6 +704,8 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
     // this composable otherwise reads or displays.
     var isScratchpadRecording by remember { mutableStateOf(false) }
     var fontScale by rememberSaveable { mutableStateOf(1f) }
+    var shareMenuOpen by remember { mutableStateOf(false) }
+    var textSizeMenuOpen by remember { mutableStateOf(false) }
     var linesAreaWidthPx by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
 
@@ -740,7 +787,11 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
     // The lyrics row that currently has focus, so a debounced re-wrap knows
     // whether it's still allowed to place the caret (see reflowParagraphOf).
     var focusedLyricsId by remember { mutableStateOf<String?>(null) }
+    // The row whose lyrics OR chords field has focus -- what the keyboard must
+    // not cover (see revealRow).
+    var focusedRowId by remember { mutableStateOf<String?>(null) }
     val textMeasurer = rememberTextMeasurer()
+    val focusManager = LocalFocusManager.current
 
     // Phase 13: guarantees nothing typed is lost on any exit path, not just
     // the Done button. ON_STOP is the last lifecycle callback guaranteed
@@ -876,12 +927,22 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
      * each time a name got longer (F -> F#) and could push a full chord line
      * past [chordCap]. Each token still goes through [transposeChordsLine] so
      * non-chords (section labels, typos) are left alone, same as before.
+     *
+     * Spelled for the key the song lands in -- G up one is Ab/Db/Fm/Eb, not
+     * G#/C#/Fm/D# -- with the key read from the Key field, or failing that the
+     * song's first chord that names one. The Key field moves along with the
+     * chords (it's reference for whoever plays from this chart, and a stale
+     * key there contradicts the chords under it). One undo step covers both.
      */
     fun transposeAll(semitones: Int) {
+        val songKey = parseKey(meta.key)
+            ?: lines.asSequence().flatMap { chordsLineToAnchors(it.chords) }.firstNotNullOfOrNull { parseKey(it.c) }
+        val preferFlats = songKey?.let { (root, minor) -> prefersFlats(root + semitones, minor) } ?: false
         lines = lines.map { line ->
-            val anchors = chordsLineToAnchors(line.chords).map { it.copy(c = transposeChordsLine(it.c, semitones) ?: it.c) }
+            val anchors = chordsLineToAnchors(line.chords).map { it.copy(c = transposeChordsLine(it.c, semitones, preferFlats) ?: it.c) }
             line.copy(chords = renderChordAnchors(anchors, padTo = minOf(line.lyrics.length, chordCap)))
         }
+        meta = meta.copy(key = transposeKey(meta.key, semitones))
         persist()
     }
 
@@ -975,8 +1036,14 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
         val range = paragraphRange(idx)
         val p = paragraphOf(lines.slice(range))
         val at = (offsetInParagraph(range, idx) + caretIndex).coerceIn(0, p.lyrics.length)
-        val before = Paragraph(p.id, p.lyrics.substring(0, at), p.anchors.filter { it.i < at })
-        val after = Paragraph(UUID.randomUUID().toString(), p.lyrics.substring(at), p.anchors.filter { it.i >= at }.map { it.copy(i = it.i - at) })
+        // At the end of the line nothing moves down, so no chord does either: an
+        // ending chord placed past the last word, and every chord on a
+        // chords-only line, stay put. (Splitting by `i >= at` here used to carry
+        // them onto the new line -- on a chords-only line that read as Enter
+        // opening a blank line *above*.)
+        val atEnd = at == p.lyrics.length
+        val before = Paragraph(p.id, p.lyrics.substring(0, at), if (atEnd) p.anchors else p.anchors.filter { it.i < at })
+        val after = Paragraph(UUID.randomUUID().toString(), p.lyrics.substring(at), if (atEnd) emptyList() else p.anchors.filter { it.i >= at }.map { it.copy(i = it.i - at) })
         replaceParagraphs(range, listOf(before, after), caret = 1 to 0, focusedId = lineId)
     }
 
@@ -1085,17 +1152,53 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
         if (loadedSongWrapped) reflowAllLines() else wrapLoadedSong()
     }
 
-    // "+ Add line" sits right under the last row, but when the keyboard comes
-    // up Compose only scrolls the focused field itself into view, leaving the
-    // button hidden just below the keyboard's edge. While the last row is being
-    // typed in, keep the list scrolled to its end -- where the button is --
-    // following the keyboard as it animates in and the paragraph as it wraps
-    // onto new rows. Only on those changes, so it never fights a manual scroll.
-    val typingOnLastRow = WindowInsets.isImeVisible && focusedLyricsId != null && focusedLyricsId == lines.lastOrNull()?.id
-    LaunchedEffect(typingOnLastRow, lines.size) {
-        if (!typingOnLastRow) return@LaunchedEffect
+    /**
+     * Scrolls the list just enough that row [rowIndex] is fully on screen --
+     * up to the keyboard's edge, since the root's imePadding ends the list
+     * there. Item 0 is the title/details header, so row k is item k + 1.
+     */
+    suspend fun revealRow(rowIndex: Int) {
+        val item = rowIndex + 1
+        val info = lazyListState.layoutInfo
+        val visible = info.visibleItemsInfo.firstOrNull { it.index == item }
+        when {
+            visible == null && item < (info.visibleItemsInfo.firstOrNull()?.index ?: 0) -> lazyListState.scrollToItem(item)
+            visible == null -> {
+                // Below the screen: bring it to the top, then back off so it
+                // sits at the bottom edge instead -- the text above it stays.
+                lazyListState.scrollToItem(item)
+                val after = lazyListState.layoutInfo
+                val row = after.visibleItemsInfo.firstOrNull { it.index == item } ?: return
+                lazyListState.scrollBy(-(after.viewportEndOffset - row.offset - row.size).toFloat().coerceAtLeast(0f))
+            }
+            visible.offset + visible.size > info.viewportEndOffset ->
+                lazyListState.scrollBy((visible.offset + visible.size - info.viewportEndOffset).toFloat())
+            visible.offset < info.viewportStartOffset ->
+                lazyListState.scrollBy((visible.offset - info.viewportStartOffset).toFloat())
+        }
+    }
+
+    // While the keyboard is up, the row being typed in (lyrics or chords) is
+    // kept on screen. Compose only brings a field into view when it gains
+    // focus, so a row that appeared under the keyboard -- a line wrapping, or
+    // Enter, with more of the song below -- stayed hidden behind it while you
+    // typed into it. Re-checked whenever the focused row, the rows themselves,
+    // or the visible height (the keyboard animating in) change, never on a
+    // plain scroll, so reading back up the song by hand isn't fought.
+    // On the last row it scrolls to the very end instead, so "+ Add line"
+    // below it stays in reach too.
+    val imeVisible = WindowInsets.isImeVisible
+    LaunchedEffect(focusedRowId, lines, imeVisible) {
+        val id = focusedRowId ?: return@LaunchedEffect
+        if (!imeVisible) return@LaunchedEffect
         snapshotFlow { lazyListState.layoutInfo.viewportSize.height }.collect {
-            lazyListState.scrollToItem(lines.size)
+            withFrameNanos { } // let the edit that triggered this lay out first
+            val rowIndex = lines.indexOfFirst { it.id == id }
+            when {
+                rowIndex == -1 -> Unit
+                rowIndex == lines.lastIndex -> lazyListState.scrollToItem(lines.size + 1)
+                else -> revealRow(rowIndex)
+            }
         }
     }
 
@@ -1154,86 +1257,94 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
             .fillMaxSize()
             .background(ParchmentBg),
     ) {
-        // Top bar: Export (left, scrolls independently if it doesn't fit)
-        // and Done (right, always fully visible -- never shrunk or pushed
-        // off by Export). Own row with real clearance from the status bar
-        // — same "actions on top, title below with room to breathe" rhythm
-        // Samsung Notes/Keep/Apple Notes all use, rather than cramming the
-        // title into the same row as an action button flush against the
-        // top edge. statusBarsPadding() is load-bearing, not decorative:
-        // targetSdk 36 (Android 15+) enforces edge-to-edge with no opt-out,
-        // and this screen otherwise has zero WindowInsets handling, so
-        // without it Done draws under the status bar/battery icon on some
-        // devices — reported directly after live testing. The extra top
-        // padding beyond that inset is deliberate breathing room, not just
-        // the bare minimum to clear the icons.
+        // Two pinned rows -- everything else (title, details) scrolls away with
+        // the song, so the lyrics keep most of the screen while typing; pinned,
+        // the title/details/toolbars took ~45% of the Fold cover screen with
+        // the keyboard up. Neither row scrolls sideways: on the cover screen
+        // that silently hid PDF and A-/A+ off the edge, with nothing to say
+        // they were there. Both are sized to fit its ~369dp width.
+        //
+        // Row 1: actions. Copy/.txt/PDF share one Share menu. Scratchpad keeps
+        // its label -- GraphicEq alone tested as "pretty random" (direct
+        // feedback), and Mic + a real word fixed that. The piano icon reads as
+        // "piano" on sight. statusBarsPadding() is load-bearing: targetSdk 36
+        // is edge-to-edge, and without it Done drew under the status bar.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(start = 16.dp, top = 18.dp, end = 16.dp, bottom = 14.dp),
+                .padding(start = 8.dp, top = 8.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TextButton(onClick = { copySongTextToClipboard(context, currentSong()) }) { Text("Copy", color = ChordColor) }
-                TextButton(onClick = { shareSongAsText(context, currentSong()) }) { Text(".txt", color = ChordColor) }
-                TextButton(onClick = { shareSongAsPdf(context, currentSong()) }) { Text("PDF", color = ChordColor) }
+            Box {
+                IconButton(onClick = { shareMenuOpen = true }) {
+                    Icon(Icons.Filled.Share, contentDescription = "Share", tint = ChordColor)
+                }
+                // The theme's surface, not Material's default lavender container.
+                DropdownMenu(expanded = shareMenuOpen, onDismissRequest = { shareMenuOpen = false }, containerColor = MaterialTheme.colorScheme.surface) {
+                    DropdownMenuItem(
+                        text = { Text("Copy text") },
+                        onClick = { shareMenuOpen = false; copySongTextToClipboard(context, currentSong()) },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Share as .txt") },
+                        onClick = { shareMenuOpen = false; shareSongAsText(context, currentSong()) },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Share as PDF") },
+                        onClick = { shareMenuOpen = false; shareSongAsPdf(context, currentSong()) },
+                    )
+                }
             }
-            // A labeled button, not a bare icon -- GraphicEq alone tested as
-            // "pretty random" (direct feedback): nothing about a graphic-
-            // equalizer glyph reads as "record a quick idea for this song"
-            // at a glance. Mic + a real word fixes that without needing to
-            // invent a new icon.
+            Spacer(Modifier.weight(1f))
             TextButton(onClick = { scratchpadOpen = true }) {
                 Icon(Icons.Filled.Mic, contentDescription = null, tint = ChordColor, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("Scratchpad", color = ChordColor)
             }
-            // Icon-only, unlike Scratchpad above: the argument there was that
-            // a graphic-equalizer glyph says nothing about "record an idea".
-            // A keyboard reads as "piano" on sight, and this row is already
-            // carrying two labelled buttons.
             IconButton(onClick = { pianoOpen = true }) {
                 Icon(Icons.Filled.Piano, contentDescription = "Piano", tint = ChordColor, modifier = Modifier.size(20.dp))
             }
             TextButton(onClick = { finish() }) { Text("Done", fontWeight = FontWeight.Bold, color = ChordColor) }
         }
-        BasicTextField(
-            value = title,
-            onValueChange = { title = it; persist() },
-            textStyle = TextStyle(fontSize = 26.sp, fontWeight = FontWeight.Bold, color = LyricColor),
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            decorationBox = { inner ->
-                if (title.isEmpty()) Text("Title", style = TextStyle(fontSize = 26.sp, fontWeight = FontWeight.Bold), color = TextMuted)
-                inner()
-            },
-        )
-        Spacer(Modifier.height(12.dp))
-        SongMetaBar(meta = meta, onUpdateMeta = { updated -> meta = updated; persist() })
-        Spacer(Modifier.height(12.dp))
+        // Row 2: editing. Grey only means disabled here, the way Undo/Redo
+        // already worked -- A-/A+ used to be grey while perfectly usable.
         Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) {
-                Text("Undo", color = if (undoStack.isNotEmpty()) ChordColor else TextMuted)
+            IconButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) {
+                Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo", tint = if (undoStack.isNotEmpty()) ChordColor else TextMuted)
             }
-            TextButton(onClick = { redo() }, enabled = redoStack.isNotEmpty()) {
-                Text("Redo", color = if (redoStack.isNotEmpty()) ChordColor else TextMuted)
+            IconButton(onClick = { redo() }, enabled = redoStack.isNotEmpty()) {
+                Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo", tint = if (redoStack.isNotEmpty()) ChordColor else TextMuted)
             }
-            Spacer(Modifier.width(8.dp))
-            TextButton(onClick = { transposeAll(-1) }) { Text("Transpose -1", color = ChordColor) }
-            TextButton(onClick = { transposeAll(1) }) { Text("Transpose +1", color = ChordColor) }
-            Spacer(Modifier.width(8.dp))
-            TextButton(onClick = { fontScale = (fontScale - 0.1f).coerceAtLeast(0.75f) }) {
-                Text("A-", color = TextMuted, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = { transposeAll(-1) }) {
+                Icon(Icons.Filled.Remove, contentDescription = "Transpose down", tint = ChordColor)
             }
-            TextButton(onClick = { fontScale = (fontScale + 0.1f).coerceAtMost(1.4f) }) {
-                Text("A+", color = TextMuted, fontWeight = FontWeight.Bold)
+            Text("Transpose", color = ChordColor, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+            IconButton(onClick = { transposeAll(1) }) {
+                Icon(Icons.Filled.Add, contentDescription = "Transpose up", tint = ChordColor)
+            }
+            Spacer(Modifier.weight(1f))
+            // Text size: one button, its A-/A+ in a menu that stays open while
+            // you tap -- two always-visible buttons didn't fit beside the rest.
+            Box {
+                IconButton(onClick = { textSizeMenuOpen = true }) {
+                    Icon(Icons.Filled.FormatSize, contentDescription = "Text size", tint = ChordColor)
+                }
+                DropdownMenu(expanded = textSizeMenuOpen, onDismissRequest = { textSizeMenuOpen = false }, containerColor = MaterialTheme.colorScheme.surface) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 4.dp)) {
+                        TextButton(onClick = { fontScale = (fontScale - 0.1f).coerceAtLeast(0.75f) }, enabled = fontScale > 0.75f + 0.001f) {
+                            Text("A-", fontWeight = FontWeight.Bold, color = if (fontScale > 0.75f + 0.001f) ChordColor else TextMuted)
+                        }
+                        Text("${(fontScale * 100).roundToInt()}%", style = MaterialTheme.typography.bodySmall)
+                        TextButton(onClick = { fontScale = (fontScale + 0.1f).coerceAtMost(1.4f) }, enabled = fontScale < 1.4f - 0.001f) {
+                            Text("A+", fontWeight = FontWeight.Bold, color = if (fontScale < 1.4f - 0.001f) ChordColor else TextMuted)
+                        }
+                    }
+                }
             }
         }
         HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = PaperLine, thickness = 1.dp)
@@ -1274,6 +1385,30 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
                     },
                 ),
         ) {
+            // Item 0: title and details, scrolling away with the song like a
+            // Samsung Notes title -- revealRow and the "+ Add line" scroll
+            // count it, so row k is item k + 1.
+            item(key = "header") {
+                Column {
+                    Spacer(Modifier.height(8.dp))
+                    BasicTextField(
+                        value = title,
+                        onValueChange = { title = it; persist() },
+                        textStyle = TextStyle(fontSize = 26.sp, fontWeight = FontWeight.Bold, color = LyricColor),
+                        cursorBrush = SolidColor(LyricColor),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        decorationBox = { inner ->
+                            if (title.isEmpty()) Text("Title", style = TextStyle(fontSize = 26.sp, fontWeight = FontWeight.Bold), color = TextMuted)
+                            inner()
+                        },
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    SongMetaBar(meta = meta, onUpdateMeta = { updated -> meta = updated; persist() })
+                    Spacer(Modifier.height(12.dp))
+                    HorizontalDivider(color = PaperLine, thickness = 1.dp)
+                }
+            }
             itemsIndexed(lines, key = { _, line -> line.id }) { index, line ->
                 LineRow(
                     line = line,
@@ -1285,12 +1420,22 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
                     wrapsOntoNextRow = lines.getOrNull(index + 1)?.paragraphId == line.paragraphId,
                     isWrappedRow = lines.getOrNull(index - 1)?.paragraphId == line.paragraphId,
                     customChords = customChords,
-                    onTapChord = { name -> activeChordName = name },
+                    onShowChord = { name ->
+                    // Close the keyboard first: left up, it kept typing
+                    // into whichever lyric was focused, hidden behind the
+                    // chord sheet (found on-device).
+                    focusManager.clearFocus()
+                    activeChordName = name
+                },
                     pendingFocus = pendingFocus,
                     onConsumedPendingFocus = { pendingFocus = null },
                     onChordsChange = { updated -> updateLine(line.id) { it.copy(chords = updated) } },
                     onLyricsChange = { updated, caret -> handleLyricsChange(line, updated, caret) },
+                    onChordsFocusChanged = { focused ->
+                        if (focused) focusedRowId = line.id else if (focusedRowId == line.id) focusedRowId = null
+                    },
                     onLyricsFocusChanged = { focused ->
+                        if (focused) focusedRowId = line.id else if (focusedRowId == line.id) focusedRowId = null
                         if (focused) {
                             focusedLyricsId = line.id
                         } else if (focusedLyricsId == line.id) {
@@ -1318,24 +1463,15 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
         }
     }
 
-    activeChordName?.let { name ->
-        ChordVoicingPanel(
-            chordName = name,
-            voicing = lookupChord(name, customChords),
-            isCustom = customChords.containsKey(name),
-            onSave = { voicing -> saveVoicing(name, voicing) },
-            onReset = { resetVoicing(name) },
-            onDismiss = { activeChordName = null },
-        )
-    }
-
     // Drawn before ScratchpadScreen/ChordVoicingPanel below so either one's
-    // full-screen surface naturally covers this button when showing --
-    // never needs its own extra "hide me" condition for that. Hidden while
+    // surface covers this button when showing. (The chord panel used to be
+    // drawn first, despite this comment, and the Play button floated on top
+    // of its sheet.) Also hidden outright while a chord's panel is open, since
+    // the sheet is bottom-anchored right where the button sits. Hidden while
     // the keyboard is up: the screen ends at the keyboard, so the button would
     // ride up over the row being typed in, and autoscroll is for playing, not
     // writing.
-    if (!WindowInsets.isImeVisible) {
+    if (!WindowInsets.isImeVisible && activeChordName == null) {
         AutoscrollControls(
             enabled = autoscrollEnabled,
             atEnd = lyricsAtEnd,
@@ -1360,6 +1496,17 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
                 .align(Alignment.BottomEnd)
                 .navigationBarsPadding()
                 .padding(16.dp),
+        )
+    }
+
+    activeChordName?.let { name ->
+        ChordVoicingPanel(
+            chordName = name,
+            voicing = lookupChord(name, customChords),
+            isCustom = customChords.containsKey(name),
+            onSave = { voicing -> saveVoicing(name, voicing) },
+            onReset = { resetVoicing(name) },
+            onDismiss = { activeChordName = null },
         )
     }
 
@@ -1418,11 +1565,12 @@ private fun LineRow(
     wrapsOntoNextRow: Boolean,
     isWrappedRow: Boolean,
     customChords: Map<String, ChordVoicing>,
-    onTapChord: (String) -> Unit,
+    onShowChord: (String) -> Unit,
     pendingFocus: PendingFocus?,
     onConsumedPendingFocus: () -> Unit,
     onChordsChange: (String) -> Unit,
     onLyricsChange: (String, caretIndex: Int) -> Unit,
+    onChordsFocusChanged: (Boolean) -> Unit,
     onLyricsFocusChanged: (Boolean) -> Unit,
     onEnter: (caretIndex: Int) -> Unit,
     onBackspaceAtStart: () -> Unit,
@@ -1434,7 +1582,15 @@ private fun LineRow(
     // straight back to false in the same frame it was set true, and the
     // token row's onClick appears to silently do nothing.
     var chordFieldHasGainedFocus by remember(line.id) { mutableStateOf(false) }
-    var chordsField by remember(line.id) { mutableStateOf(TextFieldValue(line.chords)) }
+    // The chord field runs on TextFieldState, not a TextFieldValue +
+    // onValueChange pair: its edit rules (chord names overwrite spaces, the
+    // width cap, the keyboard's double-space period) rewrite what was just
+    // typed, and done in onValueChange the Samsung keyboard replayed its own
+    // stale copy of the text a moment later -- putting an eaten space back, or
+    // deleting a second one (seen in an on-device log). An InputTransformation
+    // applies them inside the keyboard's edit, so the two never disagree.
+    val chordsState = remember(line.id) { TextFieldState(line.chords) }
+    val chordInputRules = remember(chordCapacity) { ChordInputRules(chordCapacity) }
     var lyricsField by remember(line.id) { mutableStateOf(TextFieldValue(line.lyrics)) }
     val chordsFocus = remember(line.id) { FocusRequester() }
     val lyricsFocus = remember(line.id) { FocusRequester() }
@@ -1446,7 +1602,13 @@ private fun LineRow(
     // the field to text k -- silently dropping k+1.
     LaunchedEffect(line.chords) {
         val now = latestLine()?.chords ?: return@LaunchedEffect
-        if (chordsField.text != now) chordsField = TextFieldValue(now, TextRange(now.length))
+        if (chordsState.text.toString() != now) chordsState.setTextAndPlaceCursorAtEnd(now)
+    }
+    // ...and push edits made in the field out to the row.
+    LaunchedEffect(chordsState) {
+        snapshotFlow { chordsState.text.toString() }.collect { text ->
+            if (text != latestLine()?.chords) onChordsChange(text)
+        }
     }
     LaunchedEffect(line.lyrics) {
         val now = latestLine()?.lyrics ?: return@LaunchedEffect
@@ -1480,20 +1642,15 @@ private fun LineRow(
         // Chord track: plain text field while editing, colored token row otherwise.
         if (chordEditMode) {
             BasicTextField(
-                value = chordsField,
-                onValueChange = { candidate ->
-                    val accepted = capChordInput(chordsField, suppressDoubleSpacePeriod(chordsField, candidate), chordCapacity)
-                    val textChanged = accepted.text != chordsField.text
-                    chordsField = accepted
-                    if (textChanged) onChordsChange(accepted.text)
-                },
+                state = chordsState,
+                inputTransformation = chordInputRules,
                 textStyle = chordStyle.copy(color = ChordColor),
                 // Without this the caret is BasicTextField's default black,
                 // which on the Cozy Dark parchment is all but invisible.
                 cursorBrush = SolidColor(ChordColor),
-                singleLine = true,
+                lineLimits = TextFieldLineLimits.SingleLine,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next, autoCorrectEnabled = false),
-                keyboardActions = KeyboardActions(onNext = { lyricsFocus.requestFocus() }),
+                onKeyboardAction = { lyricsFocus.requestFocus() },
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 24.dp)
@@ -1501,6 +1658,7 @@ private fun LineRow(
                     .focusRequester(chordsFocus)
                     .onFocusChanged { focusState ->
                         chordsFocused = focusState.isFocused
+                        onChordsFocusChanged(focusState.isFocused)
                         if (focusState.isFocused) {
                             chordFieldHasGainedFocus = true
                         } else if (chordFieldHasGainedFocus) {
@@ -1510,7 +1668,7 @@ private fun LineRow(
                     },
                 // Deliberately no backspace-at-start handling: a chord line never
                 // joins the line above, so backspacing stops at column 0.
-                decorationBox = { inner ->
+                decorator = { inner ->
                     // Bottom-aligned to match ChordTokenRow, which this field
                     // swaps places with on tap. The row is a Row with
                     // verticalAlignment = Bottom inside the same 24.dp min
@@ -1522,7 +1680,7 @@ private fun LineRow(
                         modifier = Modifier.fillMaxWidth().fillMaxHeight(),
                         contentAlignment = Alignment.BottomStart,
                     ) {
-                        if (chordsField.text.isEmpty() && !chordsFocused) {
+                        if (chordsState.text.isEmpty() && !chordsFocused) {
                             Text("Chords…", style = chordStyle.copy(color = TextMuted))
                         }
                         inner()
@@ -1533,20 +1691,27 @@ private fun LineRow(
             ChordTokenRow(
                 text = line.chords,
                 style = chordStyle,
+                glyphWidthPx = glyphWidthPx,
                 // A wrapped row is the rest of the line above, not a line of its
                 // own to prompt for -- the empty row a trailing space opens
                 // would otherwise read as a blank new line.
-                showPlaceholder = !isWrappedRow,
+                // One rule for the "Chords…" hint: on a new, empty line, or on
+                // the line being typed in -- not on every lyric line that has
+                // no chords (a "[Chorus]" label, a lyric-only line). It used to
+                // depend on whether the chords string happened to hold
+                // alignment spaces, so some chordless lines showed it and
+                // others didn't.
+                showPlaceholder = !isWrappedRow && (line.lyrics.isEmpty() || lyricsFocused),
                 customChords = customChords,
                 onClick = { x ->
                     // Caret at the tapped column, like tapping into any text
                     // field -- not parked at the end of the alignment padding,
                     // which on a full-width line is past where anything fits.
-                    val column = (x / glyphWidthPx).roundToInt().coerceIn(0, chordsField.text.length)
-                    chordsField = chordsField.copy(selection = TextRange(column))
+                    val column = (x / glyphWidthPx).roundToInt().coerceIn(0, chordsState.text.length)
+                    chordsState.edit { selection = TextRange(column) }
                     chordEditMode = true
                 },
-                onTapChord = onTapChord,
+                onShowChord = onShowChord,
             )
         }
 
@@ -1604,26 +1769,37 @@ private fun LineRow(
 private fun ChordTokenRow(
     text: String,
     style: TextStyle,
+    glyphWidthPx: Float,
     showPlaceholder: Boolean,
     customChords: Map<String, ChordVoicing>,
     onClick: (x: Float) -> Unit,
-    onTapChord: (String) -> Unit,
+    onShowChord: (String) -> Unit,
 ) {
     val tokens = remember(text, customChords) { tokenizeChordLine(text, customChords) }
     val currentOnClick by rememberUpdatedState(onClick)
+    val currentOnShowChord by rememberUpdatedState(onShowChord)
+    val currentTokens by rememberUpdatedState(tokens)
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 24.dp)
-            // A tap (rather than .clickable) so the edit field can open with
-            // its caret at the tapped column. Taps on a chord token itself are
-            // consumed by that token's own clickable and open its diagram.
-            .pointerInput(Unit) { detectTapGestures { currentOnClick(it.x) } }
+            // One tap detector for the whole row, deciding by column: a tap on a
+            // chord's letters opens its diagram, a tap anywhere else opens the
+            // line for editing with the caret there. Each chord used to be its
+            // own clickable, and Android widens small tap targets to ~48dp, so
+            // on a line like "G    C    G" the chords' widened targets
+            // overlapped and no tap could reach the line to edit it.
+            .pointerInput(Unit) {
+                detectTapGestures { pos ->
+                    val chord = chordAtColumn(currentTokens, (pos.x / glyphWidthPx).toInt())
+                    if (chord != null) currentOnShowChord(chord) else currentOnClick(pos.x)
+                }
+            }
             .semantics { onClick(label = "Edit chords") { currentOnClick(Float.MAX_VALUE); true } }
             .padding(vertical = 1.dp),
         verticalAlignment = Alignment.Bottom,
     ) {
-        if (tokens.isEmpty()) {
+        if (tokens.all { it.isWhitespace }) {
             if (showPlaceholder) Text("Chords…", style = style.copy(color = TextMuted))
         } else {
             for (tok in tokens) {
@@ -1641,10 +1817,15 @@ private fun ChordTokenRow(
                     // narrower screen) is clipped rather than wrapping tokens.
                     softWrap = false,
                     maxLines = 1,
-                    // Whitespace tokens have no chordName and stay unclickable so a
-                    // tap there still falls through to the Row's onClick (raw edit mode).
+                    // Screen readers still get each chord's diagram as an action;
+                    // semantics add no tap target, so it can't widen the chord's
+                    // tap area again.
                     modifier = if (!tok.isWhitespace) {
-                        Modifier.clickable(onClick = { onTapChord(tok.chordName ?: tok.text) })
+                        Modifier.semantics {
+                            onClick(label = "Show ${tok.chordName ?: tok.text} diagram") {
+                                currentOnShowChord(tok.chordName ?: tok.text); true
+                            }
+                        }
                     } else {
                         Modifier
                     },
@@ -1652,6 +1833,17 @@ private fun ChordTokenRow(
             }
         }
     }
+}
+
+/** The chord (by name) whose letters cover [column] of a chord line split into [tokens], or null over a space. */
+private fun chordAtColumn(tokens: List<ChordToken>, column: Int): String? {
+    var start = 0
+    for (tok in tokens) {
+        val end = start + tok.text.length
+        if (column in start until end) return if (tok.isWhitespace) null else tok.chordName ?: tok.text
+        start = end
+    }
+    return null
 }
 
 /**
@@ -1729,7 +1921,7 @@ private fun AutoscrollControls(
 @Composable
 private fun SongMetaBar(meta: SongMeta, onUpdateMeta: (SongMeta) -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         MetaField(
@@ -1737,6 +1929,7 @@ private fun SongMetaBar(meta: SongMeta, onUpdateMeta: (SongMeta) -> Unit) {
             value = if (meta.bpm == 0) "" else meta.bpm.toString(),
             onValueChange = { onUpdateMeta(meta.copy(bpm = it.filter(Char::isDigit).toIntOrNull() ?: 0)) },
             placeholder = "—",
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             modifier = Modifier.weight(1f),
         )
         MetaField(
@@ -1758,13 +1951,21 @@ private fun SongMetaBar(meta: SongMeta, onUpdateMeta: (SongMeta) -> Unit) {
             value = if (meta.capo == 0) "" else meta.capo.toString(),
             onValueChange = { onUpdateMeta(meta.copy(capo = it.filter(Char::isDigit).toIntOrNull() ?: 0)) },
             placeholder = "—",
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             modifier = Modifier.weight(1f),
         )
     }
 }
 
 @Composable
-private fun MetaField(label: String, value: String, onValueChange: (String) -> Unit, placeholder: String, modifier: Modifier = Modifier) {
+private fun MetaField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    modifier: Modifier = Modifier,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+) {
     Column(modifier = modifier) {
         Text(label, style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextMuted, letterSpacing = 0.6.sp))
         BasicTextField(
@@ -1772,6 +1973,7 @@ private fun MetaField(label: String, value: String, onValueChange: (String) -> U
             onValueChange = onValueChange,
             textStyle = TextStyle(fontSize = 13.sp, color = LyricColor),
             singleLine = true,
+            keyboardOptions = keyboardOptions,
             modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
             decorationBox = { inner ->
                 if (value.isEmpty()) Text(placeholder, style = TextStyle(fontSize = 13.sp, color = TextMuted))

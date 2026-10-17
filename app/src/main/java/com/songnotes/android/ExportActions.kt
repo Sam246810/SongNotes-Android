@@ -14,7 +14,8 @@ import android.text.TextPaint
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.songnotes.core.domain.Song
-import com.songnotes.core.domain.formatSongAsText
+import com.songnotes.core.domain.formatSongForSharing
+import com.songnotes.core.domain.formatSongMetaLine
 import com.songnotes.core.domain.wrapSongToColumns
 import java.io.File
 import java.io.FileOutputStream
@@ -30,8 +31,8 @@ import java.io.FileOutputStream
  */
 private const val TEXT_EXPORT_COLUMNS = 60
 
-/** The text Copy and .txt share: [song] wrapped to [TEXT_EXPORT_COLUMNS], formatted by [formatSongAsText]. */
-private fun songAsText(song: Song): String = formatSongAsText(wrapSongToColumns(song, TEXT_EXPORT_COLUMNS))
+/** The text Copy and .txt share: [song] wrapped to [TEXT_EXPORT_COLUMNS], formatted by [formatSongForSharing]. */
+private fun songAsText(song: Song): String = formatSongForSharing(wrapSongToColumns(song, TEXT_EXPORT_COLUMNS))
 
 /**
  * Copies [song] as plain text (via [songAsText]) to the system
@@ -75,6 +76,13 @@ private val ChordPaint = Paint().apply {
     color = Color.parseColor("#B45309")
     textSize = 11f
     typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+    isAntiAlias = true
+}
+// The Key/Capo/BPM/Tuning line under the title: muted, so it reads as
+// reference detail rather than part of the song.
+private val MetaPaint = Paint().apply {
+    color = Color.parseColor("#7A6A5A")
+    textSize = 11f
     isAntiAlias = true
 }
 private val LyricPaint = Paint().apply {
@@ -157,6 +165,11 @@ private fun writeSongPdf(context: Context, song: Song): File {
     titleLayout.draw(canvas)
     canvas.restore()
     var y = MARGIN + titleLayout.height + TitlePaint.textSize * 0.5f
+    formatSongMetaLine(song)?.let { metaLine ->
+        y += MetaPaint.textSize
+        canvas.drawText(metaLine, MARGIN, y, MetaPaint)
+        y += MetaPaint.textSize * 0.6f
+    }
 
     fun newPage() {
         document.finishPage(page)
