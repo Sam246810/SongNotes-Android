@@ -1,5 +1,6 @@
 package com.songnotes.android
 
+import android.app.Activity
 import android.content.Context
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
@@ -8,8 +9,11 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 
 /**
  * The editor's "paper" palette -- the warm parchment look the song editor,
@@ -149,6 +153,22 @@ fun SongNotesTheme(mode: ThemeMode = ThemeMode.SYSTEM, content: @Composable () -
         ThemeMode.SYSTEM -> isSystemInDarkTheme()
         ThemeMode.LIGHT -> false
         ThemeMode.DARK -> true
+    }
+    // Status/navigation bar icons follow the app's theme, not the device's.
+    // Nothing set them before, so Android drew white icons on the light
+    // parchment (clock, battery all but invisible) -- and with the in-app
+    // override, the device's own dark setting can disagree with the page.
+    // Screens that paint themselves dark (the piano) flip this while open and
+    // restore it on the way out.
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as? Activity)?.window ?: return@SideEffect
+            WindowCompat.getInsetsController(window, view).apply {
+                isAppearanceLightStatusBars = !dark
+                isAppearanceLightNavigationBars = !dark
+            }
+        }
     }
     CompositionLocalProvider(LocalSongNotesColors provides if (dark) CozyDarkColors else WarmLightColors) {
         MaterialTheme(colorScheme = if (dark) DarkScheme else LightScheme, content = content)
