@@ -1,0 +1,3 @@
+# Golden fixtures copied byte-identical from the web repo's spec/ (generated there
+# with LF): keep them LF here too.
+core/data/src/test/resources/spec/*.json text eol=lf

@@ -1,5 +1,12 @@
 # Phase 13 — Local-first Android, opt-in manual sync
 
+> **Superseded in part (2026-10-26):** "nothing ever leaves the phone except when
+> the user explicitly presses Sync" no longer holds. With merging in place
+> (Phase 14), a phone that has turned sync on also syncs when the app opens or
+> comes back to the foreground (Phase 15). Sync is still opt-in, the app still
+> works fully without an account, and the setting "Sync when the app opens"
+> brings back the manual-only behaviour. See `PHASE-15-auto-sync.md`.
+
 **Status (2026-08-15): done, verified on-device.** Android changes direction: an
 account is now entirely optional, and nothing ever leaves the phone except when
 the user explicitly presses Sync. This is a deliberate divergence from the

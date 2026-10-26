@@ -211,9 +211,11 @@ immediately understandable. Tier 1 (per-line 3-way merge, ~1 week) comes
 after the product UI and is cheap because **lines already have stable
 ids**. CRDTs are not worth it for a two-device single-user app.
 
-> **Update 2026-10-26:** conflict copies are being replaced by the Tier 1
+> **Update 2026-10-26: Tier 1 is done.** Conflict copies are replaced by a
 > merge (per-field, per-line and word-level, edit beats delete) on both
-> platforms. Behaviour, status and rough edges: `docs/SYNC-MERGE.md`.
+> platforms, and Android syncs when the app opens. Behaviour, status and rough
+> edges: `docs/SYNC-MERGE.md`; Android specifics: `docs/handoff/PHASE-14-merge.md`
+> and `PHASE-15-auto-sync.md`.
 
 Also fix now while free: add `deleted_at` tombstones (**deletes currently
 never propagate between devices** — a live bug), add
