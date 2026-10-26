@@ -1,26 +1,24 @@
 package com.songnotes.core.data
 
 import android.os.Build
-import com.songnotes.core.domain.ChordAnchor
-import com.songnotes.core.domain.ChordBarre
-import com.songnotes.core.domain.ChordVoicing
 import com.songnotes.core.domain.Song
-import com.songnotes.core.domain.SongLine
-import com.songnotes.core.domain.SongMeta
 import java.text.SimpleDateFormat
-import java.time.Instant
-import java.time.OffsetDateTime
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
-import org.json.JSONArray
 import org.json.JSONObject
 
-/** What a [SyncEngine.sync] call actually did, for the caller to show the user -- Phase 13's manual-only model means a bare "it succeeded" spinner isn't enough. */
-data class SyncOutcome(val pushed: Int, val pulled: Int, val conflictCopies: Int, val reIded: Int)
+/**
+ * What a [SyncEngine.sync] call actually did, for the caller to show the user -- Phase 13's manual-only model means a bare "it succeeded" spinner isn't enough.
+ * [unreadable] counts remote songs this pass couldn't decrypt or parse -- they're left out, not fatal, but no longer silently.
+ */
+data class SyncOutcome(val pushed: Int, val pulled: Int, val conflictCopies: Int, val reIded: Int, val unreadable: Int = 0)
 
 /** Internal accumulator for [SyncEngine.pushPending]'s per-row loop, folded into [SyncOutcome] by [SyncEngine.sync]. */
 private data class PushResult(val pushed: Int, val reIded: Int, val conflictCopies: Int, val firstError: Throwable?)
+
+/** Internal accumulator for [SyncEngine.pull]. */
+private data class PullResult(val pulled: Int, val unreadable: Int)
 
 /**
  * The outbox push + incremental pull the plan's "Phase 7" section names --
@@ -42,12 +40,11 @@ private data class PushResult(val pushed: Int, val reIded: Int, val conflictCopi
  * some future sync that strictly-manual mode might never trigger. See
  * `docs/handoff/PHASE-13-local-first.md`.
  *
- * Song content JSON matches exactly what `_buildRow`/`_decryptRow` produce in
- * `songsRepository.js`: `{title, lines:[{id,lyrics,chords:[{i,c}]}], bpm, key,
- * tuning, capo, customChords?, createdAt, updatedAt}` -- `lines[].chords` is
- * already `:core:domain`'s native `ChordAnchor` shape, so unlike the web app
- * (which converts from its own padded-string model), no conversion is needed
- * on this side at all. Since Phase 8, `customChords` is likewise pushed/pulled
+ * Song content JSON is written and read by `SongDocument.kt`
+ * ([songToDocument]/[songFromDocument]), the twin of the web app's
+ * `src/store/songDocument.js`, both checked against `spec/song-documents.json`:
+ * `{title, lines:[{id,lyrics,chords:[{i,c}]}], bpm, key, tuning, capo,
+ * customChords?, createdAt, updatedAt}`. Since Phase 8, `customChords` is likewise pushed/pulled
  * straight from/to [Song.customChords] -- no special preservation logic needed
  * (an earlier Phase 7 version of this class had to fetch-and-preserve the
  * remote row's customChords before every push, since Android's domain model
@@ -108,10 +105,16 @@ class SyncEngine(
             )
         }
 
-        val pulled = pull(userId, dek)
+        val pull = pull(userId, dek)
 
         push.firstError?.let { throw it }
-        return SyncOutcome(pushed = push.pushed, pulled = pulled, conflictCopies = push.conflictCopies, reIded = push.reIded)
+        return SyncOutcome(
+            pushed = push.pushed,
+            pulled = pull.pulled,
+            conflictCopies = push.conflictCopies,
+            reIded = push.reIded,
+            unreadable = pull.unreadable,
+        )
     }
 
     /**
@@ -156,7 +159,7 @@ class SyncEngine(
             // genuinely different song that merely shares a UUID.
             val isSameSong = try {
                 val remoteJson = JSONObject(decryptContentJson(dek, remote.content.toContentEnvelope()))
-                val remoteSong = songFromContentJson(remote.id, remoteJson)
+                val remoteSong = songFromDocument(remote.id, remoteJson, remote.created_at, remote.updated_at)
                 sameSongContent(entity.toDomain(), remoteSong)
             } catch (e: Exception) {
                 false // undecryptable (different dek_id, corrupt) -- never assume it's safe to adopt
@@ -276,8 +279,9 @@ class SyncEngine(
         return PushResult(pushed, reIded, conflictCopies, firstError)
     }
 
-    private suspend fun pull(userId: String, dek: ByteArray): Int {
+    private suspend fun pull(userId: String, dek: ByteArray): PullResult {
         var pulled = 0
+        var unreadable = 0
         for (row in adapter.list(userId)) {
             val local = dao.getByIdIncludingDeleted(row.id)
             if (local != null && (local.rev >= row.rev || local.pendingSync)) continue // local is at least as new, or has an edit not yet resolved
@@ -297,33 +301,24 @@ class SyncEngine(
             // every OTHER row un-synced. Matches the web app's per-row
             // _placeholderSong fallback in songsRepository.js's list(). Local
             // state for this one row is simply left untouched (whatever it was
-            // before this pass, including "doesn't exist locally yet").
+            // before this pass, including "doesn't exist locally yet") -- but
+            // counted, so the sync result can say so instead of the song just
+            // never appearing.
             val song = try {
                 val contentJson = JSONObject(decryptContentJson(dek, row.content.toContentEnvelope()))
-                songFromContentJson(row.id, contentJson)
+                songFromDocument(row.id, contentJson, row.created_at, row.updated_at)
             } catch (e: Exception) {
+                unreadable++
                 continue
             }
             dao.upsert(SongEntity.fromDomain(song).copy(rev = row.rev, deletedAt = null, pendingSync = false, remoteRev = row.rev))
             pulled++
         }
-        return pulled
+        return PullResult(pulled, unreadable)
     }
 
     private fun buildRow(entity: SongEntity, userId: String, dek: ByteArray, dekId: String?): SongRow {
-        val domain = entity.toDomain()
-        val contentJson = JSONObject()
-            .put("title", entity.title)
-            .put("lines", linesToJson(domain.lines))
-            .put("bpm", entity.bpm)
-            .put("key", entity.key)
-            .put("tuning", entity.tuning)
-            .put("capo", entity.capo)
-            .put("createdAt", toIso(entity.createdAt))
-            .put("updatedAt", toIso(entity.updatedAt))
-        if (domain.customChords.isNotEmpty()) contentJson.put("customChords", customChordsToJson(domain.customChords))
-
-        val envelope = encryptContentJson(dek, contentJson.toString())
+        val envelope = encryptContentJson(dek, songToDocument(entity.toDomain()).toString())
         return SongRow(
             id = entity.id,
             user_id = userId,
@@ -360,78 +355,4 @@ class SyncEngine(
         )
         dao.upsert(conflictEntity)
     }
-
-    private fun customChordsToJson(customChords: Map<String, ChordVoicing>): JSONObject {
-        val obj = JSONObject()
-        for ((name, voicing) in customChords) {
-            val voicingJson = JSONObject()
-                .put("frets", JSONArray(voicing.frets))
-                .put("baseFret", voicing.baseFret)
-            voicing.barre?.let {
-                voicingJson.put("barre", JSONObject().put("fret", it.fret).put("fromString", it.fromString).put("toString", it.toString))
-            }
-            obj.put(name, voicingJson)
-        }
-        return obj
-    }
-
-    private fun customChordsFromJson(json: JSONObject?): Map<String, ChordVoicing> {
-        if (json == null) return emptyMap()
-        val result = LinkedHashMap<String, ChordVoicing>()
-        for (name in json.keys()) {
-            val voicingJson = json.getJSONObject(name)
-            val fretsJson = voicingJson.getJSONArray("frets")
-            val frets = (0 until fretsJson.length()).map { fretsJson.getInt(it) }
-            val barreJson = voicingJson.optJSONObject("barre")
-            val barre = barreJson?.let {
-                ChordBarre(fret = it.getInt("fret"), fromString = it.getInt("fromString"), toString = it.getInt("toString"))
-            }
-            result[name] = ChordVoicing(frets = frets, baseFret = voicingJson.getInt("baseFret"), barre = barre)
-        }
-        return result
-    }
-
-    private fun linesToJson(lines: List<SongLine>): JSONArray {
-        val arr = JSONArray()
-        for (line in lines) {
-            val chordsJson = JSONArray()
-            for (chord in line.chords) chordsJson.put(JSONObject().put("i", chord.i).put("c", chord.c))
-            arr.put(JSONObject().put("id", line.id).put("lyrics", line.lyrics).put("chords", chordsJson))
-        }
-        return arr
-    }
-
-    private fun songFromContentJson(id: String, json: JSONObject): Song {
-        val linesJson = json.getJSONArray("lines")
-        val lines = (0 until linesJson.length()).map { i ->
-            val lineJson = linesJson.getJSONObject(i)
-            val chordsJson = lineJson.getJSONArray("chords")
-            val chords = (0 until chordsJson.length()).map { c ->
-                val chordJson = chordsJson.getJSONObject(c)
-                ChordAnchor(i = chordJson.getInt("i"), c = chordJson.getString("c"))
-            }
-            SongLine(id = lineJson.getString("id"), lyrics = lineJson.getString("lyrics"), chords = chords)
-        }
-        return Song(
-            id = id,
-            title = json.optString("title", ""),
-            meta = SongMeta(
-                bpm = json.optInt("bpm", 0),
-                key = json.optString("key", ""),
-                tuning = json.optString("tuning", ""),
-                capo = json.optInt("capo", 0),
-            ),
-            lines = lines,
-            customChords = customChordsFromJson(json.optJSONObject("customChords")),
-            createdAt = parseIso(json.getString("createdAt")),
-            updatedAt = parseIso(json.getString("updatedAt")),
-        )
-    }
 }
-
-private fun toIso(epochMillis: Long): String = Instant.ofEpochMilli(epochMillis).toString()
-
-// Postgrest returns timestamptz columns as "+00:00"-offset text (e.g.
-// "2026-08-06T22:43:22.991+00:00"), not the "Z"-suffixed form toIso() writes --
-// OffsetDateTime.parse's default ISO_OFFSET_DATE_TIME format accepts both.
-private fun parseIso(iso: String): Long = OffsetDateTime.parse(iso).toInstant().toEpochMilli()

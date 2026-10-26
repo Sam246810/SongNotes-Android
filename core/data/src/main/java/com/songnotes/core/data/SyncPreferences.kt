@@ -54,6 +54,7 @@ data class SyncSettings(
     val lastSyncAtMs: Long,
     val lastSyncError: String?,
     val legacyJsonImportDone: Boolean,
+    val lastSyncUnreadable: Int = 0,
 )
 
 /**
@@ -108,6 +109,11 @@ class SyncPreferences(private val store: KeyValueStore) {
         get() = store.getString(KEY_LAST_SYNC_ERROR)
         set(value) = store.putString(KEY_LAST_SYNC_ERROR, value)
 
+    /** How many account songs the last successful sync couldn't decrypt or read (see `SyncOutcome.unreadable`). 0 when none -- the banner only mentions it when it isn't. */
+    var lastSyncUnreadable: Int
+        get() = store.getLong(KEY_LAST_SYNC_UNREADABLE, 0L).toInt()
+        set(value) = store.putLong(KEY_LAST_SYNC_UNREADABLE, value.toLong())
+
     /** Run-once flag for the pre-Phase-6 legacy-JSON-song import -- without it, `SongListScreen` re-imported (and re-dirtied/resurrected) every legacy song on every visit to the list. */
     var legacyJsonImportDone: Boolean
         get() = store.getBoolean(KEY_LEGACY_IMPORT_DONE, false)
@@ -121,6 +127,7 @@ class SyncPreferences(private val store: KeyValueStore) {
         lastSyncAtMs = lastSyncAtMs,
         lastSyncError = lastSyncError,
         legacyJsonImportDone = legacyJsonImportDone,
+        lastSyncUnreadable = lastSyncUnreadable,
     )
 
     /** Emits the current [snapshot] immediately, then again after any write through this store (from anywhere -- e.g. `SongSyncWorker` writing `lastSyncAtMs` on a background thread). Feeds `SyncStatusRepository.observe`. */
@@ -163,6 +170,7 @@ class SyncPreferences(private val store: KeyValueStore) {
         adoptionCompletedForUserId = null
         lastSyncAtMs = 0L
         lastSyncError = null
+        lastSyncUnreadable = 0
     }
 
     companion object {
@@ -173,6 +181,7 @@ class SyncPreferences(private val store: KeyValueStore) {
         private const val KEY_ADOPTION_DONE_FOR = "adoption_completed_for_user_id"
         private const val KEY_LAST_SYNC_AT = "last_sync_at_ms"
         private const val KEY_LAST_SYNC_ERROR = "last_sync_error"
+        private const val KEY_LAST_SYNC_UNREADABLE = "last_sync_unreadable"
         private const val KEY_LEGACY_IMPORT_DONE = "legacy_json_import_done"
     }
 }

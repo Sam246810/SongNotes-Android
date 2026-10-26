@@ -1,5 +1,6 @@
 package com.songnotes.core.data
 
+import com.songnotes.core.domain.ChordAnchor
 import java.security.SecureRandom
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonElement
@@ -262,10 +263,42 @@ class SyncEngineTest {
         )
         adapter.rows["good-song"] = buildRemoteRow("good-song", rev = 1, title = "Still Readable")
 
-        engine.sync(userId, dek)
+        val outcome = engine.sync(userId, dek)
 
         assertNull(dao.rows["bad-song"]) // skipped, not upserted with garbage
         assertEquals("Still Readable", dao.rows["good-song"]!!.title) // the OTHER row still made it through
+        assertEquals(1, outcome.unreadable) // ...and counted, so the banner can say so instead of the song just never appearing
+    }
+
+    @Test
+    fun `pull reads a legacy web row -- padded-string chords, a line with no id, string bpm -- instead of skipping it`() = runBlocking {
+        // Old web rows not re-saved since the web's anchor conversion still hold
+        // v1 shapes. This reader used to throw on them and pull() skipped the
+        // row, so the song never reached this device while the web showed it.
+        val legacy = JSONObject()
+            .put("title", "Old Web Song")
+            .put(
+                "lines",
+                org.json.JSONArray()
+                    .put(JSONObject().put("id", "line-a").put("lyrics", "a lyric from before anchors").put("chords", "Am    G       C"))
+                    .put(JSONObject().put("lyrics", "no id here").put("chords", org.json.JSONArray())),
+            )
+            .put("bpm", "").put("key", "").put("tuning", "").put("capo", "3")
+            .put("createdAt", "2026-01-01T00:00:00.000Z").put("updatedAt", "2026-01-01T00:00:00.000Z")
+        adapter.rows["legacy"] = SongRow(
+            id = "legacy", user_id = userId, encrypted = true, content = encryptContentJson(dek, legacy.toString()).toJsonElement(),
+            is_locked = false, rev = 1, deleted_at = null,
+            created_at = "2026-01-01T00:00:00.000Z", updated_at = "2026-01-01T00:00:00.000Z",
+        )
+
+        val outcome = engine.sync(userId, dek)
+
+        val song = dao.rows["legacy"]!!.toDomain()
+        assertEquals(0, outcome.unreadable)
+        assertEquals(listOf(ChordAnchor(0, "Am"), ChordAnchor(6, "G"), ChordAnchor(14, "C")), song.lines[0].chords)
+        assertEquals("legacy-1", song.lines[1].id)
+        assertEquals(0, song.meta.bpm)
+        assertEquals(3, song.meta.capo)
     }
 
     @Test

@@ -47,6 +47,11 @@ fun SyncStatusInline(
     if (!status.enabled) return
 
     val isError = status.lastError != null
+    // Songs on the account this device couldn't decrypt or read: not an error
+    // (everything else synced), but it used to be silent -- the song just
+    // never appeared here -- so say so, ahead of the usual status.
+    val unreadable = status.unreadableSongs
+    val showUnreadable = unreadable > 0 && !isError && !status.running && status.signedIn
     // "last synced never" is only ever noise, and appended to "All synced" it
     // reads as a flat contradiction ("All synced · never"). A sync that has
     // never run has no time worth reporting, so these branches drop the tail
@@ -69,6 +74,12 @@ fun SyncStatusInline(
         // wrong. Says the actual state instead: there is nothing to send.
         neverSynced -> "Nothing to sync yet"
         else -> "Synced ${lastSyncLabel(lastSyncAtMs)}"
+    }.let { base ->
+        if (showUnreadable) {
+            "$unreadable ${songWord(unreadable)} couldn't be read · $base"
+        } else {
+            base
+        }
     }
 
     Row(
@@ -83,7 +94,7 @@ fun SyncStatusInline(
         Text(
             message,
             style = MaterialTheme.typography.bodySmall,
-            color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            color = if (isError || showUnreadable) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f, fill = false),

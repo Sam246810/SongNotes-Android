@@ -78,7 +78,8 @@ class SongSyncWorker(context: Context, params: WorkerParameters) : CoroutineWork
             if (adopt) prefs.adoptionCompletedForUserId = userId
             prefs.lastSyncAtMs = System.currentTimeMillis()
             prefs.lastSyncError = null
-            Log.i(TAG, "sync ok: pushed=${outcome.pushed} pulled=${outcome.pulled} conflicts=${outcome.conflictCopies} reIded=${outcome.reIded}")
+            prefs.lastSyncUnreadable = outcome.unreadable
+            Log.i(TAG, "sync ok: pushed=${outcome.pushed} pulled=${outcome.pulled} conflicts=${outcome.conflictCopies} reIded=${outcome.reIded} unreadable=${outcome.unreadable}")
             Result.success()
         } catch (e: java.io.IOException) {
             // Network-layer failure (no connection, DNS, timeout) -- safe to

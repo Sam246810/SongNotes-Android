@@ -54,6 +54,8 @@ data class SyncStatus(
     val lastSyncAtMs: Long?,
     val lastError: String?,
     val running: Boolean,
+    /** Account songs the last sync couldn't decrypt or read -- see `SyncOutcome.unreadable`. */
+    val unreadableSongs: Int = 0,
 ) {
     val unsyncedTotal: Int get() = unsyncedSongs + unsyncedDeletes
 
@@ -103,6 +105,7 @@ class SyncStatusRepository(
             lastSyncAtMs = settings.lastSyncAtMs.takeIf { it > 0L },
             lastError = settings.lastSyncError,
             running = workInfos.any { it.state == WorkInfo.State.RUNNING || it.state == WorkInfo.State.ENQUEUED },
+            unreadableSongs = settings.lastSyncUnreadable,
         )
     }
 }
