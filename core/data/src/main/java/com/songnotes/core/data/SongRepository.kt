@@ -2,6 +2,9 @@ package com.songnotes.core.data
 
 import android.content.Context
 import com.songnotes.core.domain.Song
+import com.songnotes.core.domain.merge.contentEquals
+import com.songnotes.core.domain.merge.mergeSongs
+import com.songnotes.core.domain.merge.stampEdits
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -43,7 +46,11 @@ data class SongListItem(val song: Song, val pendingSync: Boolean, val isOnAccoun
  * `:app` no longer treats "signed in" as a precondition for using it at all
  * (see `docs/handoff/PHASE-13-local-first.md`).
  */
-class SongRepository(private val dao: SongDao) {
+class SongRepository(
+    private val dao: SongDao,
+    /** Wall-clock source for edit stamps; injectable so tests control it. */
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
     /** Convenience constructor for real call sites -- resolves the process-wide [SongDatabase] singleton (Phase 13; see its own doc comment for why a second `RoomDatabase` instance here was a real bug, not just a leak). Tests should call the primary constructor directly with a fake [SongDao]. */
     constructor(context: Context) : this(SongDatabase.getInstance(context).songDao())
 
@@ -56,6 +63,14 @@ class SongRepository(private val dao: SongDao) {
         }
 
     suspend fun getById(id: String): Song? = dao.getById(id)?.toDomain()
+
+    /**
+     * Song [id] as stored, re-emitted on every write, with whether it's been
+     * deleted -- the editor watches it so a sync landing while the song is open
+     * shows up in place. Emits null once the row is gone entirely.
+     */
+    fun observeStored(id: String): Flow<Pair<Song, Boolean>?> =
+        dao.observeByIdIncludingDeleted(id).map { row -> row?.let { it.toDomain() to (it.deletedAt != null) } }
 
     /**
      * Whether Room knows this id at all, **tombstones included** -- unlike
@@ -72,46 +87,69 @@ class SongRepository(private val dao: SongDao) {
     suspend fun existsIncludingDeleted(id: String): Boolean = dao.getByIdIncludingDeleted(id) != null
 
     /**
-     * Phase 13 fix for three defects [SongEntity.fromDomain] alone can't avoid,
-     * all present since Phase 7/8 and all made much worse under manual-only
-     * sync (see `docs/handoff/PHASE-13-local-first.md`'s "Part 0"):
-     *
-     * - **`remoteRev`** -- [SongEntity.fromDomain] never sets it (it's not part
-     *   of the domain [Song] at all), so without restoring it here every edit to
-     *   an already-synced song reset it to `null`. [SyncEngine.pushPending] then
-     *   read "never pushed" and attempted an `insert` on an id that already
-     *   existed remotely -- a Postgres unique-violation that made
-     *   `SongSyncWorker` fail (previously retry) forever on that song.
-     * - **`deletedAt`** -- was previously hard-coded to `null` on every upsert,
-     *   silently resurrecting a tombstoned song the instant it was touched by
-     *   anything that calls `upsert` (e.g. the legacy-JSON import re-running).
-     * - **`createdAt`** -- `SongEditorScreen.emptySong` used to hand this method
-     *   a domain `Song` with `createdAt = 0L` for a song id it hadn't loaded yet,
-     *   which would have been pushed to the server as a 1970 timestamp. Real
-     *   creation time now only ever comes from the first-ever upsert of that id.
+     * Saves [song] as is, with no merge -- for writers that aren't editing a
+     * loaded version (the legacy-JSON import, new songs). The editor uses
+     * [saveEdit]. Never resurrects a tombstoned song; see [write] for what's kept.
      */
     suspend fun upsert(song: Song) {
+        SongWriteLock.withLock { write(song, dao.getByIdIncludingDeleted(song.id)) }
+    }
+
+    /**
+     * The editor's save (docs/SYNC-MERGE.md): [song] is the editor's version, an
+     * edit of [basedOn] -- the version it last loaded or saved. If the stored row
+     * has moved on since (a sync landed while the song was open), the two are
+     * merged instead of the editor's stale copy overwriting what sync brought in;
+     * and a real edit of a song deleted elsewhere brings it back (an edit beats a
+     * delete). Returns the song as stored, which the editor should show if it
+     * differs from what it sent.
+     */
+    suspend fun saveEdit(song: Song, basedOn: Song): Song = SongWriteLock.withLock {
         val existing = dao.getByIdIncludingDeleted(song.id)
-        val entity = SongEntity.fromDomain(song).copy(
+        val stored = existing?.toDomain()
+        var next = song
+        if (stored != null && existing.deletedAt == null && !contentEquals(stored, basedOn)) {
+            next = mergeSongs(basedOn, song, stored)
+        }
+        val resurrect = existing?.deletedAt != null && !contentEquals(song, basedOn)
+        write(next, existing, resurrect)
+        dao.getByIdIncludingDeleted(song.id)!!.toDomain()
+    }
+
+    /**
+     * Writes [song] over [existing] (the row as it is now; callers hold
+     * [SongWriteLock]). Stamps what changed, bumps the local `rev`, marks the
+     * row pending, and keeps what the domain [Song] doesn't carry:
+     *
+     * - **`remoteRev`** -- [SongEntity.fromDomain] never sets it, so without
+     *   restoring it here every edit to an already-synced song reset it to
+     *   `null`, and [SyncEngine.pushPending] tried to `insert` an id that already
+     *   existed remotely (Phase 13, `docs/handoff/PHASE-13-local-first.md`).
+     * - **`deletedAt`** -- kept, so anything that calls `upsert` (e.g. the
+     *   legacy-JSON import re-running) never resurrects a tombstoned song; only
+     *   [saveEdit] of a real edit does, deliberately.
+     * - **`createdAt`** -- real creation time only ever comes from the first-ever
+     *   upsert of that id, never a placeholder `0L`.
+     * - **`baseDocJson`** -- snapshotted on the clean -> pending transition: the
+     *   version the server confirmed, which a sync merge needs as its base.
+     */
+    private suspend fun write(song: Song, existing: SongEntity?, resurrect: Boolean = false) {
+        val stamped = stampEdits(existing?.toDomain(), song, clock())
+        val entity = SongEntity.fromDomain(stamped).copy(
             rev = (existing?.rev ?: 0) + 1,
-            deletedAt = existing?.deletedAt,
+            deletedAt = if (resurrect) null else existing?.deletedAt,
             pendingSync = true,
             remoteRev = existing?.remoteRev,
             createdAt = existing?.createdAt ?: song.createdAt,
+            baseDocJson = baseFor(existing),
         )
         dao.upsert(entity)
     }
 
     /** Always tombstones, even for a song that was never pushed. Prefer [deleteRespectingSync] from the UI; kept for the sync engine's own use and existing callers. */
-    suspend fun delete(song: Song) {
-        val existing = dao.getByIdIncludingDeleted(song.id) ?: return
-        dao.upsert(
-            existing.copy(
-                deletedAt = System.currentTimeMillis(),
-                rev = existing.rev + 1,
-                pendingSync = true,
-            ),
-        )
+    suspend fun delete(song: Song) = SongWriteLock.withLock {
+        val existing = dao.getByIdIncludingDeleted(song.id) ?: return@withLock
+        dao.upsert(tombstone(existing))
     }
 
     /**
@@ -123,18 +161,26 @@ class SongRepository(private val dao: SongDao) {
      * server still needs the tombstone so the next sync can propagate the
      * delete.
      */
-    suspend fun deleteRespectingSync(song: Song) {
-        val existing = dao.getByIdIncludingDeleted(song.id) ?: return
-        if (existing.remoteRev == null) {
-            dao.deleteById(song.id)
-        } else {
-            dao.upsert(
-                existing.copy(
-                    deletedAt = System.currentTimeMillis(),
-                    rev = existing.rev + 1,
-                    pendingSync = true,
-                ),
-            )
-        }
+    suspend fun deleteRespectingSync(song: Song) = SongWriteLock.withLock {
+        val existing = dao.getByIdIncludingDeleted(song.id) ?: return@withLock
+        if (existing.remoteRev == null) dao.deleteById(song.id) else dao.upsert(tombstone(existing))
+    }
+
+    private fun tombstone(existing: SongEntity): SongEntity = existing.copy(
+        deletedAt = clock(),
+        rev = existing.rev + 1,
+        pendingSync = true,
+        baseDocJson = baseFor(existing),
+    )
+
+    /**
+     * The base a row's unsent change merges against: unchanged while it's already
+     * pending, the row's current (server-confirmed) content when it was clean,
+     * none when it's never reached the server.
+     */
+    private fun baseFor(existing: SongEntity?): String? = when {
+        existing == null || existing.remoteRev == null -> null
+        existing.pendingSync -> existing.baseDocJson
+        else -> songToDocument(existing.toDomain()).toString()
     }
 }

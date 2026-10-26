@@ -32,7 +32,7 @@ class SongDocumentGoldenFixtureTest {
     @Test
     fun `every fixture document reads as the web app reads it`() {
         val cases = loadCases()
-        assertTrue("expected the full case set, got ${cases.length()}", cases.length() >= 5)
+        assertTrue("expected the full case set, got ${cases.length()}", cases.length() >= 6)
 
         for (k in 0 until cases.length()) {
             val case = cases.getJSONObject(k)
@@ -88,6 +88,7 @@ class SongDocumentGoldenFixtureTest {
                     id = line.getString("id"),
                     lyrics = line.getString("lyrics"),
                     chords = (0 until chords.length()).map { c -> chords.getJSONObject(c).let { ChordAnchor(it.getInt("i"), it.getString("c")) } },
+                    editedAt = if (line.has("editedAt")) line.getLong("editedAt") else null,
                 )
             },
             customChords = custom.keys().asSequence().associateWith { name ->
@@ -101,8 +102,13 @@ class SongDocumentGoldenFixtureTest {
             },
             createdAt = OffsetDateTime.parse(json.getString("createdAt")).toInstant().toEpochMilli(),
             updatedAt = OffsetDateTime.parse(json.getString("updatedAt")).toInstant().toEpochMilli(),
+            fieldEditedAt = longs(json.optJSONObject("fieldEditedAt")),
+            customChordsEditedAt = longs(json.optJSONObject("customChordsEditedAt")),
         )
     }
+
+    private fun longs(json: JSONObject?): Map<String, Long> =
+        json?.keys()?.asSequence()?.associateWith { json.getLong(it) } ?: emptyMap()
 
     /** JSON as plain values -- objects as maps, so key order doesn't matter; whole numbers as Long, so 4 and 4L compare equal. */
     private fun normalize(value: Any?): Any? = when (value) {

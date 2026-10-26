@@ -1,58 +1,66 @@
 package com.songnotes.core.data
 
-import android.os.Build
 import com.songnotes.core.domain.Song
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.songnotes.core.domain.merge.contentEquals
+import com.songnotes.core.domain.merge.mergeSongs
 import java.util.UUID
 import org.json.JSONObject
 
 /**
  * What a [SyncEngine.sync] call actually did, for the caller to show the user -- Phase 13's manual-only model means a bare "it succeeded" spinner isn't enough.
+ * [merged] counts songs edited on another device too, whose edits were merged with this one's (docs/SYNC-MERGE.md).
+ * [restored] counts songs deleted here that came back because another device had edited them.
  * [unreadable] counts remote songs this pass couldn't decrypt or parse -- they're left out, not fatal, but no longer silently.
  */
-data class SyncOutcome(val pushed: Int, val pulled: Int, val conflictCopies: Int, val reIded: Int, val unreadable: Int = 0)
+data class SyncOutcome(
+    val pushed: Int,
+    val pulled: Int,
+    val merged: Int,
+    val reIded: Int,
+    val unreadable: Int = 0,
+    val restored: Int = 0,
+)
 
 /** Internal accumulator for [SyncEngine.pushPending]'s per-row loop, folded into [SyncOutcome] by [SyncEngine.sync]. */
-private data class PushResult(val pushed: Int, val reIded: Int, val conflictCopies: Int, val firstError: Throwable?)
+private data class PushResult(
+    val pushed: Int = 0,
+    val reIded: Int = 0,
+    val merged: Int = 0,
+    val restored: Int = 0,
+    val unreadable: Int = 0,
+    val firstError: Throwable? = null,
+) {
+    operator fun plus(o: PushResult) = PushResult(
+        pushed + o.pushed, reIded + o.reIded, merged + o.merged, restored + o.restored, unreadable + o.unreadable,
+        firstError ?: o.firstError,
+    )
+}
 
 /** Internal accumulator for [SyncEngine.pull]. */
 private data class PullResult(val pulled: Int, val unreadable: Int)
 
 /**
- * The outbox push + incremental pull the plan's "Phase 7" section names --
- * the Kotlin twin of the desktop web app's `CloudSongsRepository`
- * (`songsRepository.js`), same rev-based optimistic concurrency, same
- * tombstone/conflict-copy handling (see `docs/handoff/PHASE-07.md`). Deals in
- * plain suspend functions independent of WorkManager so it's testable without
- * a real background job -- `SongSyncWorker` (in `:app`) is a thin
- * `CoroutineWorker` wrapper around [sync].
+ * The outbox push + pull -- the Kotlin twin of the desktop web app's
+ * `CloudSongsRepository` (`songsRepository.js`): same rev-based optimistic
+ * concurrency, same tombstones, and since the sync merge (docs/SYNC-MERGE.md)
+ * the same answer to a lost race: merge, never a conflict copy. Deals in plain
+ * suspend functions independent of WorkManager so it's testable without a real
+ * background job -- `SongSyncWorker` is a thin `CoroutineWorker` wrapper around
+ * [sync].
  *
- * Phase 13: sync became local-first and strictly manual -- this class's own
- * push/pull/conflict logic barely changed in shape, but three real defects in
- * it went from survivable (an always-on background retry would eventually
- * paper over them) to severe (there is no automatic retry anymore, so a
- * silent failure here is silent forever): the conflict branch couldn't tell
- * "someone else won the race" from "the remote row is just gone" and would
- * duplicate every song on a DEK rotation; one bad row could abort an entire
- * push pass; and a conflict copy created mid-pass wasn't itself pushed until
- * some future sync that strictly-manual mode might never trigger. See
- * `docs/handoff/PHASE-13-local-first.md`.
+ * A row with an unsent change ([SongEntity.pendingSync]) pushes with
+ * "`WHERE rev = remoteRev`" -- the server version its change started from,
+ * whose content [SongEntity.baseDocJson] holds. When that loses (another device
+ * pushed first), the server's row is fetched and merged with this device's
+ * version against that base, and the merge is pushed instead.
+ *
+ * Every local write here holds [SongWriteLock] and re-reads the row first: the
+ * editor may have saved on top while a push was out, and that edit must stay
+ * pending (or be merged in), never be marked synced unsent.
  *
  * Song content JSON is written and read by `SongDocument.kt`
  * ([songToDocument]/[songFromDocument]), the twin of the web app's
- * `src/store/songDocument.js`, both checked against `spec/song-documents.json`:
- * `{title, lines:[{id,lyrics,chords:[{i,c}]}], bpm, key, tuning, capo,
- * customChords?, createdAt, updatedAt}`. Since Phase 8, `customChords` is likewise pushed/pulled
- * straight from/to [Song.customChords] -- no special preservation logic needed
- * (an earlier Phase 7 version of this class had to fetch-and-preserve the
- * remote row's customChords before every push, since Android's domain model
- * didn't carry the field at all yet; now that it does, the same
- * optimistic-concurrency check that protects every other field of [Song] from
- * a lost update protects this one too, since a local entity's customChords is
- * only ever stale if its `rev` is too -- which `updateWithRevCheck` already
- * catches).
+ * `src/store/songDocument.js`, both checked against `spec/song-documents.json`.
  */
 class SyncEngine(
     private val dao: SongDao,
@@ -69,214 +77,245 @@ class SyncEngine(
      * @param adopt Phase 13: true only on the first sync after a device enables
      * sync (or switches accounts). Runs [reconcileForAdoption] before pushing,
      * so every local song this device already has gets folded onto the account
-     * without duplicating or overwriting anything already there. `false` for
-     * every ordinary manual sync press after that.
+     * without duplicating or overwriting anything already there.
      * @return a [SyncOutcome] the caller can show the user, and can throw the
      * first push failure encountered (after still completing the pull, on the
-     * theory that "download what I can" beats "nothing happened") -- under
-     * always-on background sync a swallowed failure just meant "try again in a
-     * few minutes"; under Phase 13's strictly-manual model there is no
-     * automatic next attempt, so a failure the user never sees is a failure
-     * that never gets fixed.
+     * theory that "download what I can" beats "nothing happened").
      */
     suspend fun sync(userId: String, dek: ByteArray, dekId: String? = null, adopt: Boolean = false): SyncOutcome {
-        if (adopt) reconcileForAdoption(userId, dek)
+        if (adopt) reconcileForAdoption(dek)
 
-        var push = pushPending(userId, dek, dekId)
-        // A first pass can leave freshly-pending rows behind that it never
-        // itself pushes: writeConflictCopy() inserts a new pendingSync row
-        // mid-loop, after the dao.getPendingSync() snapshot the loop already
-        // started from; and a "remote row is simply gone" Conflict (see
-        // pushPending below) re-queues the same row rather than retrying it
-        // inline. Under always-on sync the next automatic pass caught both;
-        // under strictly-manual sync (Phase 13) there may never BE a next pass
-        // the user triggers. One unconditional, bounded extra pass -- not a
-        // loop to a fixpoint -- catches both in the same sync() call. A row
-        // this second pass itself re-queues (vanishingly unlikely: it would
-        // need a second independent failure on the immediate retry) simply
-        // waits for the user's next Sync press, same as any other failure.
-        run {
-            val second = pushPending(userId, dek, dekId)
-            push = PushResult(
-                pushed = push.pushed + second.pushed,
-                reIded = push.reIded + second.reIded,
-                conflictCopies = push.conflictCopies + second.conflictCopies,
-                firstError = push.firstError ?: second.firstError,
-            )
-        }
-
+        // A first pass can leave freshly-pending rows behind that it never itself
+        // pushes: a "remote row is simply gone" conflict re-queues the row as an
+        // insert rather than retrying inline. One bounded extra pass -- not a loop
+        // to a fixpoint -- catches it in the same sync() call.
+        val push = pushPending(userId, dek, dekId) + pushPending(userId, dek, dekId)
         val pull = pull(userId, dek)
 
         push.firstError?.let { throw it }
         return SyncOutcome(
             pushed = push.pushed,
             pulled = pull.pulled,
-            conflictCopies = push.conflictCopies,
+            merged = push.merged,
             reIded = push.reIded,
-            unreadable = pull.unreadable,
+            unreadable = pull.unreadable + push.unreadable,
+            restored = push.restored,
         )
     }
 
     /**
-     * Folds every local song onto [userId]'s account the first time this
-     * device enables sync (or re-enables it for a different account -- see
-     * `SyncController.enableSyncFor`). Never overwrites or deletes a remote
-     * row: a local id that collides with different remote content gets a new
-     * local id instead, so both songs survive under the account rather than
-     * one silently clobbering the other. See
-     * `docs/handoff/PHASE-13-local-first.md` for the full algorithm writeup.
+     * Folds every local song onto the account the first time this device
+     * enables sync (or re-enables it for a different account -- see
+     * `SyncController.enableSyncFor`). A local song whose id already exists on
+     * the account is the same song (same account, same id) and is merged with
+     * the account's version without a base -- everything either side has is
+     * kept. Only an account row this device can't read gets a new local id
+     * instead, so both survive. See `docs/handoff/PHASE-13-local-first.md`.
      */
-    private suspend fun reconcileForAdoption(userId: String, dek: ByteArray) {
+    private suspend fun reconcileForAdoption(dek: ByteArray) {
         for (entity in dao.getAllIncludingDeleted()) {
             if (entity.deletedAt != null && entity.remoteRev == null) {
-                // Tombstoned locally, but this device never successfully pushed
-                // it in the first place -- there is nothing on the account for
-                // this delete to propagate to. Reclaim it instead of carrying a
-                // permanent, unpushable tombstone.
+                // Tombstoned locally, never pushed: nothing on the account for
+                // this delete to propagate to. Reclaim it.
                 dao.deleteById(entity.id)
                 continue
             }
-            if (entity.remoteRev != null) continue // already has a proven remote lineage; nothing to reconcile
+            if (entity.remoteRev != null) continue // already has a proven remote lineage
 
-            // A null result here is NOT proof the id is free -- RLS can hide a
-            // different account's row with the same id from this exact query
-            // (confirmed live: getById() cleanly returns null for a row that
-            // provably exists, per a later insert's 23505). That's fine: it
-            // just means this method does nothing for that row and leaves it
-            // pendingSync/remoteRev-null, so pushPending's own insert-failure
-            // fallback (see its doc comment) is what actually resolves it.
-            val remote = adapter.getById(entity.id)
-            if (remote == null) {
-                continue // no id collision -- pushPending's normal insert path handles this cleanly
-            }
-
-            // This local id already exists remotely (RLS may have hidden a
-            // DIFFERENT account's row with the same id from the getById() check
-            // above -- pushPending's insert-collision fallback is the backstop
-            // for that case, not this method). Decide whether it's the SAME
-            // song (this device synced before -- a reinstall, or the
-            // pre-Phase-13 remoteRev-drop defect erased the local pointer) or a
-            // genuinely different song that merely shares a UUID.
-            val isSameSong = try {
-                val remoteJson = JSONObject(decryptContentJson(dek, remote.content.toContentEnvelope()))
-                val remoteSong = songFromDocument(remote.id, remoteJson, remote.created_at, remote.updated_at)
-                sameSongContent(entity.toDomain(), remoteSong)
+            // A null result is NOT proof the id is free -- RLS can hide a
+            // different account's row with the same id from this query. That's
+            // fine: pushPending's own insert-failure fallback resolves it.
+            val remote = adapter.getById(entity.id) ?: continue
+            val remoteSong = try {
+                decryptSong(dek, remote)
             } catch (e: Exception) {
-                false // undecryptable (different dek_id, corrupt) -- never assume it's safe to adopt
+                null // undecryptable (different dek_id, corrupt) -- never merge with it
             }
 
-            if (isSameSong) {
-                dao.upsert(entity.copy(rev = remote.rev, remoteRev = remote.rev, pendingSync = false))
-            } else {
-                // Never touch the remote row. Give the local copy a new identity
-                // instead, so both the existing account song and this device's
-                // song survive -- pushPending inserts it as a brand-new row.
-                dao.deleteById(entity.id)
+            SongWriteLock.withLock {
+                val cur = dao.getByIdIncludingDeleted(entity.id) ?: return@withLock
+                if (remoteSong == null || remote.deleted_at != null) {
+                    // Never touch a row this device can't read (or that the
+                    // account deleted): give the local song a new identity, so
+                    // pushPending inserts it as a song of its own.
+                    dao.deleteById(cur.id)
+                    dao.upsert(cur.copy(id = UUID.randomUUID().toString(), rev = 1, remoteRev = null, pendingSync = true, baseDocJson = null))
+                    return@withLock
+                }
+                val local = cur.toDomain()
+                val merged = if (contentEquals(local, remoteSong)) remoteSong else mergeSongs(null, local, remoteSong)
+                val pending = !contentEquals(merged, remoteSong)
                 dao.upsert(
-                    entity.copy(
-                        id = UUID.randomUUID().toString(),
-                        title = "${entity.title.ifBlank { "Untitled" }} (from this phone)",
-                        rev = 1,
-                        remoteRev = null,
-                        pendingSync = true,
+                    SongEntity.fromDomain(merged).copy(
+                        rev = cur.rev + 1,
+                        remoteRev = remote.rev,
+                        pendingSync = pending,
+                        baseDocJson = if (pending) songToDocument(remoteSong).toString() else null,
+                        createdAt = merged.createdAt,
                     ),
                 )
             }
         }
     }
 
-    private fun sameSongContent(a: Song, b: Song): Boolean =
-        a.title == b.title && a.lines == b.lines && a.meta == b.meta && a.customChords == b.customChords
-
     private suspend fun pushPending(userId: String, dek: ByteArray, dekId: String?): PushResult {
-        var pushed = 0
-        var reIded = 0
-        var conflictCopies = 0
-        var firstError: Throwable? = null
-
+        var result = PushResult()
         for (entity in dao.getPendingSync()) {
-            try {
-                val row = buildRow(entity, userId, dek, dekId)
-
-                if (entity.remoteRev == null) {
-                    try {
-                        val inserted = adapter.insert(row)
-                        dao.upsert(entity.copy(pendingSync = false, remoteRev = inserted.rev))
-                        pushed++
-                    } catch (insertFailure: Exception) {
-                        // Always re-id and retry ONCE on any insert failure --
-                        // a fresh random UUID essentially never collides again,
-                        // so this is safe regardless of what actually caused
-                        // the failure. This used to be gated on
-                        // `adapter.getById(entity.id) != null`, on the theory
-                        // that a real collision here means adoption's own
-                        // getById() precheck missed a DIFFERENT account's row
-                        // with the same id, hidden by RLS. That gate was
-                        // backwards and, worse, unreachable for the exact case
-                        // it was written for: an RLS-hidden row is BY
-                        // DEFINITION invisible to getById() too, so the
-                        // condition it was gated on could only be false when
-                        // it needed to be true. Confirmed live: a genuine
-                        // cross-account primary-key collision (23505 on
-                        // insert) paired with getById() cleanly returning null
-                        // both times it was checked -- the retry branch this
-                        // was supposed to protect was provably unreachable.
-                        // Verified via `docs/handoff/PHASE-13-local-first.md`'s
-                        // own account-switch test. If this retry ALSO fails
-                        // (some other, unrelated cause), that failure
-                        // propagates normally -- no worse than surfacing the
-                        // original one would have been.
-                        val reIdEntity = entity.copy(id = UUID.randomUUID().toString(), rev = 1, remoteRev = null, pendingSync = true)
-                        dao.deleteById(entity.id)
-                        val inserted = adapter.insert(buildRow(reIdEntity, userId, dek, dekId))
-                        dao.upsert(reIdEntity.copy(pendingSync = false, remoteRev = inserted.rev))
-                        reIded++
-                        pushed++
-                    }
-                } else {
-                    when (val result = adapter.updateWithRevCheck(entity.id, row, entity.remoteRev)) {
-                        is UpdateResult.Success -> {
-                            dao.upsert(entity.copy(pendingSync = false, remoteRev = result.row.rev))
-                            pushed++
-                        }
-                        is UpdateResult.Conflict -> {
-                            // A failed rev check has two different real causes that
-                            // must NOT be handled the same way -- ask which one this is.
-                            if (adapter.getById(entity.id) == null) {
-                                // The remote row is genuinely gone (e.g. the web app's
-                                // rotateAndPurge deleted every row during a DEK
-                                // rotation) -- this was never a lost race against
-                                // another writer, it's simply a row that no longer has
-                                // a remote counterpart. Writing a conflict copy here
-                                // would duplicate every affected song on the device;
-                                // instead mark it unpushed so the next pass inserts it
-                                // as new.
-                                dao.upsert(entity.copy(pendingSync = true, remoteRev = null))
-                            } else {
-                                // A genuine lost race -- someone else's write landed
-                                // first. Keep both edits, never silently drop one.
-                                writeConflictCopy(entity)
-                                conflictCopies++
-                                // Reset the loser's rev to 0, not just remoteRev to
-                                // null. pull()'s skip rule below is
-                                // `local.rev >= row.rev` -- an inflated local rev
-                                // (Phase 13 fixed the debounce that used to cause
-                                // this, but old data can still carry one) would make
-                                // this song silently un-pullable forever otherwise.
-                                dao.upsert(entity.copy(pendingSync = false, rev = 0, remoteRev = null))
-                            }
-                        }
-                    }
-                }
+            result += try {
+                if (entity.remoteRev == null) pushInsert(entity, userId, dek, dekId) else pushUpdate(entity, userId, dek, dekId)
             } catch (e: Exception) {
                 // One bad row must not block every other pending row from
-                // pushing -- mirrors pull()'s own per-row try/catch below.
-                // Surface the first failure to sync()'s caller once every row
-                // has had its turn, rather than aborting the whole batch here.
-                if (firstError == null) firstError = e
+                // pushing. Surface the first failure to sync()'s caller once
+                // every row has had its turn.
+                PushResult(firstError = e)
             }
         }
-        return PushResult(pushed, reIded, conflictCopies, firstError)
+        return result
+    }
+
+    private suspend fun pushInsert(entity: SongEntity, userId: String, dek: ByteArray, dekId: String?): PushResult {
+        return try {
+            val inserted = adapter.insert(buildRow(entity, rev = 1, userId, dek, dekId))
+            commitPushed(entity, inserted.rev)
+            PushResult(pushed = 1)
+        } catch (insertFailure: Exception) {
+            // Always re-id and retry ONCE on any insert failure -- a fresh random
+            // UUID essentially never collides again. The real case: a
+            // cross-account primary-key collision RLS hides from getById
+            // (confirmed live; see docs/handoff/PHASE-13-local-first.md).
+            val reIdEntity = SongWriteLock.withLock {
+                val cur = dao.getByIdIncludingDeleted(entity.id) ?: entity
+                val moved = cur.copy(id = UUID.randomUUID().toString(), rev = 1, remoteRev = null, pendingSync = true, baseDocJson = null)
+                dao.deleteById(entity.id)
+                dao.upsert(moved)
+                moved
+            }
+            val inserted = adapter.insert(buildRow(reIdEntity, rev = 1, userId, dek, dekId))
+            commitPushed(reIdEntity, inserted.rev)
+            PushResult(pushed = 1, reIded = 1)
+        }
+    }
+
+    /**
+     * Pushes a change to a song the server already has. A lost race is resolved
+     * per docs/SYNC-MERGE.md and retried, at most [MAX_PUSH_ATTEMPTS] times; a
+     * song that keeps losing stays pending for the next sync.
+     *
+     *   this device   server     result
+     *   edit          edited     merge both, push the merge
+     *   edit          deleted    the edit wins: push the song back
+     *   delete        unchanged  retry the delete
+     *   delete        edited     the delete gives way: the song is restored
+     *   delete        deleted    nothing to do
+     */
+    private suspend fun pushUpdate(entity: SongEntity, userId: String, dek: ByteArray, dekId: String?): PushResult {
+        var current = entity
+        var result = PushResult()
+        repeat(MAX_PUSH_ATTEMPTS) {
+            val expected = current.remoteRev ?: return result
+            when (val sent = adapter.updateWithRevCheck(current.id, buildRow(current, rev = expected + 1, userId, dek, dekId), expected)) {
+                is UpdateResult.Success -> {
+                    commitPushed(current, sent.row.rev)
+                    return result + PushResult(pushed = 1)
+                }
+                is UpdateResult.Conflict -> {
+                    val remote = adapter.getById(current.id)
+                    if (remote == null) {
+                        // The remote row is genuinely gone (e.g. the web app's
+                        // rotateAndPurge during a DEK rotation) -- not a race.
+                        // Re-queue it as an insert.
+                        SongWriteLock.withLock {
+                            dao.getByIdIncludingDeleted(current.id)?.let { dao.upsert(it.copy(pendingSync = true, remoteRev = null, baseDocJson = null)) }
+                        }
+                        return result
+                    }
+                    val (next, outcome) = resolveLostRace(current, remote, dek)
+                    result += outcome
+                    current = next ?: return result
+                }
+            }
+        }
+        return result
+    }
+
+    /**
+     * After a lost race against [remote]: the next row to push, or null when
+     * nothing more needs pushing, plus what happened.
+     */
+    private suspend fun resolveLostRace(local: SongEntity, remote: SongRow, dek: ByteArray): Pair<SongEntity?, PushResult> {
+        val remoteSong = try {
+            if (remote.deleted_at == null) decryptSong(dek, remote) else null
+        } catch (e: Exception) {
+            // Never merge with, or push over, a row this device can't read
+            // (most likely encrypted under another key). Stays pending.
+            return null to PushResult(unreadable = 1)
+        }
+        val base = local.baseDocJson?.let { songFromDocument(local.id, JSONObject(it), toIso(local.createdAt), toIso(local.updatedAt)) }
+
+        return SongWriteLock.withLock {
+            val cur = dao.getByIdIncludingDeleted(local.id) ?: return@withLock null to PushResult()
+            val remoteBase = remoteSong?.let { songToDocument(it).toString() }
+
+            if (cur.deletedAt != null) {
+                when {
+                    remote.deleted_at != null -> {
+                        dao.upsert(cur.copy(rev = cur.rev + 1, remoteRev = remote.rev, pendingSync = false, baseDocJson = null))
+                        null to PushResult()
+                    }
+                    base != null && contentEquals(remoteSong, base) -> {
+                        // Only the rev moved: delete what this device saw.
+                        val retry = cur.copy(remoteRev = remote.rev, baseDocJson = remoteBase)
+                        dao.upsert(retry)
+                        retry to PushResult()
+                    }
+                    else -> {
+                        // An edit elsewhere beats this delete: the song comes back.
+                        dao.upsert(cleanFrom(remoteSong!!, cur, remote.rev))
+                        null to PushResult(restored = 1)
+                    }
+                }
+            } else {
+                val localSong = local.toDomain()
+                val merged = if (remoteSong == null) localSong else mergeSongs(base, localSong, remoteSong)
+                // The editor may have saved on top while the push was out: fold that
+                // edit in the same way, so it survives too.
+                val final = if (cur.rev != local.rev) mergeSongs(localSong, cur.toDomain(), merged) else merged
+                if (remoteSong != null && contentEquals(final, remoteSong)) {
+                    dao.upsert(cleanFrom(remoteSong, cur, remote.rev))
+                    null to PushResult(merged = 1)
+                } else {
+                    val next = SongEntity.fromDomain(final).copy(
+                        rev = cur.rev + 1,
+                        deletedAt = null, // an edit beats a delete made elsewhere
+                        pendingSync = true,
+                        remoteRev = remote.rev,
+                        createdAt = cur.createdAt,
+                        baseDocJson = remoteBase,
+                    )
+                    dao.upsert(next)
+                    next to PushResult(merged = 1)
+                }
+            }
+        }
+    }
+
+    /** [song] as a clean row confirmed at [remoteRev], replacing [cur]. */
+    private fun cleanFrom(song: Song, cur: SongEntity, remoteRev: Int): SongEntity =
+        SongEntity.fromDomain(song).copy(rev = cur.rev + 1, deletedAt = null, pendingSync = false, remoteRev = remoteRev, baseDocJson = null)
+
+    /**
+     * The push of [pushed] was confirmed at [newRemoteRev]. The row is clean now
+     * -- unless the editor saved on top while the push was out (its local `rev`
+     * moved), which stays pending with the pushed version as its new base.
+     */
+    private suspend fun commitPushed(pushed: SongEntity, newRemoteRev: Int) = SongWriteLock.withLock {
+        val cur = dao.getByIdIncludingDeleted(pushed.id) ?: return@withLock
+        if (cur.rev == pushed.rev) {
+            dao.upsert(cur.copy(pendingSync = false, remoteRev = newRemoteRev, baseDocJson = null))
+        } else {
+            val newBase = if (pushed.deletedAt == null) songToDocument(pushed.toDomain()).toString() else null
+            dao.upsert(cur.copy(pendingSync = true, remoteRev = newRemoteRev, baseDocJson = newBase))
+        }
     }
 
     private suspend fun pull(userId: String, dek: ByteArray): PullResult {
@@ -284,40 +323,49 @@ class SyncEngine(
         var unreadable = 0
         for (row in adapter.list(userId)) {
             val local = dao.getByIdIncludingDeleted(row.id)
-            if (local != null && (local.rev >= row.rev || local.pendingSync)) continue // local is at least as new, or has an edit not yet resolved
+            // A song with an unsent change is never overwritten here -- its push
+            // merges the server's version. Otherwise take anything newer than the
+            // last version this device confirmed.
+            if (local != null && (local.pendingSync || row.rev <= (local.remoteRev ?: -1))) continue
 
             if (row.deleted_at != null) {
-                if (local != null) {
-                    dao.upsert(local.copy(deletedAt = parseIso(row.deleted_at), rev = row.rev, remoteRev = row.rev, pendingSync = false))
-                    pulled++
+                if (local == null) continue
+                val applied = SongWriteLock.withLock {
+                    val cur = dao.getByIdIncludingDeleted(row.id) ?: return@withLock false
+                    if (cur.pendingSync) return@withLock false
+                    dao.upsert(cur.copy(deletedAt = parseIso(row.deleted_at), rev = cur.rev + 1, remoteRev = row.rev, pendingSync = false, baseDocJson = null))
+                    true
                 }
+                if (applied) pulled++
                 continue
             }
 
             // A single undecryptable row -- most likely encrypted under a
-            // different DEK than this session's (dek_id mismatch; see
-            // SongSyncWorker's pre-sync check for the common cause), or
-            // genuinely corrupt -- must not abort the whole pull and leave
-            // every OTHER row un-synced. Matches the web app's per-row
-            // _placeholderSong fallback in songsRepository.js's list(). Local
-            // state for this one row is simply left untouched (whatever it was
-            // before this pass, including "doesn't exist locally yet") -- but
-            // counted, so the sync result can say so instead of the song just
-            // never appearing.
+            // different DEK than this session's, or genuinely corrupt -- must not
+            // abort the whole pull. Left untouched locally, but counted.
             val song = try {
-                val contentJson = JSONObject(decryptContentJson(dek, row.content.toContentEnvelope()))
-                songFromDocument(row.id, contentJson, row.created_at, row.updated_at)
+                decryptSong(dek, row)
             } catch (e: Exception) {
                 unreadable++
                 continue
             }
-            dao.upsert(SongEntity.fromDomain(song).copy(rev = row.rev, deletedAt = null, pendingSync = false, remoteRev = row.rev))
-            pulled++
+            val applied = SongWriteLock.withLock {
+                val cur = dao.getByIdIncludingDeleted(row.id)
+                if (cur != null && cur.pendingSync) return@withLock false
+                dao.upsert(SongEntity.fromDomain(song).copy(rev = (cur?.rev ?: 0) + 1, deletedAt = null, pendingSync = false, remoteRev = row.rev, baseDocJson = null))
+                true
+            }
+            if (applied) pulled++
         }
         return PullResult(pulled, unreadable)
     }
 
-    private fun buildRow(entity: SongEntity, userId: String, dek: ByteArray, dekId: String?): SongRow {
+    private fun decryptSong(dek: ByteArray, row: SongRow): Song {
+        val contentJson = JSONObject(decryptContentJson(dek, row.content.toContentEnvelope()))
+        return songFromDocument(row.id, contentJson, row.created_at, row.updated_at)
+    }
+
+    private fun buildRow(entity: SongEntity, rev: Int, userId: String, dek: ByteArray, dekId: String?): SongRow {
         val envelope = encryptContentJson(dek, songToDocument(entity.toDomain()).toString())
         return SongRow(
             id = entity.id,
@@ -326,33 +374,15 @@ class SyncEngine(
             content = envelope.toJsonElement(),
             is_locked = false,
             dek_id = dekId,
-            rev = entity.rev,
+            rev = rev,
             deleted_at = entity.deletedAt?.let(::toIso),
             created_at = toIso(entity.createdAt),
             updated_at = toIso(entity.updatedAt),
         )
     }
 
-    /**
-     * A lost optimistic-concurrency race means someone else's write already
-     * landed with the rev this device expected -- same "keep both, never
-     * silently drop an edit" answer as the web app's own conflict-copy path.
-     * `Build.MODEL` (e.g. "SM-F956W") gives a genuinely specific device name,
-     * matching the plan's own example ("conflict copy — Pixel 8, 14:22")
-     * literally, unlike the web app's coarser "Chrome on Windows" (a browser
-     * has no single device identity to report).
-     */
-    private suspend fun writeConflictCopy(entity: SongEntity) {
-        val timeLabel = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
-        val title = entity.title.ifBlank { "Untitled" }
-        val conflictEntity = entity.copy(
-            id = UUID.randomUUID().toString(),
-            title = "$title (conflict copy — ${Build.MODEL}, $timeLabel)",
-            rev = 1,
-            deletedAt = null,
-            pendingSync = true,
-            remoteRev = null,
-        )
-        dao.upsert(conflictEntity)
+    companion object {
+        /** At most this many lost races in a row per song per sync before leaving it for the next one. */
+        const val MAX_PUSH_ATTEMPTS = 3
     }
 }

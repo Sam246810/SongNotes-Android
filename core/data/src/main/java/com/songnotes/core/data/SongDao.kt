@@ -23,6 +23,10 @@ interface SongDao {
     @Query("SELECT * FROM songs WHERE id = :id AND deletedAt IS NULL")
     suspend fun getById(id: String): SongEntity?
 
+    /** One row as it changes, tombstones included -- the open editor watches it to show a sync that lands while the song is open. */
+    @Query("SELECT * FROM songs WHERE id = :id")
+    fun observeByIdIncludingDeleted(id: String): Flow<SongEntity?>
+
     @Query("SELECT * FROM songs WHERE pendingSync = 1")
     suspend fun getPendingSync(): List<SongEntity>
 

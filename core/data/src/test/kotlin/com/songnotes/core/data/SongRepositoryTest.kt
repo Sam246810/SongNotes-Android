@@ -125,4 +125,73 @@ class SongRepositoryTest {
         assertTrue(onAccount.isOnAccount)
         assertEquals(false, onAccount.pendingSync)
     }
+
+    // -- Sync merge bookkeeping (docs/SYNC-MERGE.md) --------------------------
+
+    @Test
+    fun `the first edit of a synced song keeps the server version as its base, and later edits keep the same base`() = runBlocking {
+        dao.upsert(SongEntity.fromDomain(song(title = "On The Server")).copy(rev = 3, remoteRev = 3, pendingSync = false))
+
+        repo.upsert(song(title = "First Edit"))
+        val base = dao.rows["song-1"]!!.baseDocJson
+        assertNotNull(base)
+        assertTrue(base!!.contains("On The Server"))
+
+        repo.upsert(song(title = "Second Edit"))
+        assertEquals(base, dao.rows["song-1"]!!.baseDocJson)
+    }
+
+    @Test
+    fun `a song never pushed has no base`() = runBlocking {
+        repo.upsert(song())
+        assertNull(dao.rows["song-1"]!!.baseDocJson)
+    }
+
+    @Test
+    fun `edits are stamped per line and per field`() = runBlocking {
+        val clock = longArrayOf(10_000L)
+        val stamped = SongRepository(dao) { clock[0] }
+        stamped.upsert(song())
+        clock[0] = 20_000L
+        stamped.upsert(song(title = "Renamed"))
+
+        val renamed = dao.rows["song-1"]!!.toDomain()
+        assertEquals(mapOf("title" to 20_000L), renamed.fieldEditedAt)
+        // A first save has nothing to compare with, so no stamp: it counts as edited at updatedAt.
+        assertNull(renamed.lines[0].editedAt)
+
+        clock[0] = 30_000L
+        stamped.upsert(renamed.copy(lines = listOf(SongLine(id = "line-1", lyrics = "hello again"))))
+        val edited = dao.rows["song-1"]!!.toDomain()
+        assertEquals(30_000L, edited.lines[0].editedAt)
+        assertEquals(mapOf("title" to 20_000L), edited.fieldEditedAt)
+    }
+
+    @Test
+    fun `saveEdit merges with a version a sync wrote while the editor had the song open`() = runBlocking {
+        val loaded = song().copy(lines = listOf(SongLine("line-1", "hello"), SongLine("line-2", "world")))
+        dao.upsert(SongEntity.fromDomain(loaded).copy(rev = 3, remoteRev = 3, pendingSync = false))
+        // A sync pulls another device's edit of line 2 while the editor is open.
+        val pulled = loaded.copy(lines = listOf(loaded.lines[0], SongLine("line-2", "world, from the web")))
+        dao.upsert(SongEntity.fromDomain(pulled).copy(rev = 4, remoteRev = 4, pendingSync = false))
+
+        // The editor saves its edit of line 1, made on the version it loaded.
+        val stored = repo.saveEdit(loaded.copy(lines = listOf(SongLine("line-1", "hello, from the phone"), loaded.lines[1])), basedOn = loaded)
+
+        assertEquals(listOf("hello, from the phone", "world, from the web"), stored.lines.map { it.lyrics })
+        assertEquals(stored.lines.map { it.lyrics }, dao.rows["song-1"]!!.toDomain().lines.map { it.lyrics })
+    }
+
+    @Test
+    fun `saveEdit of a real edit brings back a song deleted elsewhere, but an unchanged save doesn't`() = runBlocking {
+        val loaded = song()
+        dao.upsert(SongEntity.fromDomain(loaded).copy(rev = 4, remoteRev = 4, pendingSync = false, deletedAt = 9_000L))
+
+        repo.saveEdit(loaded, basedOn = loaded)
+        assertNotNull(dao.rows["song-1"]!!.deletedAt)
+
+        repo.saveEdit(loaded.copy(title = "Still Writing"), basedOn = loaded)
+        assertNull(dao.rows["song-1"]!!.deletedAt)
+        assertEquals("Still Writing", dao.rows["song-1"]!!.title)
+    }
 }

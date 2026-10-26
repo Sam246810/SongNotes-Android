@@ -24,7 +24,19 @@ data class ChordAnchor(val i: Int, val c: String)
  * placed past a short lyric line's end, or on an instrumental-only line
  * with empty `lyrics`) — valid per wire-format §4, never clamped.
  */
-data class SongLine(val id: String, val lyrics: String, val chords: List<ChordAnchor> = emptyList())
+data class SongLine(
+    val id: String,
+    val lyrics: String,
+    val chords: List<ChordAnchor> = emptyList(),
+    /**
+     * When this line's words or chords last changed, epoch ms -- what a sync merge
+     * uses to tell which device's edit of the line is newer (docs/SYNC-MERGE.md).
+     * Null for lines from before stamps existed; those count as edited at the
+     * song's [Song.updatedAt]. Set by [com.songnotes.core.domain.merge.stampEdits],
+     * never by hand.
+     */
+    val editedAt: Long? = null,
+)
 
 /** `bpm`/`capo` of 0 mean "unset" (wire-format §4's sentinel, not null). `key`/`tuning` of "" mean "unset". */
 data class SongMeta(val bpm: Int = 0, val key: String = "", val tuning: String = "", val capo: Int = 0)
@@ -38,4 +50,8 @@ data class Song(
     val customChords: Map<String, ChordVoicing> = emptyMap(),
     val createdAt: Long,
     val updatedAt: Long,
+    /** Per-field "last edited" stamps (`title`, `bpm`, `key`, `tuning`, `capo`), epoch ms -- see [SongLine.editedAt]. */
+    val fieldEditedAt: Map<String, Long> = emptyMap(),
+    /** Per-custom-chord "last edited" stamps, removals included -- see [SongLine.editedAt]. */
+    val customChordsEditedAt: Map<String, Long> = emptyMap(),
 )

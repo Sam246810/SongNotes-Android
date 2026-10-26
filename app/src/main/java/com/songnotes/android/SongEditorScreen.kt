@@ -64,6 +64,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -126,6 +127,9 @@ import com.songnotes.core.domain.Song
 import com.songnotes.core.domain.SongLine
 import com.songnotes.core.domain.SongMeta
 import com.songnotes.core.domain.anchorsToChordsLine
+import com.songnotes.core.domain.merge.contentEquals
+import com.songnotes.core.domain.merge.mapOffsetThroughEdit
+import com.songnotes.core.domain.merge.mergeSongs
 import com.songnotes.core.domain.chordsLineToAnchors
 import com.songnotes.core.domain.cutIntoRows
 import com.songnotes.core.domain.formatFretsForInput
@@ -658,6 +662,7 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
             sessionStore.lastOpenSongId = null
             missing = true
         } else {
+            autosaver.base = existing
             loadedSong = existing
         }
     }
@@ -1139,6 +1144,9 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
      * the song was reopened. Split into rows first, they never meet.
      */
     var loadedSongWrapped by remember { mutableStateOf(false) }
+    // The caret as of the last keystroke (row id, offset in the row), so a sync
+    // merge landing mid-typing can put it back on the same words.
+    var lastCaret by remember { mutableStateOf<Pair<String, Int>?>(null) }
     fun wrapLoadedSong() {
         loadedSongWrapped = true
         if (loaded.lines.isEmpty()) return
@@ -1150,6 +1158,72 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
     LaunchedEffect(linesAreaWidthPx, fontScale) {
         if (linesAreaWidthPx <= 0) return@LaunchedEffect
         if (loadedSongWrapped) reflowAllLines() else wrapLoadedSong()
+    }
+
+    /**
+     * Shows [next] -- the song as a sync left it (docs/SYNC-MERGE.md) -- in
+     * place of what the editor holds. The focused paragraph keeps focus and the
+     * caret stays on the same words. Undo/redo history is cleared: undoing past
+     * this point would quietly revert another device's edit.
+     */
+    fun applyExternal(next: Song) {
+        val focusRow = focusedLyricsId?.let { id -> lines.indexOfFirst { it.id == id } } ?: -1
+        var caret: Pair<Int, Int>? = null
+        if (focusRow >= 0) {
+            val range = paragraphRange(focusRow)
+            val row = lines[focusRow]
+            val local = lastCaret?.takeIf { it.first == row.id }?.second ?: row.lyrics.length
+            val oldText = paragraphOf(lines.slice(range)).lyrics
+            val newIndex = next.lines.indexOfFirst { it.id == row.paragraphId }
+            if (newIndex >= 0) {
+                caret = newIndex to mapOffsetThroughEdit(oldText, next.lines[newIndex].lyrics, offsetInParagraph(range, focusRow) + local)
+            }
+        }
+        suppressNextHistoryPush = true
+        title = next.title
+        meta = next.meta
+        customChords = next.customChords
+        if (loadedSongWrapped && linesAreaWidthPx > 0) {
+            val (rows, focus) = buildRows(lines.map { it.id }, next.lines.map { Paragraph(it.id, it.lyrics, it.chords) }, caret, focusedLyricsId.takeIf { caret != null })
+            lines = rows
+            if (focus != null) pendingFocus = focus
+        } else {
+            lines = songToEditorLines(next)
+            loadedSongWrapped = true
+        }
+        undoStack = emptyList()
+        redoStack = emptyList()
+        lastHistorySnapshot = EditorSnapshot(title, meta, lines, customChords)
+    }
+
+    // A save that merged with something a sync wrote: show the stored song,
+    // plus anything typed since that save went out.
+    SideEffect {
+        autosaver.onExternal = { stored, sent ->
+            scope.launch {
+                val now = currentSong()
+                val next = if (contentEquals(now, sent)) stored else mergeSongs(sent, now, stored)
+                applyExternal(next)
+                if (!contentEquals(next, stored)) persist()
+            }
+        }
+    }
+
+    // A sync that lands while the song is open and untouched: show it at once.
+    // A song deleted elsewhere while open and untouched closes the editor.
+    LaunchedEffect(songId) {
+        repo.observeStored(songId).collect { stored ->
+            val (song, deleted) = stored ?: return@collect
+            val base = autosaver.base ?: return@collect
+            if (!autosaver.isIdle || contentEquals(song, base)) return@collect
+            if (deleted) {
+                sessionStore.lastOpenSongId = null
+                onDone()
+                return@collect
+            }
+            autosaver.base = song
+            applyExternal(song)
+        }
     }
 
     /**
@@ -1216,6 +1290,7 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
      * gap applied to the stale text.
      */
     fun handleLyricsChange(line: EditorLine, updatedLyrics: String, caretIndex: Int) {
+        lastCaret = line.id to caretIndex
         if (updatedLyrics.contains('\n')) {
             cancelPendingReflows()
             val idx = lines.indexOfFirst { it.id == line.id }

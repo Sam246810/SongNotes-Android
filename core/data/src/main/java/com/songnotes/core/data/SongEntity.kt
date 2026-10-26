@@ -66,6 +66,18 @@ data class SongEntity(
     val remoteRev: Int? = null,
     /** [Song.customChords], JSON-encoded the same way [linesJson] is -- always read/written whole, never queried. */
     val customChordsJson: String = "{}",
+    /**
+     * Schema v4: the song document (`songToDocument`) of the version the server
+     * last confirmed, at [remoteRev] -- the *base* a sync merge compares both
+     * devices' edits against (docs/SYNC-MERGE.md). Set when a clean row gets its
+     * first unsent edit, cleared once the edit is confirmed pushed; null while
+     * the row is clean, and for rows already pending when v4 arrived (those merge
+     * without a base). Plaintext is fine here: it sits in the same
+     * SQLCipher-encrypted database as [linesJson].
+     */
+    val baseDocJson: String? = null,
+    /** Schema v4: [Song.fieldEditedAt]/[Song.customChordsEditedAt] as `{"fieldEditedAt":{..},"customChordsEditedAt":{..}}`. Per-line stamps live in [linesJson]. */
+    val editStampsJson: String = "{}",
 ) {
     fun toDomain(): Song = Song(
         id = id,
@@ -75,6 +87,8 @@ data class SongEntity(
         customChords = parseCustomChordsJson(customChordsJson),
         createdAt = createdAt,
         updatedAt = updatedAt,
+        fieldEditedAt = parseStamps(editStampsJson, "fieldEditedAt"),
+        customChordsEditedAt = parseStamps(editStampsJson, "customChordsEditedAt"),
     )
 
     companion object {
@@ -96,7 +110,21 @@ data class SongEntity(
             customChordsJson = customChordsToJson(song.customChords),
             createdAt = song.createdAt,
             updatedAt = song.updatedAt,
+            editStampsJson = stampsToJson(song),
         )
+
+        private fun stampsToJson(song: Song): String {
+            if (song.fieldEditedAt.isEmpty() && song.customChordsEditedAt.isEmpty()) return "{}"
+            return JSONObject()
+                .put("fieldEditedAt", JSONObject(song.fieldEditedAt.toMap()))
+                .put("customChordsEditedAt", JSONObject(song.customChordsEditedAt.toMap()))
+                .toString()
+        }
+
+        private fun parseStamps(json: String, key: String): Map<String, Long> {
+            val obj = JSONObject(json).optJSONObject(key) ?: return emptyMap()
+            return obj.keys().asSequence().associateWith { obj.getLong(it) }
+        }
 
         private fun customChordsToJson(customChords: Map<String, ChordVoicing>): String {
             val obj = JSONObject()
@@ -133,7 +161,9 @@ data class SongEntity(
             for (line in lines) {
                 val chordsJson = JSONArray()
                 for (chord in line.chords) chordsJson.put(JSONObject().put("i", chord.i).put("c", chord.c))
-                arr.put(JSONObject().put("id", line.id).put("lyrics", line.lyrics).put("chords", chordsJson))
+                val lineJson = JSONObject().put("id", line.id).put("lyrics", line.lyrics).put("chords", chordsJson)
+                line.editedAt?.let { lineJson.put("editedAt", it) }
+                arr.put(lineJson)
             }
             return arr.toString()
         }
@@ -147,7 +177,12 @@ data class SongEntity(
                     val chordJson = chordsJson.getJSONObject(c)
                     ChordAnchor(i = chordJson.getInt("i"), c = chordJson.getString("c"))
                 }
-                SongLine(id = lineJson.getString("id"), lyrics = lineJson.getString("lyrics"), chords = chords)
+                SongLine(
+                    id = lineJson.getString("id"),
+                    lyrics = lineJson.getString("lyrics"),
+                    chords = chords,
+                    editedAt = if (lineJson.has("editedAt")) lineJson.getLong("editedAt") else null,
+                )
             }
         }
     }

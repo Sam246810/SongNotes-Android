@@ -103,36 +103,27 @@ class SyncEngineAdoptionTest {
         assertEquals(0, adapter.insertCalls)
         assertEquals(0, adapter.updateCalls)
         val result = dao.rows["song-1"]!!
-        assertEquals(9, result.remoteRev)
-        assertEquals(9, result.rev)
+        assertEquals(9, result.remoteRev) // rev itself is this device's own write counter
         assertEquals(false, result.pendingSync)
     }
 
     @Test
-    fun `a local id colliding with DIFFERENT remote content re-ids the local copy and never touches the remote row`() = runBlocking {
+    fun `a local id colliding with DIFFERENT remote content merges with it instead of making a copy`() = runBlocking {
+        // Same account, same id: the same song, edited on both sides without a
+        // common base (docs/SYNC-MERGE.md). Merged without one -- no "(from this
+        // phone)" copy. A field both changed (here the title) goes to one side:
+        // with equal stamps, the greater value, as on the web.
         val local = localSong("song-1", title = "My Phone's Version")
         dao.upsert(local)
-        val remoteEntityForContent = localSong("song-1", title = "Someone Else's Version")
-        adapter.rows["song-1"] = remoteRowFor(remoteEntityForContent, rev = 4)
+        adapter.rows["song-1"] = remoteRowFor(localSong("song-1", title = "Someone Else's Version"), rev = 4)
 
         engine.sync(userId, dek, adopt = true)
 
-        // Remote row byte-for-byte untouched.
-        assertEquals(0, adapter.updateCalls)
-        assertEquals("Someone Else's Version", decryptTitle(adapter.rows["song-1"]!!))
-
-        // Local song survived under a NEW id, inserted as a genuinely new row.
-        val reIded = dao.rows.values.first { it.title.startsWith("My Phone's Version") }
-        assertNotEquals("song-1", reIded.id)
-        assertNotNull(reIded.remoteRev)
-        assertTrue(adapter.rows.containsKey(reIded.id))
-
-        // The old id "song-1" was reclaimed locally during the re-id, but the
-        // sync() call's own pull() -- running after the push, same as any
-        // ordinary sync -- legitimately re-materializes it: it's the
-        // account's real, pre-existing song, now correctly visible on this
-        // device too as a SEPARATE song from the re-ided local copy.
+        assertEquals(0, adapter.insertCalls)
+        assertEquals(listOf("song-1"), dao.rows.keys.toList())
+        assertEquals(listOf("song-1"), adapter.rows.keys.toList())
         assertEquals("Someone Else's Version", dao.rows["song-1"]!!.title)
+        assertEquals(false, dao.rows["song-1"]!!.pendingSync)
     }
 
     @Test

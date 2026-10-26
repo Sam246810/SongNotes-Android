@@ -16,6 +16,7 @@ class FakeSongDao : SongDao {
 
     override suspend fun getByIdIncludingDeleted(id: String) = rows[id]
     override suspend fun getById(id: String) = rows[id]?.takeIf { it.deletedAt == null }
+    override fun observeByIdIncludingDeleted(id: String) = flow { emit(rows[id]) }
     override suspend fun getPendingSync() = rows.values.filter { it.pendingSync }
     override suspend fun getAllIncludingDeleted() = rows.values.toList()
     override fun observePendingSongCount() = flow { emit(rows.values.count { it.pendingSync && it.deletedAt == null }) }

@@ -7,6 +7,8 @@ import com.songnotes.core.domain.Song
 import com.songnotes.core.domain.SongLine
 import com.songnotes.core.domain.SongMeta
 import com.songnotes.core.domain.chordsLineToAnchors
+import com.songnotes.core.domain.merge.STAMPED_FIELDS
+import com.songnotes.core.domain.merge.validStamp
 import java.time.Instant
 import java.time.OffsetDateTime
 import org.json.JSONArray
@@ -39,7 +41,40 @@ internal fun songToDocument(song: Song): JSONObject {
         .put("createdAt", toIso(song.createdAt))
         .put("updatedAt", toIso(song.updatedAt))
     if (song.customChords.isNotEmpty()) doc.put("customChords", customChordsToJson(song.customChords))
+    stampsToJson(song.fieldEditedAt.filterKeys { it in STAMPED_FIELDS })?.let { doc.put("fieldEditedAt", it) }
+    stampsToJson(song.customChordsEditedAt)?.let { doc.put("customChordsEditedAt", it) }
     return doc
+}
+
+/** Valid edit stamps as a JSON object, or null when there are none (src/sync/editStamps.js on the web). */
+private fun stampsToJson(stamps: Map<String, Long>): JSONObject? {
+    val valid = stamps.filterValues { validStamp(it) != null }
+    if (valid.isEmpty()) return null
+    val obj = JSONObject()
+    for ((key, stamp) in valid.toSortedMap()) obj.put(key, stamp)
+    return obj
+}
+
+/**
+ * A stamp as read from JSON: a whole number of ms from 0 to 2^53 - 1 (the
+ * web's Number.isSafeInteger check), else null -- a fraction, a string or a
+ * negative number reads as no stamp at all.
+ */
+private fun stampFromJson(value: Any?): Long? = when (value) {
+    is Int -> validStamp(value.toLong())
+    is Long -> validStamp(value)
+    is Number -> value.toDouble().takeIf { it % 1.0 == 0.0 && it >= 0 && it <= 9_007_199_254_740_991.0 }?.toLong()
+    else -> null
+}
+
+private fun stampsFromJson(json: JSONObject?, allowed: List<String>? = null): Map<String, Long> {
+    if (json == null) return emptyMap()
+    val result = sortedMapOf<String, Long>()
+    for (key in json.keys()) {
+        if (allowed != null && key !in allowed) continue
+        stampFromJson(json.opt(key))?.let { result[key] = it }
+    }
+    return result
 }
 
 /**
@@ -66,6 +101,7 @@ internal fun songFromDocument(id: String, doc: JSONObject, rowCreatedAt: String?
                 is String -> chordsLineToAnchors(chords)
                 else -> emptyList()
             },
+            editedAt = stampFromJson(line.opt("editedAt")),
         )
     }
     return Song(
@@ -81,6 +117,8 @@ internal fun songFromDocument(id: String, doc: JSONObject, rowCreatedAt: String?
         customChords = customChordsFromJson(doc.optJSONObject("customChords")),
         createdAt = parseIso(stringOrNull(doc, "createdAt") ?: rowCreatedAt ?: error("song $id has no createdAt")),
         updatedAt = parseIso(stringOrNull(doc, "updatedAt") ?: rowUpdatedAt ?: error("song $id has no updatedAt")),
+        fieldEditedAt = stampsFromJson(doc.optJSONObject("fieldEditedAt"), STAMPED_FIELDS),
+        customChordsEditedAt = stampsFromJson(doc.optJSONObject("customChordsEditedAt")),
     )
 }
 
@@ -108,7 +146,9 @@ private fun linesToJson(lines: List<SongLine>): JSONArray {
     for (line in lines) {
         val chordsJson = JSONArray()
         for (chord in line.chords) chordsJson.put(JSONObject().put("i", chord.i).put("c", chord.c))
-        arr.put(JSONObject().put("id", line.id).put("lyrics", line.lyrics).put("chords", chordsJson))
+        val lineJson = JSONObject().put("id", line.id).put("lyrics", line.lyrics).put("chords", chordsJson)
+        validStamp(line.editedAt)?.let { lineJson.put("editedAt", it) }
+        arr.put(lineJson)
     }
     return arr
 }

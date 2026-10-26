@@ -48,7 +48,20 @@ private val MIGRATION_2_3 = object : Migration(2, 3) {
     }
 }
 
-@Database(entities = [SongEntity::class], version = 3, exportSchema = false)
+/**
+ * v3 -> v4 (sync merge, docs/SYNC-MERGE.md): `baseDocJson` -- the server-confirmed
+ * version an unsent edit started from -- and `editStampsJson` for per-field edit
+ * stamps. Existing rows get no base (a row already pending merges without one if
+ * its push conflicts) and no stamps (they fall back to `updatedAt`).
+ */
+private val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE songs ADD COLUMN baseDocJson TEXT")
+        db.execSQL("ALTER TABLE songs ADD COLUMN editStampsJson TEXT NOT NULL DEFAULT '{}'")
+    }
+}
+
+@Database(entities = [SongEntity::class], version = 4, exportSchema = false)
 abstract class SongDatabase : RoomDatabase() {
     abstract fun songDao(): SongDao
 
@@ -87,7 +100,7 @@ abstract class SongDatabase : RoomDatabase() {
                 DB_NAME,
             )
                 .openHelperFactory(SupportOpenHelperFactory(dbKey))
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build()
         }
 

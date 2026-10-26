@@ -1,6 +1,8 @@
 package com.songnotes.core.data
 
 import com.songnotes.core.domain.ChordAnchor
+import com.songnotes.core.domain.Song
+import com.songnotes.core.domain.SongLine
 import java.security.SecureRandom
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonElement
@@ -92,50 +94,151 @@ class SyncEngineTest {
         assertEquals("Edited Title", decryptContent(adapter.rows["song-1"]!!).getString("title"))
     }
 
+    // -- Lost races merge (docs/SYNC-MERGE.md) -------------------------------
+
+    private val baseSong = Song(
+        id = "song-1", title = "My Song",
+        lines = listOf(SongLine("line-1", "hello", listOf(ChordAnchor(0, "G"))), SongLine("line-2", "world")),
+        createdAt = 1000L, updatedAt = 2000L,
+    )
+
+    /** A clean row of [song] confirmed at [rev], then [edit]ed locally the way SongRepository would (pending, base kept). */
+    private fun pendingEdit(song: Song, rev: Int, edit: (Song) -> Song): SongEntity =
+        SongEntity.fromDomain(edit(song)).copy(
+            rev = 7, remoteRev = rev, pendingSync = true, baseDocJson = songToDocument(song).toString(),
+        )
+
+    private fun remoteRowFor(song: Song, rev: Int, deletedAtIso: String? = null): SongRow = SongRow(
+        id = song.id, user_id = userId, encrypted = true,
+        content = encryptContentJson(dek, songToDocument(song).toString()).toJsonElement(),
+        is_locked = false, rev = rev, deleted_at = deletedAtIso,
+        created_at = toIso(song.createdAt), updated_at = toIso(song.updatedAt),
+    )
+
+    private fun serverSong(id: String = "song-1"): Song =
+        songFromDocument(id, decryptContent(adapter.rows[id]!!), toIso(0), toIso(0))
+
     @Test
-    fun `a lost optimistic-concurrency race writes a conflict copy, pushes it within the same sync, and lets the winner's content win the pull`() = runBlocking {
-        // Remote already moved to rev 5 (someone else's write); our local entity still expects rev 3.
-        adapter.rows["song-1"] = buildRemoteRow("song-1", rev = 5)
-        dao.upsert(localSong(rev = 4, remoteRev = 3, title = "My Edit"))
+    fun `a lost race merges both edits and pushes the merge, with no conflict copy`() = runBlocking {
+        adapter.rows["song-1"] = remoteRowFor(baseSong.copy(lines = listOf(baseSong.lines[0], SongLine("line-2", "world, from the web"))), rev = 4)
+        dao.upsert(pendingEdit(baseSong, rev = 3) { it.copy(title = "My Edit") })
 
         val outcome = engine.sync(userId, dek)
 
-        assertEquals(1, outcome.conflictCopies)
-
-        val conflictCopy = dao.rows.values.first { it.id != "song-1" }
-        assertTrue(conflictCopy.title.startsWith("My Edit (conflict copy —"))
-        // Phase 13: a conflict copy is pushed within the SAME sync() pass it's
-        // created in (a bounded second pushPending() pass) -- strictly-manual
-        // sync means there might never be a "next" automatic pass to catch it.
-        assertEquals(false, conflictCopy.pendingSync)
-        assertNotNull(conflictCopy.remoteRev)
-        assertNotNull(adapter.rows[conflictCopy.id])
-
-        // The loser's row is left pointing at the winner's remote content, and
-        // the immediately-following pull() actually lands it -- rev reset to 0
-        // guarantees pull's "local.rev >= row.rev" skip rule can't permanently
-        // hide the real remote content behind an inflated local rev.
-        val original = dao.rows["song-1"]!!
-        assertEquals(false, original.pendingSync)
-        assertEquals("Remote Song", original.title)
+        assertEquals(1, outcome.merged)
+        assertEquals(1, dao.rows.size)
+        assertEquals(1, adapter.rows.size)
+        val merged = serverSong()
+        assertEquals("My Edit", merged.title)
+        assertEquals(listOf("hello", "world, from the web"), merged.lines.map { it.lyrics })
+        val local = dao.rows["song-1"]!!
+        assertEquals(false, local.pendingSync)
+        assertEquals(5, local.remoteRev)
+        assertNull(local.baseDocJson)
+        assertEquals("My Edit", local.title)
     }
 
     @Test
-    fun `a failed rev check where the remote row is simply gone re-queues for insert instead of writing a conflict copy`() = runBlocking {
-        // Simulates a DEK rotation's rotateAndPurge deleting every remote row:
-        // the local entity still points at a remoteRev that no longer exists.
-        // Misreading this as a lost race would duplicate every affected song
-        // as a conflict copy -- it must instead be treated as "never
-        // successfully pushed" and re-inserted clean.
-        dao.upsert(localSong(rev = 4, remoteRev = 3, title = "Orphaned Edit"))
-        // adapter.rows deliberately has NO row for "song-1" -- updateWithRevCheck
-        // therefore reports Conflict (nothing matched id+rev), same symptom a
-        // real lost race would produce.
+    fun `an edit beats a delete made on another device`() = runBlocking {
+        adapter.rows["song-1"] = remoteRowFor(baseSong, rev = 4, deletedAtIso = "2026-02-01T00:00:00.000Z")
+        dao.upsert(pendingEdit(baseSong, rev = 3) { it.copy(title = "Still Writing This") })
+
+        engine.sync(userId, dek)
+
+        assertNull(adapter.rows["song-1"]!!.deleted_at)
+        assertEquals("Still Writing This", serverSong().title)
+        assertNull(dao.rows["song-1"]!!.deletedAt)
+    }
+
+    @Test
+    fun `a delete gives way to an edit made on another device, and the song is restored`() = runBlocking {
+        adapter.rows["song-1"] = remoteRowFor(baseSong.copy(title = "Edited On The Web"), rev = 4)
+        dao.upsert(pendingEdit(baseSong, rev = 3) { it }.copy(deletedAt = 5000L))
 
         val outcome = engine.sync(userId, dek)
 
-        assertEquals(0, outcome.conflictCopies)
-        assertEquals(1, dao.rows.size) // no conflict copy was created
+        assertEquals(1, outcome.restored)
+        assertNull(adapter.rows["song-1"]!!.deleted_at)
+        val local = dao.rows["song-1"]!!
+        assertNull(local.deletedAt)
+        assertEquals(false, local.pendingSync)
+        assertEquals("Edited On The Web", local.title)
+    }
+
+    @Test
+    fun `a delete still goes through when the other device changed nothing`() = runBlocking {
+        adapter.rows["song-1"] = remoteRowFor(baseSong, rev = 4) // only the rev moved
+        dao.upsert(pendingEdit(baseSong, rev = 3) { it }.copy(deletedAt = 5000L))
+
+        engine.sync(userId, dek)
+
+        assertNotNull(adapter.rows["song-1"]!!.deleted_at)
+        assertEquals(false, dao.rows["song-1"]!!.pendingSync)
+    }
+
+    @Test
+    fun `an edit saved while a push is out stays pending instead of being marked synced`() = runBlocking {
+        val repository = SongRepository(dao)
+        adapter.rows["song-1"] = remoteRowFor(baseSong, rev = 3)
+        dao.upsert(pendingEdit(baseSong, rev = 3) { it.copy(title = "Pushed") })
+        val racing = object : SongsRemoteAdapter by adapter {
+            var once = true
+            override suspend fun updateWithRevCheck(id: String, row: SongRow, expectedRev: Int): UpdateResult {
+                if (once) {
+                    once = false
+                    // The editor saves while the push is on the network.
+                    repository.upsert(dao.rows[id]!!.toDomain().copy(title = "Typed During The Push"))
+                }
+                return adapter.updateWithRevCheck(id, row, expectedRev)
+            }
+        }
+
+        SyncEngine(dao, racing).sync(userId, dek)
+
+        // The second (bounded) push pass sends the later edit in the same sync.
+        assertEquals("Typed During The Push", serverSong().title)
+        assertEquals(false, dao.rows["song-1"]!!.pendingSync)
+    }
+
+    @Test
+    fun `a song already pending before bases existed merges without one, keeping both sides`() = runBlocking {
+        adapter.rows["song-1"] = remoteRowFor(baseSong.copy(lines = listOf(baseSong.lines[0], SongLine("line-2", "world, from the web"))), rev = 4)
+        val phoneEdit = pendingEdit(baseSong, rev = 3) {
+            it.copy(lines = listOf(SongLine("line-1", "hello, from the phone", listOf(ChordAnchor(0, "G"))), it.lines[1]))
+        }
+        dao.upsert(phoneEdit.copy(baseDocJson = null))
+
+        engine.sync(userId, dek)
+
+        // Without a base, each line both sides have in different versions is kept twice.
+        assertEquals(
+            listOf("hello", "hello, from the phone", "world", "world, from the web").sorted(),
+            serverSong().lines.map { it.lyrics }.sorted(),
+        )
+    }
+
+    @Test
+    fun `pull takes a newer server version even when the local edit counter is higher`() = runBlocking {
+        // rev is a local write counter; only remoteRev says what the server confirmed.
+        dao.upsert(localSong(rev = 10, remoteRev = 3, pendingSync = false, title = "Old"))
+        adapter.rows["song-1"] = buildRemoteRow("song-1", rev = 4, title = "Newer On The Server")
+
+        engine.sync(userId, dek)
+
+        assertEquals("Newer On The Server", dao.rows["song-1"]!!.title)
+        assertEquals(4, dao.rows["song-1"]!!.remoteRev)
+    }
+
+    @Test
+    fun `a failed rev check where the remote row is simply gone re-queues for insert instead of merging`() = runBlocking {
+        // Simulates a DEK rotation's rotateAndPurge deleting every remote row:
+        // the local entity still points at a remoteRev that no longer exists.
+        dao.upsert(localSong(rev = 4, remoteRev = 3, title = "Orphaned Edit"))
+
+        val outcome = engine.sync(userId, dek)
+
+        assertEquals(0, outcome.merged)
+        assertEquals(1, dao.rows.size)
         assertEquals(1, adapter.insertCalls) // re-queued row went out via a clean insert instead
         val result = dao.rows["song-1"]!!
         assertEquals(false, result.pendingSync)

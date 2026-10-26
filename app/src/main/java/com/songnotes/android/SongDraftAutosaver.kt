@@ -2,6 +2,7 @@ package com.songnotes.android
 
 import com.songnotes.core.data.SongRepository
 import com.songnotes.core.domain.Song
+import com.songnotes.core.domain.merge.contentEquals
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -29,11 +30,29 @@ import kotlinx.coroutines.sync.withLock
  * content out immediately. The [Mutex] exists so a lifecycle-triggered
  * [flush] can never race the debounce timer's own write into two separate
  * `upsert` calls (which would double-bump `rev` for one logical edit).
+ *
+ * Saves go through [SongRepository.saveEdit] against [base] -- the version the
+ * editor's content is an edit of (docs/SYNC-MERGE.md). When a sync changed the
+ * stored song meanwhile, the save merges with it instead of overwriting it, and
+ * [onExternal] hands the editor the stored result to show.
  */
 class SongDraftAutosaver(private val repo: SongRepository, private val scope: CoroutineScope) {
     private var job: Job? = null
     private val pending = AtomicReference<Song?>(null)
     private val writeLock = Mutex()
+
+    /** The stored version the editor's content is based on: the song as loaded, then as each save stored it. */
+    @Volatile var base: Song? = null
+
+    /**
+     * Called (from the write's thread) when a save stored something other than
+     * what the editor sent -- [stored] is what's in the database now, [sent] what
+     * the editor sent. The editor shows [stored], merged with anything typed since.
+     */
+    @Volatile var onExternal: ((stored: Song, sent: Song) -> Unit)? = null
+
+    /** Nothing waiting to be written: the editor's content is exactly [base]. */
+    val isIdle: Boolean get() = pending.get() == null && job?.isActive != true
 
     /** Call on every content change. Cancels any prior pending write and schedules a new one [DEBOUNCE_MS] out -- a burst of edits collapses to a single DB write. */
     fun schedule(song: Song) {
@@ -48,7 +67,15 @@ class SongDraftAutosaver(private val repo: SongRepository, private val scope: Co
     /** Writes whatever is currently pending, if anything, right now -- no debounce. Safe to call redundantly (a no-op if nothing is pending). */
     suspend fun flush() {
         writeLock.withLock {
-            pending.getAndSet(null)?.let { repo.upsert(it) }
+            val sent = pending.getAndSet(null) ?: return@withLock
+            val basedOn = base
+            if (basedOn == null) {
+                repo.upsert(sent)
+                return@withLock
+            }
+            val stored = repo.saveEdit(sent, basedOn)
+            base = stored
+            if (!contentEquals(stored, sent)) onExternal?.invoke(stored, sent)
         }
     }
 
