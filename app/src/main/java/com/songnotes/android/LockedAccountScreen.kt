@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -21,10 +20,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.songnotes.core.data.EnvelopeKeyMismatchException
+import com.songnotes.core.data.WrongPasswordException
 import com.songnotes.core.data.SupabaseAuthRepository
 import kotlinx.coroutines.launch
 
@@ -79,12 +77,10 @@ fun LockedAccountScreen(onUnlocked: () -> Unit, onSignOut: () -> Unit) {
         )
         Spacer(Modifier.height(20.dp))
 
-        OutlinedTextField(
+        PasswordField(
             value = password,
             onValueChange = { password = it },
-            label = { Text("Password") },
-            visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Password),
+            label = "Password",
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(16.dp))
@@ -99,6 +95,8 @@ fun LockedAccountScreen(onUnlocked: () -> Unit, onSignOut: () -> Unit) {
                     try {
                         authRepo.unlockWithPassword(password)
                         onUnlocked()
+                    } catch (e: WrongPasswordException) {
+                        errorText = e.message
                     } catch (e: EnvelopeKeyMismatchException) {
                         showRecovery = true
                     } catch (e: Exception) {

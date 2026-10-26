@@ -1,7 +1,9 @@
 package com.songnotes.core.data
 
+import android.util.Log
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.auth.auth
+import io.github.jan.supabase.auth.exception.AuthRestException
 import io.github.jan.supabase.auth.providers.builtin.Email
 import io.github.jan.supabase.postgrest.postgrest
 import kotlinx.serialization.Serializable
@@ -41,6 +43,22 @@ class RecoveryCodeMismatchException(message: String) : Exception(message)
  * can route to recovery-code entry instead of showing a raw, unhelpful error.
  */
 class EnvelopeKeyMismatchException(message: String) : Exception(message)
+
+/**
+ * Thrown when Supabase Auth itself rejects the password -- a plain typo, not a
+ * key problem. Its message is ours and safe to show as-is. Kept apart from
+ * [EnvelopeKeyMismatchException] because that one sends the user to
+ * recovery-code entry: [SupabaseAuthRepository.unlockWithPassword] used to
+ * throw it for ANY password the stored key didn't accept, so a mistyped
+ * password on the "songs are locked" screen asked for the recovery code
+ * (reported by the user, who no longer had theirs).
+ */
+class WrongPasswordException(message: String) : Exception(message)
+
+private const val TAG = "SongNotesAuth"
+
+/** GoTrue's error codes for a wrong email/password: `invalid_credentials` today, `invalid_grant` on older servers. */
+private val WRONG_CREDENTIALS_ERRORS = setOf("invalid_credentials", "invalid_grant")
 
 class SupabaseAuthRepository(private val client: SupabaseClient = SupabaseClientProvider.client) {
 
@@ -113,10 +131,7 @@ class SupabaseAuthRepository(private val client: SupabaseClient = SupabaseClient
      * treated as license to overwrite it.
      */
     suspend fun signIn(email: String, accountPassword: String): String? {
-        client.auth.signInWith(Email) {
-            this.email = email
-            this.password = accountPassword
-        }
+        if (!authAccepts(email, accountPassword)) throw WrongPasswordException("That email and password don't match an account.")
         val userId = requireNotNull(currentUserId) { "signInWith(Email) succeeded but no current user" }
 
         val existingRow = fetchUserKeysRow(userId)
@@ -181,9 +196,36 @@ class SupabaseAuthRepository(private val client: SupabaseClient = SupabaseClient
         val dek = try {
             unlockWithPassphrase(envelope, password)
         } catch (e: Exception) {
+            // The stored key didn't open with this password. Usually that's just
+            // a typo -- this screen never checked the password with Supabase
+            // Auth, so a typo used to land on recovery-code entry. Ask Auth:
+            // only a password it ACCEPTS that the key still rejects means the
+            // password really was changed somewhere else.
+            Log.w(TAG, "unlockWithPassword: stored key rejected the password (${e.javaClass.simpleName})")
+            val email = currentUserEmail
+            if (email != null && !authAccepts(email, password)) {
+                throw WrongPasswordException("That password isn't right.")
+            }
             throw EnvelopeKeyMismatchException("That password doesn't match this account's saved encryption key.")
         }
         KeySession.establish(dek, envelope.dekId)
+    }
+
+    /**
+     * Signs in with [email]/[password]: true if Supabase Auth accepts them,
+     * false if it rejects them as wrong credentials. Anything else (no
+     * network, rate limiting, a server error) is thrown, not read as "wrong
+     * password". Re-signing-in as the already signed-in user just refreshes
+     * the session.
+     */
+    private suspend fun authAccepts(email: String, password: String): Boolean = try {
+        client.auth.signInWith(Email) {
+            this.email = email
+            this.password = password
+        }
+        true
+    } catch (e: AuthRestException) {
+        if (e.error in WRONG_CREDENTIALS_ERRORS) false else throw e
     }
 
     /**

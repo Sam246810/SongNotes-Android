@@ -33,9 +33,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.songnotes.core.data.EnvelopeKeyMismatchException
+import com.songnotes.core.data.WrongPasswordException
 import com.songnotes.core.data.PasswordPolicy
 import com.songnotes.core.data.SupabaseAuthRepository
 import com.songnotes.core.data.SupabaseClientProvider
@@ -126,6 +126,8 @@ fun AuthScreen(onDone: () -> Unit) {
                     onDone()
                 }
             }
+        } catch (e: WrongPasswordException) {
+            errorText = e.message
         } catch (e: EnvelopeKeyMismatchException) {
             showRecoveryUnlock = true
         } catch (e: Exception) {
@@ -294,12 +296,10 @@ fun AuthScreen(onDone: () -> Unit) {
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
+        PasswordField(
             value = password,
             onValueChange = { password = it },
-            label = { Text("Password") },
-            visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Password),
+            label = "Password",
             modifier = Modifier.fillMaxWidth(),
         )
         if (isSignUp) {
