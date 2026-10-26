@@ -1,5 +1,10 @@
 package com.songnotes.android
 
+import com.songnotes.core.data.DekVault
+import com.songnotes.core.data.SyncPreferences
+import androidx.compose.ui.Alignment
+import androidx.compose.material3.Switch
+import androidx.compose.foundation.layout.Row
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -116,6 +121,32 @@ fun AccountScreen(onDone: () -> Unit) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        // Auto-sync on open (docs/SYNC-MERGE.md): needs the account key kept on
+        // this phone between launches. Turning it off forgets the key, so the
+        // Sync button asks for the password again after a restart.
+        val syncPrefs = remember(context) { SyncPreferences(context) }
+        var keepUnlocked by remember { mutableStateOf(syncPrefs.keepSyncUnlocked) }
+        Spacer(Modifier.height(24.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Sync when the app opens", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Keeps your encryption key on this phone so songs sync without your password. " +
+                        "Anyone using your unlocked phone could sync your songs.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = keepUnlocked,
+                onCheckedChange = { on ->
+                    keepUnlocked = on
+                    syncPrefs.keepSyncUnlocked = on
+                    if (!on) DekVault(context).clear()
+                },
+            )
+        }
 
         if (!unlocked) {
             Spacer(Modifier.height(24.dp))

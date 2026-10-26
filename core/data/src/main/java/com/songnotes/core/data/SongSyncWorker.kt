@@ -46,11 +46,14 @@ class SongSyncWorker(context: Context, params: WorkerParameters) : CoroutineWork
 
         val prefs = SyncPreferences(applicationContext)
         val adopt = inputData.getBoolean(KEY_ADOPT, false)
+        // An automatic sync (app opened or resumed) never asks for anything and
+        // keeps quiet about failures a later one will simply retry.
+        val auto = inputData.getBoolean(KEY_AUTO, false)
 
         val userId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id
             ?: return fail(prefs, "Not signed in.")
         val dek = KeySession.current()
-            ?: return fail(prefs, "Enter your password to sync.")
+            ?: return if (auto) Result.failure() else fail(prefs, "Enter your password to sync.")
         val sessionDekId = KeySession.currentDekId()
 
         return try {
@@ -69,6 +72,7 @@ class SongSyncWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 if (currentDekId != null && currentDekId != sessionDekId) {
                     Log.w(TAG, "DEK rotated elsewhere (dekId mismatch) -- clearing stale session, failing sync")
                     KeySession.clear()
+                    DekVault(applicationContext).clear()
                     return fail(prefs, "Your account's encryption key changed elsewhere. Enter your current password to sync.")
                 }
             }
@@ -79,13 +83,14 @@ class SongSyncWorker(context: Context, params: WorkerParameters) : CoroutineWork
             prefs.lastSyncAtMs = System.currentTimeMillis()
             prefs.lastSyncError = null
             prefs.lastSyncUnreadable = outcome.unreadable
+            if (prefs.keepSyncUnlocked) DekVault(applicationContext).save(userId, dek, sessionDekId)
             Log.i(TAG, "sync ok: pushed=${outcome.pushed} pulled=${outcome.pulled} merged=${outcome.merged} restored=${outcome.restored} reIded=${outcome.reIded} unreadable=${outcome.unreadable}")
             Result.success()
         } catch (e: java.io.IOException) {
             // Network-layer failure (no connection, DNS, timeout) -- safe to
             // be a little more specific than the generic branch below.
             Log.e(TAG, "sync failed (network)", e)
-            fail(prefs, "Couldn't reach the network. Check your connection and try again.")
+            if (auto) Result.failure() else fail(prefs, "Couldn't reach the network. Check your connection and try again.")
         } catch (e: Exception) {
             // Deliberately never surface e.message in the UI -- Postgrest/Ktor
             // exceptions carry the full request, including the auth header.
@@ -123,6 +128,7 @@ class SongSyncWorker(context: Context, params: WorkerParameters) : CoroutineWork
         /** Not private -- `SyncStatusRepository` reads live `WorkInfo` for this name to drive the banner's "syncing…" state. */
         const val UNIQUE_WORK_NAME = "song_sync"
         private const val KEY_ADOPT = "adopt"
+        private const val KEY_AUTO = "auto"
         private const val KEY_ERROR = "error"
 
         /**
@@ -140,10 +146,10 @@ class SongSyncWorker(context: Context, params: WorkerParameters) : CoroutineWork
          * song onto the account via `SyncEngine.reconcileForAdoption` before
          * the ordinary push/pull.
          */
-        fun enqueueOneTime(context: Context, adopt: Boolean = false) {
+        fun enqueueOneTime(context: Context, adopt: Boolean = false, auto: Boolean = false) {
             val request = OneTimeWorkRequestBuilder<SongSyncWorker>()
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-                .setInputData(workDataOf(KEY_ADOPT to adopt))
+                .setInputData(workDataOf(KEY_ADOPT to adopt, KEY_AUTO to auto))
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE_WORK_NAME, ExistingWorkPolicy.KEEP, request)
         }

@@ -39,6 +39,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.Lifecycle
+import androidx.compose.runtime.DisposableEffect
 import com.songnotes.core.audio.AudioEngine
 import com.songnotes.core.data.AuthStateSignal
 import com.songnotes.core.data.SongRepository
@@ -97,6 +101,19 @@ class MainActivity : FragmentActivity() {
             // Songs is the real home screen in every build, debug and
             // release alike (see docs/handoff/PHASE-11-prep-navigation.md).
             var screen by remember { mutableStateOf<Screen>(Screen.Songs) }
+
+            // Sync whenever the app opens or comes back to the foreground
+            // (docs/SYNC-MERGE.md). A single-activity app, so this activity's
+            // ON_START is the app's. requestAutoSync decides whether it may run
+            // at all and never prompts.
+            val lifecycleOwner = LocalLifecycleOwner.current
+            DisposableEffect(lifecycleOwner) {
+                val observer = LifecycleEventObserver { _, event ->
+                    if (event == Lifecycle.Event.ON_START) syncController.requestAutoSync()
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+            }
 
             // Phase 13: local-first -- reopen the song that was being edited
             // when the app last closed, rather than always landing on the

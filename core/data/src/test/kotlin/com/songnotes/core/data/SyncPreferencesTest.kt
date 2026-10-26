@@ -152,4 +152,13 @@ class SyncPreferencesTest {
         assertNull(dao.rows["song-1"]!!.remoteRev)
         assertTrue(dao.rows["song-1"]!!.pendingSync)
     }
+
+    @Test
+    fun `sync on open is on by default, survives disabling sync, and remembers being turned off`() {
+        assertTrue(prefs.keepSyncUnlocked)
+        assertEquals(0L, prefs.lastAutoSyncAtMs)
+        prefs.keepSyncUnlocked = false
+        prefs.disableSync()
+        assertFalse(SyncPreferences(store).keepSyncUnlocked)
+    }
 }

@@ -114,6 +114,21 @@ class SyncPreferences(private val store: KeyValueStore) {
         get() = store.getLong(KEY_LAST_SYNC_UNREADABLE, 0L).toInt()
         set(value) = store.putLong(KEY_LAST_SYNC_UNREADABLE, value.toLong())
 
+    /**
+     * Sync when the app opens or comes back, without asking for the password
+     * each time (docs/SYNC-MERGE.md) -- the account key is kept in [DekVault]
+     * between launches. On by default; off brings back "Sync asks for the
+     * password after every app restart".
+     */
+    var keepSyncUnlocked: Boolean
+        get() = store.getBoolean(KEY_KEEP_SYNC_UNLOCKED, true)
+        set(value) = store.putBoolean(KEY_KEEP_SYNC_UNLOCKED, value)
+
+    /** When the app last started an automatic sync -- spaces them out when the app is switched to and from quickly. */
+    var lastAutoSyncAtMs: Long
+        get() = store.getLong(KEY_LAST_AUTO_SYNC_AT, 0L)
+        set(value) = store.putLong(KEY_LAST_AUTO_SYNC_AT, value)
+
     /** Run-once flag for the pre-Phase-6 legacy-JSON-song import -- without it, `SongListScreen` re-imported (and re-dirtied/resurrected) every legacy song on every visit to the list. */
     var legacyJsonImportDone: Boolean
         get() = store.getBoolean(KEY_LEGACY_IMPORT_DONE, false)
@@ -176,6 +191,8 @@ class SyncPreferences(private val store: KeyValueStore) {
     companion object {
         private const val PREFS_NAME = "songnotes_sync"
         private const val KEY_SYNC_ENABLED = "sync_enabled"
+        private const val KEY_KEEP_SYNC_UNLOCKED = "keep_sync_unlocked"
+        private const val KEY_LAST_AUTO_SYNC_AT = "last_auto_sync_at"
         private const val KEY_EXPLAINER_ACK = "explainer_acknowledged"
         private const val KEY_SYNC_ACCOUNT_USER_ID = "sync_account_user_id"
         private const val KEY_ADOPTION_DONE_FOR = "adoption_completed_for_user_id"

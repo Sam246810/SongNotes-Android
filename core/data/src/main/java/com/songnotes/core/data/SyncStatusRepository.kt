@@ -155,6 +155,28 @@ class SyncController(
     }
 
     /**
+     * Syncs because the app opened or came back to the foreground
+     * (docs/SYNC-MERGE.md) -- only when sync is on for the signed-in account,
+     * [SyncPreferences.keepSyncUnlocked] is on, and the account key is already
+     * in memory or can be restored from [DekVault]; at most once per
+     * [AUTO_SYNC_MIN_GAP_MS]. Never prompts: when any of that isn't so, it does
+     * nothing and the Sync button works as before.
+     *
+     * Logs like [requestSync]: these two are the only places a sync is enqueued.
+     */
+    fun requestAutoSync(now: Long = System.currentTimeMillis()) {
+        if (!SupabaseClientProvider.isConfigured || !prefs.syncEnabled || !prefs.keepSyncUnlocked) return
+        val userId = authRepo.currentUserId ?: return
+        if (userId != prefs.syncAccountUserId) return
+        if (now - prefs.lastAutoSyncAtMs < AUTO_SYNC_MIN_GAP_MS) return
+        if (!KeySession.isUnlocked() && !DekVault(context).restoreInto(userId)) return
+        prefs.lastAutoSyncAtMs = now
+        val adopt = prefs.adoptionCompletedForUserId != userId
+        Log.i("SyncController", "requestSync: enqueuing sync (auto, adopt=$adopt)")
+        SongSyncWorker.enqueueOneTime(context, adopt = adopt, auto = true)
+    }
+
+    /**
      * Call right after a sign-in/sign-up the user chose to enable sync for.
      * Detects an account switch -- this device's songs were last synced (or
      * never synced) against a DIFFERENT account -- and detaches every local
@@ -173,9 +195,13 @@ class SyncController(
         AuthStateSignal.bump()
     }
 
-    /** Disables sync. Touches only [SyncPreferences]; see its `disableSync` doc comment for why no `songs` row is ever touched here. */
+    /** Disables sync (and every sign-out goes through here): [SyncPreferences] plus the auto-sync key in [DekVault]; see `SyncPreferences.disableSync` for why no `songs` row is ever touched here. */
     fun disableSync() {
         prefs.disableSync()
+        DekVault(context).clear()
         AuthStateSignal.bump()
     }
 }
+
+/** The shortest gap between two automatic syncs -- switching apps back and forth shouldn't sync every time. */
+const val AUTO_SYNC_MIN_GAP_MS = 30_000L
