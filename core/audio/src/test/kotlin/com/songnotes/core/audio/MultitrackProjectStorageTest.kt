@@ -116,6 +116,21 @@ class MultitrackProjectStorageTest {
     }
 
     @Test
+    fun `peekLengthFrames reads the demo length without loading audio`() {
+        val dir = tmp.newFolder("p")
+        assertEquals(0L, MultitrackProjectStorage(dir).peekLengthFrames())
+        MultitrackProjectStorage(dir).save(
+            MultitrackProject(
+                tracks = listOf(
+                    MultitrackTrackSpec(listOf(MultitrackClipSpec(take(100, 0f), startFrame = 50))),
+                    MultitrackTrackSpec(listOf(MultitrackClipSpec(take(30, 0f), startFrame = 400))),
+                ),
+            ),
+        )
+        assertEquals(430L, MultitrackProjectStorage(dir).peekLengthFrames())
+    }
+
+    @Test
     fun `old per-clip manifests still load`() {
         val dir = tmp.newFolder("p")
         val clips = File(dir, "clips").apply { mkdirs() }

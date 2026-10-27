@@ -670,3 +670,55 @@ fun MinimizedRecordingBubble(elapsedText: String, onClick: () -> Unit, modifier:
         }
     }
 }
+
+/**
+ * The song's demo, playable from the lyrics without opening the Scratchpad,
+ * voice-notes style: play/pause, elapsed / total, a thin progress line. Tap
+ * the label to open the Scratchpad.
+ */
+@Composable
+fun DemoMiniPlayer(
+    elapsedSeconds: Int,
+    totalSeconds: Int,
+    progress: Float,
+    isPlaying: Boolean,
+    onPlayToggle: () -> Unit,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shadowElevation = 6.dp,
+    ) {
+        Column {
+            Row(
+                modifier = Modifier.padding(start = 6.dp, end = 16.dp, top = 4.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onPlayToggle) {
+                    Icon(
+                        if (isPlaying) Icons.Filled.Stop else Icons.Filled.PlayArrow,
+                        contentDescription = if (isPlaying) "Stop demo" else "Play demo",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Column(modifier = Modifier.clickable(onClick = onOpen).padding(vertical = 4.dp)) {
+                    Text("Demo  ›", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        "${formatElapsed(elapsedSeconds)} / ${formatElapsed(totalSeconds)}",
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Box(
+                Modifier.padding(horizontal = 20.dp).padding(bottom = 6.dp).fillMaxWidth().height(3.dp)
+                    .clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceContainerHighest),
+            ) {
+                Box(Modifier.fillMaxWidth(progress.coerceIn(0f, 1f)).fillMaxHeight().background(MaterialTheme.colorScheme.primary))
+            }
+        }
+    }
+}

@@ -211,3 +211,21 @@ phone, so it wasn't granted during testing, and the "already asked" flag
 was reset afterwards so the user gets the prompt on their own first
 Record. The inner (unfolded) display may report positions relative to the
 cover screen; not checked.
+
+## §6 Demo mini player and song-list badge
+
+- `MultitrackProjectStorage.peekLengthFrames()` reads a demo's length from
+  the manifest alone (no audio), tested in `MultitrackProjectStorageTest`.
+- **Song list**: songs with a demo show a "Demo · 1:18" badge under the
+  title. Lengths are read on IO whenever the list's song ids change.
+- **Lyrics editor**: when the Scratchpad is hidden, not recording, the
+  project has audio, and the keyboard is closed, `ScratchpadScreen` (always
+  composed with the editor) shows a **Demo** bar at the bottom: play/stop,
+  elapsed / total, a progress line; tap "Demo ›" to open the Scratchpad. It
+  plays the arranged mix from the top through the same engine path, and
+  sits clear of the editor's autoscroll button.
+
+**Verified on device:** the demo plays from the lyrics with progress; the
+badge appears on the song with a demo. The green mic dot while playing is
+Android's privacy indicator: the engine always opens its input stream
+alongside output (unchanged behaviour, not new in this phase).

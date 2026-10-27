@@ -1,5 +1,6 @@
 package com.songnotes.android
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,12 +10,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -28,6 +34,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -94,6 +101,17 @@ fun SongListScreen(
         sweepMigratedLegacyJson(context, repo)
         sweepOrphanedScratchpads(context, repo)
         repo.observeAllWithSyncState().collect { items = it }
+    }
+
+    // Demo lengths for the "Demo · 1:18" badge, read from each song's
+    // Scratchpad manifest (no audio loaded) whenever the list is shown.
+    var demoSeconds by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    LaunchedEffect(items.map { it.song.id }) {
+        demoSeconds = withContext(Dispatchers.IO) {
+            items.associate { item ->
+                item.song.id to ((MultitrackProjectStorage(context, item.song.id).peekLengthFrames() + 47_999L) / 48_000L).toInt()
+            }.filterValues { it > 0 }
+        }
     }
 
     fun createSong() {
@@ -199,6 +217,7 @@ fun SongListScreen(
                     items(visibleItems, key = { it.song.id }) { item ->
                         SongRow(
                             item = item,
+                            demoSeconds = demoSeconds[item.song.id] ?: 0,
                             onOpen = { onOpenSong(item.song.id) },
                             onDelete = { deleteTarget = item },
                         )
@@ -211,7 +230,7 @@ fun SongListScreen(
 }
 
 @Composable
-private fun SongRow(item: SongListItem, onOpen: () -> Unit, onDelete: () -> Unit) {
+private fun SongRow(item: SongListItem, demoSeconds: Int, onOpen: () -> Unit, onDelete: () -> Unit) {
     val song = item.song
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -234,6 +253,30 @@ private fun SongRow(item: SongListItem, onOpen: () -> Unit, onDelete: () -> Unit
                     Spacer(Modifier.height(4.dp))
                     // A saved line is a whole paragraph, often longer than the row.
                     Text(preview, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (demoSeconds > 0) {
+                    // This song has a Scratchpad demo saved on the phone.
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer)
+                            .padding(horizontal = 8.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.GraphicEq,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "Demo · ${formatElapsed(demoSeconds)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
                 }
             }
             TextButton(onClick = onDelete) {

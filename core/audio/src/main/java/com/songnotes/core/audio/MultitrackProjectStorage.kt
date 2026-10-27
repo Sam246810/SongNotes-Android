@@ -127,6 +127,27 @@ class MultitrackProjectStorage(private val projectDir: File) {
         return name
     }
 
+    /**
+     * The saved demo's length in frames, from the manifest alone (no audio is
+     * read), or 0 when there's no saved project or it has no clips. Cheap
+     * enough to call for every song in a list.
+     */
+    fun peekLengthFrames(): Long {
+        if (!manifestFile.exists()) return 0L
+        return runCatching {
+            val tracks = JSONObject(manifestFile.readText()).getJSONArray("tracks")
+            var end = 0L
+            for (i in 0 until tracks.length()) {
+                val clips = tracks.getJSONObject(i).getJSONArray("clips")
+                for (c in 0 until clips.length()) {
+                    val clip = clips.getJSONObject(c)
+                    end = maxOf(end, clip.getLong("startFrame") + clip.getLong("lengthFrames"))
+                }
+            }
+            end
+        }.getOrDefault(0L)
+    }
+
     /** Reads the saved project back, or null if [exists] would return false. */
     @Synchronized
     fun load(): MultitrackProject? {

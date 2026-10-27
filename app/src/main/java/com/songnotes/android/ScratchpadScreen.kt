@@ -13,6 +13,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -106,6 +108,7 @@ private const val kPollMs = 100L
  * (the `DisposableEffect` below). While hidden and recording, a small bubble
  * shows instead (tap: [onExpand]).
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ScratchpadScreen(
     engine: AudioEngine,
@@ -651,6 +654,30 @@ fun ScratchpadScreen(
                 },
                 onClick = onExpand,
                 modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp),
+            )
+        } else if (projectLoaded && project.totalFrames > 0L && !WindowInsets.isImeVisible) {
+            // The song's demo, playable from the lyrics. Kept clear of the
+            // editor's autoscroll button (bottom end) and hidden while typing.
+            val total = project.totalFrames
+            val at = if (isPlaying) engineState.playbackFrame.toLong() else 0L
+            DemoMiniPlayer(
+                elapsedSeconds = (at / kSampleRate).toInt(),
+                totalSeconds = ((total + kSampleRate - 1) / kSampleRate).toInt(),
+                progress = at.toFloat() / total,
+                isPlaying = isPlaying,
+                onPlayToggle = {
+                    if (isPlaying) {
+                        engine.stopPlayback()
+                        isPlaying = false
+                    } else {
+                        isPlaying = project.play(engine, 0L)
+                    }
+                },
+                onOpen = onExpand,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .navigationBarsPadding()
+                    .padding(start = 16.dp, end = 88.dp, bottom = 16.dp),
             )
         }
     }
