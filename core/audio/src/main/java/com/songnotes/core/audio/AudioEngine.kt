@@ -209,6 +209,22 @@ class AudioEngine {
      * mid-playback. Remembered here too, so a value set before the native
      * engine exists still applies once it's created.
      */
+    /**
+     * Applies [tracks]' gain/mute/solo to what's playing right now, or to
+     * the backing tracks of a take in progress, without restarting. Pass the
+     * same tracks, in the same order, that playback (or [armRecording]'s
+     * backing tracks) started with; only their mix flags are read.
+     */
+    fun setMultitrackMix(tracks: List<MultitrackTrackSpec>): Boolean {
+        if (handle == 0L) return false
+        return nativeSetMultitrackMix(
+            handle,
+            FloatArray(tracks.size) { tracks[it].gain },
+            BooleanArray(tracks.size) { tracks[it].muted },
+            BooleanArray(tracks.size) { tracks[it].soloed },
+        )
+    }
+
     fun setMetronomeOn(on: Boolean) {
         metronomeOn = on
         if (handle != 0L) nativeSetMetronomeOn(handle, on)
@@ -506,6 +522,7 @@ class AudioEngine {
         startFrame: Long,
     ): Boolean
     private external fun nativeSetMetronomeOn(handle: Long, on: Boolean)
+    private external fun nativeSetMultitrackMix(handle: Long, gains: FloatArray, muted: BooleanArray, soloed: BooleanArray): Boolean
     private external fun nativePunchIn(
         existingCount: Int,
         existingClipStartFrames: LongArray,

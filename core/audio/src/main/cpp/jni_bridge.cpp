@@ -188,6 +188,24 @@ Java_com_songnotes_core_audio_AudioEngine_nativeStartMultitrackPlayback(
     return engine->startMultitrackPlayback(tracks, bpm, beatsPerBar, startFrame) ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_songnotes_core_audio_AudioEngine_nativeSetMultitrackMix(JNIEnv *env, jobject, jlong handle, jfloatArray gains,
+                                                                 jbooleanArray muted, jbooleanArray soloed) {
+    auto *engine = toEngine(handle);
+    if (!engine || !gains || !muted || !soloed) return JNI_FALSE;
+    const jsize n = env->GetArrayLength(gains);
+    if (env->GetArrayLength(muted) != n || env->GetArrayLength(soloed) != n) return JNI_FALSE;
+    std::vector<float> g(static_cast<size_t>(n));
+    env->GetFloatArrayRegion(gains, 0, n, g.data());
+    std::vector<jboolean> m(static_cast<size_t>(n));
+    std::vector<jboolean> s(static_cast<size_t>(n));
+    env->GetBooleanArrayRegion(muted, 0, n, m.data());
+    env->GetBooleanArrayRegion(soloed, 0, n, s.data());
+    std::vector<bool> mb(m.begin(), m.end());
+    std::vector<bool> sb(s.begin(), s.end());
+    return engine->setMultitrackMix(g, mb, sb) ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT void JNICALL
 Java_com_songnotes_core_audio_AudioEngine_nativeSetMetronomeOn(JNIEnv *, jobject, jlong handle, jboolean on) {
     if (auto *engine = toEngine(handle)) {

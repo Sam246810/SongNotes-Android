@@ -5,6 +5,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Headset
@@ -43,6 +45,7 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -143,7 +146,8 @@ fun SimpleScratchpad(
     editsEnabled: Boolean,
     isExporting: Boolean,
     onBack: () -> Unit,
-    onSeek: (Long) -> Unit,
+    /** [done] is false while a drag is still moving, true on tap or release. */
+    onSeek: (frame: Long, done: Boolean) -> Unit,
     onRecord: () -> Unit,
     onPlay: () -> Unit,
     onMetronomeToggle: () -> Unit,
@@ -156,6 +160,7 @@ fun SimpleScratchpad(
     onGainChange: (Int, Float) -> Unit,
     onRename: (Int, String) -> Unit,
     onDelete: (Int) -> Unit,
+    onTrim: (index: Int, startFrame: Long, endFrame: Long) -> Unit,
     onSwitchToAdvanced: () -> Unit,
     onExport: () -> Unit,
     onCalibrate: () -> Unit,
@@ -205,6 +210,8 @@ fun SimpleScratchpad(
                 onGainChange = onGainChange,
                 onRename = onRename,
                 onDelete = onDelete,
+                onTrim = onTrim,
+                tutorialTargets = tutorialTargets,
                 modifier = m.tutorialTarget(tutorialTargets, "simple_layers"),
             )
         }
@@ -217,6 +224,8 @@ fun SimpleScratchpad(
                 isPlaying = isPlaying,
                 canPlay = projectEnd > 0L,
                 positionFrame = positionFrame,
+                timelineFrames = timelineFrames,
+                onSeek = onSeek,
                 timeCaption = timeCaption,
                 layerCount = tracks.size,
                 meterPeakMilli = meterPeakMilli,
@@ -327,12 +336,14 @@ private fun LayerList(
     positionFrame: Long,
     recording: RecordingPreview?,
     editsEnabled: Boolean,
-    onSeek: (Long) -> Unit,
+    onSeek: (Long, Boolean) -> Unit,
     onMuteToggle: (Int) -> Unit,
     onSoloToggle: (Int) -> Unit,
     onGainChange: (Int, Float) -> Unit,
     onRename: (Int, String) -> Unit,
     onDelete: (Int) -> Unit,
+    onTrim: (Int, Long, Long) -> Unit,
+    tutorialTargets: TutorialTargets?,
     modifier: Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -345,6 +356,7 @@ private fun LayerList(
         return
     }
     val anySolo = tracks.any { it.soloed }
+    val firstWithAudio = tracks.indexOfFirst { it.clips.isNotEmpty() }
     LazyColumn(
         state = listState,
         modifier = modifier,
@@ -366,6 +378,12 @@ private fun LayerList(
                 onGainChange = { onGainChange(index, it) },
                 onRename = { onRename(index, it) },
                 onDelete = { onDelete(index) },
+                onTrim = { start, end -> onTrim(index, start, end) },
+                waveformModifier = if (index == firstWithAudio) {
+                    Modifier.tutorialTarget(tutorialTargets, "first_layer_wave")
+                } else {
+                    Modifier
+                },
             )
         }
         if (recording != null) {
@@ -410,16 +428,17 @@ private fun LayerCard(
     timelineFrames: Long,
     positionFrame: Long,
     editsEnabled: Boolean,
-    onSeek: (Long) -> Unit,
+    onSeek: (Long, Boolean) -> Unit,
     onMuteToggle: () -> Unit,
     onSoloToggle: () -> Unit,
     onGainChange: (Float) -> Unit,
     onRename: (String) -> Unit,
     onDelete: () -> Unit,
+    onTrim: (startFrame: Long, endFrame: Long) -> Unit,
+    waveformModifier: Modifier = Modifier,
 ) {
     val color = trackColor(track.colorIndex)
     val pyramids = remember(track.clips) { track.clips.map { engine.buildPeakPyramid(it.buffer) } }
-    val gains = remember(pyramids) { pyramids.map { waveformDisplayGain(it) } }
     val length = track.clips.maxOfOrNull { it.startFrame + it.lengthFrames } ?: 0L
     var menuOpen by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
@@ -428,6 +447,11 @@ private fun LayerCard(
     val currentOnSeek by rememberUpdatedState(onSeek)
     val waveColor = lerp(color, Color.Black, 0.25f)
     val playheadColor = MaterialTheme.colorScheme.primary
+    // Trim mode (voice-notes style): the layer's kept window, while editing.
+    val layerStart = track.clips.minOfOrNull { it.startFrame } ?: 0L
+    var trim by remember(track.clips) { mutableStateOf<Pair<Long, Long>?>(null) }
+    val currentTrim by rememberUpdatedState(trim)
+    val handleColor = MaterialTheme.colorScheme.primary
 
     Surface(
         shape = RoundedCornerShape(18.dp),
@@ -453,14 +477,15 @@ private fun LayerCard(
                         color = SongNotesTheme.colors.muted,
                     )
                 }
-                IconButton(onClick = onMuteToggle, enabled = editsEnabled) {
+                // Mute/solo/volume stay live during playback and recording.
+                IconButton(onClick = onMuteToggle) {
                     Icon(
                         if (track.muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                         contentDescription = if (track.muted) "Unmute" else "Mute",
                         tint = if (track.muted) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                IconButton(onClick = onSoloToggle, enabled = editsEnabled) {
+                IconButton(onClick = onSoloToggle) {
                     Icon(
                         if (track.soloed) Icons.Filled.Headset else Icons.Filled.HeadsetOff,
                         contentDescription = if (track.soloed) "Unsolo" else "Solo",
@@ -468,15 +493,22 @@ private fun LayerCard(
                     )
                 }
                 Box {
-                    IconButton(onClick = { menuOpen = true }, enabled = editsEnabled) {
+                    IconButton(onClick = { menuOpen = true }) {
                         Icon(Icons.Filled.MoreVert, contentDescription = "Layer options")
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        DropdownMenuItem(text = { Text("Rename") }, onClick = { menuOpen = false; renaming = true })
+                        DropdownMenuItem(
+                            text = { Text("Trim") },
+                            leadingIcon = { Icon(Icons.Filled.ContentCut, contentDescription = null) },
+                            enabled = editsEnabled && length > layerStart,
+                            onClick = { menuOpen = false; trim = layerStart to length },
+                        )
+                        DropdownMenuItem(text = { Text("Rename") }, enabled = editsEnabled, onClick = { menuOpen = false; renaming = true })
                         DropdownMenuItem(text = { Text("Volume") }, onClick = { menuOpen = false; volumeOpen = true })
                         DropdownMenuItem(
                             text = { Text("Delete layer", color = MaterialTheme.colorScheme.error) },
                             leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                            enabled = editsEnabled,
                             onClick = { menuOpen = false; onDelete() },
                         )
                     }
@@ -489,9 +521,47 @@ private fun LayerCard(
                     .height(52.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .background(color.copy(alpha = 0.16f))
-                    .pointerInput(timelineFrames) {
+                    .then(waveformModifier)
+                    .pointerInput(timelineFrames, trim != null) {
+                        if (currentTrim != null) return@pointerInput
                         detectTapGestures { offset ->
-                            currentOnSeek((offset.x / size.width * timelineFrames).toLong().coerceAtLeast(0L))
+                            currentOnSeek((offset.x / size.width * timelineFrames).toLong().coerceAtLeast(0L), true)
+                        }
+                    }
+                    .pointerInput(timelineFrames, trim != null, layerStart, length) {
+                        fun frameAt(x: Float) = (x / size.width * timelineFrames).toLong().coerceIn(0L, timelineFrames)
+                        if (currentTrim == null) {
+                            // Drag along a layer to scrub the playhead (sideways
+                            // only, so the list still scrolls vertically).
+                            var last = 0L
+                            detectHorizontalDragGestures(
+                                onDragEnd = { currentOnSeek(last, true) },
+                                onDragCancel = { currentOnSeek(last, true) },
+                            ) { change, _ ->
+                                change.consume()
+                                last = frameAt(change.position.x)
+                                currentOnSeek(last, false)
+                            }
+                        } else {
+                            // Drag whichever trim handle is nearer the finger.
+                            var movingStart = true
+                            val minFrames = kSampleRate / 10L
+                            detectHorizontalDragGestures(
+                                onDragStart = { offset ->
+                                    val (a, b) = currentTrim ?: return@detectHorizontalDragGestures
+                                    val f = frameAt(offset.x)
+                                    movingStart = kotlin.math.abs(f - a) <= kotlin.math.abs(f - b)
+                                },
+                            ) { change, _ ->
+                                change.consume()
+                                val (a, b) = currentTrim ?: return@detectHorizontalDragGestures
+                                val f = frameAt(change.position.x)
+                                trim = if (movingStart) {
+                                    f.coerceIn(layerStart, b - minFrames) to b
+                                } else {
+                                    a to f.coerceIn(a + minFrames, length)
+                                }
+                            }
                         }
                     },
             ) {
@@ -510,13 +580,42 @@ private fun LayerCard(
                                 top = 4f,
                                 height = size.height - 8f,
                                 color = waveColor,
-                                displayGain = gains[i],
                             )
                         }
                     }
                 }
-                val px = (positionFrame.toDouble() / timelineFrames * size.width).toFloat()
-                drawLine(playheadColor, Offset(px, 0f), Offset(px, size.height), strokeWidth = 2.5.dp.toPx())
+                val window = trim
+                if (window != null) {
+                    // Dim what will be cut, and draw the two handles.
+                    val xs = (window.first / framesPerPx).toFloat()
+                    val xe = (window.second / framesPerPx).toFloat()
+                    val dim = Color.Black.copy(alpha = 0.35f)
+                    drawRect(dim, topLeft = Offset(0f, 0f), size = Size(xs, size.height))
+                    drawRect(dim, topLeft = Offset(xe, 0f), size = Size(size.width - xe, size.height))
+                    val w = 6.dp.toPx()
+                    drawRoundRect(handleColor, topLeft = Offset(xs, 0f), size = Size(w, size.height), cornerRadius = CornerRadius(w / 2f))
+                    drawRoundRect(handleColor, topLeft = Offset(xe - w, 0f), size = Size(w, size.height), cornerRadius = CornerRadius(w / 2f))
+                } else {
+                    // The playhead, with a knob on top so it reads as something to grab.
+                    val px = (positionFrame.toDouble() / timelineFrames * size.width).toFloat()
+                    drawLine(playheadColor, Offset(px, 0f), Offset(px, size.height), strokeWidth = 2.5.dp.toPx())
+                    drawCircle(playheadColor, radius = 5.dp.toPx(), center = Offset(px, 5.dp.toPx()))
+                }
+            }
+            trim?.let { (start, end) ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp, end = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Keep ${formatClockFrames(start)} – ${formatClockFrames(end)}",
+                        style = MaterialTheme.typography.labelMedium.copy(fontFamily = FontFamily.Monospace),
+                        color = SongNotesTheme.colors.muted,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { trim = null }) { Text("Cancel") }
+                    Button(onClick = { onTrim(start, end); trim = null }) { Text("Trim") }
+                }
             }
         }
     }
@@ -569,10 +668,9 @@ private fun RecordingLayerCard(rec: RecordingPreview, timelineFrames: Long) {
                 val pxPerFrame = size.width / timelineFrames.toFloat()
                 val x0 = rec.startFrame * pxPerFrame
                 val barW = (rec.framesPerPeak * pxPerFrame).coerceAtLeast(1f)
-                val gain = waveformDisplayGain(rec.peaks.maxOrNull() ?: 0f)
                 val mid = size.height / 2f
                 rec.peaks.forEachIndexed { i, peak ->
-                    val h = (waveformDisplayLevel(peak, gain) * (mid - 3f)).coerceAtLeast(1f)
+                    val h = (peak.coerceIn(0f, 1f) * (mid - 3f)).coerceAtLeast(1f)
                     drawRect(RecordRed, topLeft = Offset(x0 + i * barW, mid - h), size = Size(barW * 0.8f, h * 2f))
                 }
             }
@@ -595,6 +693,8 @@ private fun SimpleTransport(
     isPlaying: Boolean,
     canPlay: Boolean,
     positionFrame: Long,
+    timelineFrames: Long,
+    onSeek: (Long, Boolean) -> Unit,
     timeCaption: String?,
     layerCount: Int,
     meterPeakMilli: Int,
@@ -643,6 +743,14 @@ private fun SimpleTransport(
             if (isRecording) {
                 Spacer(Modifier.height(8.dp))
                 InputLevelMeter(meterPeakMilli, meterClipped, modifier = Modifier.width(180.dp).height(6.dp))
+            } else {
+                Spacer(Modifier.height(6.dp))
+                SeekBar(
+                    positionFrame = positionFrame,
+                    timelineFrames = timelineFrames,
+                    onSeek = onSeek,
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
             Spacer(Modifier.height(if (vertical) 8.dp else 14.dp))
             val buttons: @Composable () -> Unit = {
@@ -684,6 +792,47 @@ private fun SimpleTransport(
             }
         }
     }
+}
+
+/**
+ * The seeker: the playhead's position across the whole demo. Tap or drag
+ * anywhere along it; during playback, letting go jumps playback there.
+ */
+@Composable
+private fun SeekBar(positionFrame: Long, timelineFrames: Long, onSeek: (Long, Boolean) -> Unit, modifier: Modifier = Modifier) {
+    val currentOnSeek by rememberUpdatedState(onSeek)
+    val track = MaterialTheme.colorScheme.surfaceContainerHighest
+    val fill = MaterialTheme.colorScheme.primary
+    Canvas(
+        modifier = modifier
+            .height(28.dp)
+            .pointerInput(timelineFrames) {
+                detectTapGestures { currentOnSeek((it.x / size.width * timelineFrames).toLong().coerceIn(0L, timelineFrames), true) }
+            }
+            .pointerInput(timelineFrames) {
+                var last = 0L
+                detectHorizontalDragGestures(
+                    onDragEnd = { currentOnSeek(last, true) },
+                    onDragCancel = { currentOnSeek(last, true) },
+                ) { change, _ ->
+                    change.consume()
+                    last = (change.position.x / size.width * timelineFrames).toLong().coerceIn(0L, timelineFrames)
+                    currentOnSeek(last, false)
+                }
+            },
+    ) {
+        val mid = size.height / 2f
+        val h = 4.dp.toPx()
+        val x = (positionFrame.toDouble() / timelineFrames * size.width).toFloat().coerceIn(0f, size.width)
+        drawRoundRect(track, topLeft = Offset(0f, mid - h / 2f), size = Size(size.width, h), cornerRadius = CornerRadius(h / 2f))
+        drawRoundRect(fill, topLeft = Offset(0f, mid - h / 2f), size = Size(x, h), cornerRadius = CornerRadius(h / 2f))
+        drawCircle(fill, radius = 8.dp.toPx(), center = Offset(x, mid))
+    }
+}
+
+private fun formatClockFrames(frame: Long): String {
+    val tenths = frame * 10 / kSampleRate
+    return "%d:%02d.%d".format(tenths / 600, (tenths / 10) % 60, tenths % 10)
 }
 
 @Composable

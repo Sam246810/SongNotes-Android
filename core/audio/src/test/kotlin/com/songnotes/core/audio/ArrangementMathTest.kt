@@ -96,6 +96,20 @@ class ArrangementMathTest {
     }
 
     @Test
+    fun `trimming a layer crops its clips in place and drops ones outside`() {
+        val a = clip(start = 0, length = 100, offset = 0, bufferSize = 100)
+        val b = clip(start = 200, length = 100, offset = 20, bufferSize = 120)
+        val c = clip(start = 400, length = 50)
+        val p = MultitrackProject(tracks = listOf(MultitrackTrackSpec(clips = listOf(a, b, c))))
+        val trimmed = p.trimTrack(0, startFrame = 50, endFrame = 250).tracks[0].clips
+        assertEquals(2, trimmed.size) // c is entirely after the window
+        assertEquals(Triple(50L, 50L, 50L), Triple(trimmed[0].startFrame, trimmed[0].bufferOffsetFrames, trimmed[0].lengthFrames))
+        assertEquals(Triple(200L, 20L, 50L), Triple(trimmed[1].startFrame, trimmed[1].bufferOffsetFrames, trimmed[1].lengthFrames))
+        assertSame(a.buffer, trimmed[0].buffer)
+        assertEquals(p, p.trimTrack(0, startFrame = 300, endFrame = 300)) // empty window: no-op
+    }
+
+    @Test
     fun `delete removes only the targeted clip`() {
         val p = MultitrackProject(tracks = listOf(MultitrackTrackSpec(clips = listOf(clip(0, 10), clip(20, 10)))))
         assertEquals(listOf(20L), p.deleteClip(0, 0).tracks[0].clips.map { it.startFrame })

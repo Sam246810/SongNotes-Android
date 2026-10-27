@@ -444,14 +444,17 @@ fun TrackHeader(
                         style = MaterialTheme.typography.labelLarge,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.clickable(enabled = enabled) { menuOpen = true },
+                        // Always openable: volume works mid-playback; the
+                        // structural items wait until playback/recording stops.
+                        modifier = Modifier.clickable { menuOpen = true },
                     )
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        DropdownMenuItem(text = { Text("Rename") }, onClick = { menuOpen = false; renaming = true })
+                        DropdownMenuItem(text = { Text("Rename") }, enabled = enabled, onClick = { menuOpen = false; renaming = true })
                         if (compact) DropdownMenuItem(text = { Text("Volume") }, onClick = { menuOpen = false; volumeOpen = true })
                         DropdownMenuItem(
                             text = { Text("Delete track", color = MaterialTheme.colorScheme.error) },
                             leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                            enabled = enabled,
                             onClick = { menuOpen = false; onDelete() },
                         )
                     }
@@ -473,8 +476,9 @@ fun TrackHeader(
                     enabled = enabled,
                     onClick = onArm,
                 )
-                HeaderToggle("M", null, track.muted, MuteGray, if (track.muted) "Unmute" else "Mute", enabled, onMuteToggle)
-                HeaderToggle("S", null, track.soloed, SoloBlue, if (track.soloed) "Unsolo" else "Solo", enabled, onSoloToggle)
+                // Mute/solo/volume stay live during playback and recording.
+                HeaderToggle("M", null, track.muted, MuteGray, if (track.muted) "Unmute" else "Mute", true, onMuteToggle)
+                HeaderToggle("S", null, track.soloed, SoloBlue, if (track.soloed) "Unsolo" else "Solo", true, onSoloToggle)
                 if (showMeter) {
                     Spacer(Modifier.width(2.dp))
                     InputLevelMeter(meterPeakMilli, meterClipped, modifier = Modifier.weight(1f).height(6.dp))
@@ -486,7 +490,6 @@ fun TrackHeader(
                     onValueChange = { draggingGain = it },
                     onValueChangeFinished = { draggingGain?.let(onGainChange); draggingGain = null },
                     valueRange = 0f..2f,
-                    enabled = enabled,
                     colors = SliderDefaults.colors(thumbColor = color, activeTrackColor = color),
                     modifier = Modifier.fillMaxWidth().height(20.dp),
                 )

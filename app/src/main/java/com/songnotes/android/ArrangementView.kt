@@ -407,7 +407,8 @@ fun ArrangementView(
                         drawGrid(pxPerBeat, scrollX, gridUnitBeats, beatsPerBar, gridColor, barColor, height = tracks.size * laneHeightPx - scrollY)
                     }
 
-                    // Clips.
+                    // Clips. The first one is the tour's "a clip" to point at.
+                    val firstClip = tracks.indexOfFirst { it.clips.isNotEmpty() }.takeIf { it >= 0 }?.let { ClipRef(it, 0) }
                     tracks.forEachIndexed { trackIndex, track ->
                         val color = trackColor(track.colorIndex)
                         val audible = !track.muted && (tracks.none { it.soloed } || track.soloed)
@@ -435,6 +436,11 @@ fun ArrangementView(
                                     },
                                     onMove = onMoveClip,
                                     onTrim = onTrimClip,
+                                    extraModifier = if (ClipRef(trackIndex, clipIndex) == firstClip) {
+                                        Modifier.tutorialTarget(tutorialTargets, "first_clip")
+                                    } else {
+                                        Modifier
+                                    },
                                 )
                             }
                         }
@@ -474,29 +480,6 @@ fun ArrangementView(
             }
         }
     }
-}
-
-/**
- * How much to scale a clip's waveform for display: phone-mic takes are often
- * very quiet (a real take here peaked at 0.035, about -29 dBFS), which at true
- * scale is a flat line. Like a voice-notes app, each clip is scaled to its own
- * loudest point, capped so near-silence stays flat instead of turning into
- * amplified noise. Display only; the audio is untouched.
- */
-internal fun waveformDisplayGain(peak: Float): Float =
-    if (peak < 1e-4f) 1f else (0.95f / peak).coerceIn(1f, 40f)
-
-internal fun waveformDisplayGain(pyramid: PeakPyramid): Float {
-    val level = pyramid.levels.lastOrNull() ?: return 1f
-    var peak = 0f
-    for (i in 0 until level.peakCount) peak = maxOf(peak, -level.mins[i], level.maxes[i])
-    return waveformDisplayGain(peak)
-}
-
-/** A sample (or peak) mapped to -1..1 for drawing: [gain]-scaled, with a gentle curve so quiet detail shows. */
-internal fun waveformDisplayLevel(sample: Float, gain: Float): Float {
-    val v = (abs(sample) * gain).coerceAtMost(1f)
-    return Math.copySign(Math.pow(v.toDouble(), 0.75).toFloat(), sample)
 }
 
 /** The arrangement's scrollable extent; see its use in [ArrangementView]. */
@@ -675,9 +658,9 @@ private fun ArrangementClip(
     onSelect: (ClipRef, Long) -> Unit,
     onMove: (ClipRef, Int, MultitrackClipSpec) -> Unit,
     onTrim: (ClipRef, MultitrackClipSpec) -> Unit,
+    extraModifier: Modifier = Modifier,
 ) {
     val pyramid = remember(clip.buffer) { engine.buildPeakPyramid(clip.buffer) }
-    val displayGain = remember(pyramid) { waveformDisplayGain(pyramid) }
     val density = LocalDensity.current
     var gesture by remember { mutableStateOf<ClipGesture?>(null) }
     var dragDx by remember { mutableFloatStateOf(0f) }
@@ -733,6 +716,7 @@ private fun ArrangementClip(
             .offset { IntOffset(left.roundToInt(), top.roundToInt()) }
             .size(with(density) { (right - left).toDp() }, with(density) { height.toDp() })
             .alpha(if (audible) 1f else 0.45f)
+            .then(extraModifier)
             .pointerInput(ref, editable, selected, snapUnitFrames, framesPerPx) {
                 if (!editable) return@pointerInput
                 detectDragGestures(
@@ -794,7 +778,6 @@ private fun ArrangementClip(
                 top = headerPx + 2f,
                 height = size.height - headerPx - 4f,
                 color = waveColor,
-                displayGain = displayGain,
             )
             if (selected) {
                 drawRoundRect(selectionColor, cornerRadius = radius, style = Stroke(width = 2.5.dp.toPx()))
@@ -827,7 +810,6 @@ internal fun DrawScope.drawClipWaveform(
     top: Float,
     height: Float,
     color: Color,
-    displayGain: Float = 1f,
 ) {
     if (height <= 0f || clip.lengthFrames <= 0L) return
     val mid = top + height / 2f
@@ -859,8 +841,10 @@ internal fun DrawScope.drawClipWaveform(
                 if (s > hi) hi = s
             }
         }
-        val yTop = mid - waveformDisplayLevel(hi, displayGain) * half
-        val yBottom = mid - waveformDisplayLevel(lo, displayGain) * half
+        // True amplitude, deliberately not normalised: how big the waveform
+        // looks is how loud the take is.
+        val yTop = mid - hi.coerceIn(-1f, 1f) * half
+        val yBottom = mid - lo.coerceIn(-1f, 1f) * half
         drawRect(color, topLeft = Offset(col.toFloat(), yTop), size = Size(1f, (yBottom - yTop).coerceAtLeast(1f)))
     }
 }
@@ -898,12 +882,10 @@ private fun RecordingClip(
         val half = (size.height - headerPx) / 2f - 2f
         val pxPerPeak = (rec.framesPerPeak / framesPerPx).toFloat()
         val offset = left - fullLeft
-        // Same display scaling as finished clips, against the loudest level so far.
-        val liveGain = waveformDisplayGain(rec.peaks.maxOrNull() ?: 0f)
         rec.peaks.forEachIndexed { i, peak ->
             val x = i * pxPerPeak - offset
             if (x < -pxPerPeak || x > size.width) return@forEachIndexed
-            val h = (waveformDisplayLevel(peak, liveGain) * half).coerceAtLeast(1f)
+            val h = (peak.coerceIn(0f, 1f) * half).coerceAtLeast(1f)
             drawRect(red, topLeft = Offset(x, mid - h), size = Size(pxPerPeak.coerceAtLeast(1f) * 0.8f, h * 2f))
         }
     }

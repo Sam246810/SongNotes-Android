@@ -166,6 +166,15 @@ public:
     // regardless (it's only there when the user chose a count-in).
     void setMetronomeOn(bool on) { mMetronomeOn.store(on, std::memory_order_relaxed); }
 
+    // Changes the gain/mute/solo of the tracks currently playing (or backing
+    // a take) without restarting: republishes the current scene with the
+    // new flags, sharing every clip's audio. The arrays must match the
+    // scene's track list (during a take that's every track except the one
+    // being recorded). Returns false if nothing multitrack is loaded or the
+    // count doesn't match.
+    bool setMultitrackMix(const std::vector<float> &gains, const std::vector<bool> &muted,
+                          const std::vector<bool> &soloed);
+
     EngineStateBlock *stateBlock() { return &mState; }
 
     // oboe::AudioStreamDataCallback

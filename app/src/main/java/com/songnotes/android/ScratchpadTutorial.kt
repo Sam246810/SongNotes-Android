@@ -1,6 +1,15 @@
 package com.songnotes.android
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.geometry.Size
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -55,11 +64,63 @@ class TutorialTargets {
     val bounds = mutableStateMapOf<String, Rect>()
 }
 
+/**
+ * The animated cue for a step, within its target [r]: a pulsing touch point
+ * for a tap, a touch point sliding along a drag, or the left and right
+ * edges flashing (a clip's trim tabs). [t] runs 0..1 and repeats.
+ */
+private fun DrawScope.drawTourHint(hint: TourHint, r: Rect, t: Float, color: Color) {
+    val finger = Color.White
+    val radius = 14.dp.toPx()
+    fun touch(at: Offset, alpha: Float) {
+        drawCircle(color.copy(alpha = 0.35f * alpha), radius = radius * 1.8f, center = at)
+        drawCircle(finger.copy(alpha = 0.9f * alpha), radius = radius, center = at)
+        drawCircle(color.copy(alpha = alpha), radius = radius, center = at, style = Stroke(width = 3.dp.toPx()))
+    }
+    when (hint) {
+        TourHint.None -> Unit
+        TourHint.Tap -> {
+            // Press, hold, lift: a ripple growing out from the centre.
+            val press = if (t < 0.5f) t * 2f else 1f
+            drawCircle(color.copy(alpha = 0.5f * (1f - press)), radius = radius * (1f + 2f * press), center = r.center)
+            touch(r.center, 1f)
+        }
+        TourHint.DragSideways -> {
+            val travel = (t * 1.25f).coerceAtMost(1f) // short pause at the end
+            val x = r.left + r.width * (0.2f + 0.6f * travel)
+            val y = r.center.y
+            drawLine(color.copy(alpha = 0.5f), Offset(r.left + r.width * 0.2f, y), Offset(x, y), strokeWidth = 4.dp.toPx())
+            touch(Offset(x, y), 1f - (t - 0.8f).coerceAtLeast(0f) * 5f)
+        }
+        TourHint.DragDown -> {
+            val travel = (t * 1.25f).coerceAtMost(1f)
+            val x = r.center.x
+            val y = r.top + r.height * (0.2f + 0.5f * travel)
+            drawLine(color.copy(alpha = 0.5f), Offset(x, r.top + r.height * 0.2f), Offset(x, y), strokeWidth = 4.dp.toPx())
+            touch(Offset(x, y), 1f - (t - 0.8f).coerceAtLeast(0f) * 5f)
+        }
+        TourHint.Edges -> {
+            // Flash both edges, twice a cycle.
+            val flash = (kotlin.math.sin(t * 4f * Math.PI.toFloat()) * 0.5f + 0.5f)
+            val w = 10.dp.toPx()
+            val inset = 2.dp.toPx()
+            val top = r.top + r.height * 0.15f
+            val h = r.height * 0.7f
+            listOf(r.left + inset, r.right - inset - w).forEach { x ->
+                drawRoundRect(color.copy(alpha = 0.25f + 0.75f * flash), topLeft = Offset(x, top), size = Size(w, h), cornerRadius = CornerRadius(w / 2f))
+            }
+        }
+    }
+}
+
 /** Registers this element's on-screen bounds under [key] for the tutorial's spotlight. */
 fun Modifier.tutorialTarget(targets: TutorialTargets?, key: String): Modifier =
     if (targets == null) this else onGloballyPositioned { targets.bounds[key] = it.boundsInWindow() }
 
-private data class TutorialStep(val target: String?, val title: String, val body: String)
+/** An animated cue drawn over a step's spotlight, showing the gesture the card describes. */
+private enum class TourHint { None, Tap, DragSideways, DragDown, Edges }
+
+private data class TutorialStep(val target: String?, val title: String, val body: String, val hint: TourHint = TourHint.None)
 
 private const val SavedOnPhone =
     "Every change saves automatically, on this phone and offline, as this song's own demo. You don't need an " +
@@ -71,16 +132,24 @@ private val SimpleSteps = listOf(
         "simple_record",
         "Record a layer",
         "Tap the big red button and sing, hum or play. Tap it again to stop. Every take becomes a new layer that plays along with the ones before it, so you can stack harmonies and parts.",
+        TourHint.Tap,
     ),
     TutorialStep(
         "simple_metronome",
         "Keep time",
         "Tap the metronome to switch the click on or off, even mid-take. Tap the tempo to change it; the little ▾ sets a count-in before you start.",
+        TourHint.Tap,
+    ),
+    TutorialStep(
+        "first_layer_wave",
+        "Scrub through your demo",
+        "This is a layer's waveform (here, an example; your own takes will look like this). Drag along it, or along the bar under the clock, to move the playhead: play starts there, and so does your next layer.",
+        TourHint.DragSideways,
     ),
     TutorialStep(
         "simple_layers",
         "Your layers",
-        "Each layer has mute, solo and a ⋮ menu for volume, renaming and deleting. Tap a waveform to move the playhead: play starts there, and so does your next layer.",
+        "Each layer has mute and solo, which work even while it plays, and a ⋮ menu for volume, renaming, deleting, and Trim to cut a take's start or end.",
     ),
     TutorialStep(null, "Saved on this phone", SavedOnPhone),
     TutorialStep(
@@ -101,21 +170,31 @@ private val AdvancedSteps = listOf(
         "record",
         "Record a take",
         "Arm a track with its red ● button, then tap Record. The take lands at the insert marker, the dashed line, and you can keep recording while you look at your lyrics.",
+        TourHint.Tap,
     ),
     TutorialStep(
         "ruler",
         "Move the insert marker",
         "The insert marker is grabbed up here, in the ruler: tap anywhere along it, or put your finger on the ruler and drag, to move it. Play starts from the marker and new takes land on it. Pinch to zoom; drag empty space to scroll. The closer you zoom, the finer clips snap.",
+        TourHint.DragSideways,
     ),
     TutorialStep(
-        "lanes",
-        "Shape your clips",
-        "Tap a clip to select it. Drag it to move it, even onto another track. Drag the tabs at its edges to trim. Split, Duplicate and Delete appear while it's selected, and Undo is always in the top bar.",
+        "first_clip",
+        "This is a clip",
+        "Each take is a clip (this one's an example; yours will look the same). Tap a clip to select it, then drag it to move it, even onto another track.",
+        TourHint.DragSideways,
+    ),
+    TutorialStep(
+        "first_clip",
+        "Trim from the edges",
+        "A selected clip has a tab at each edge (flashing here). Drag a tab inward to trim that end; the audio stays put, you're just hiding part of it. Split, Duplicate and Delete appear while a clip is selected, and Undo is always in the top bar.",
+        TourHint.Edges,
     ),
     TutorialStep(
         "headers",
         "Tracks",
-        "Each track has Arm, Mute and Solo. Tap its name to rename or delete it. Swipe the track list to scroll; long-press and drag a track to reorder it. Add tracks from the empty lane underneath.",
+        "Each track has Arm, Mute and Solo (mute and solo work mid-playback). Tap its name to rename or delete it. Swipe the track list to scroll; long-press and drag a track to reorder it. Add tracks from the empty lane underneath.",
+        TourHint.DragDown,
     ),
     TutorialStep(
         null,
@@ -134,11 +213,25 @@ private val AdvancedSteps = listOf(
  * the user takes it up.
  */
 @Composable
-fun ScratchpadTutorial(mode: ScratchpadMode, targets: TutorialTargets, onFinish: (switchToAdvanced: Boolean) -> Unit) {
+fun ScratchpadTutorial(
+    mode: ScratchpadMode,
+    targets: TutorialTargets,
+    onFinish: (switchToAdvanced: Boolean) -> Unit,
+    /** Each step's spotlight key as it shows, so the screen can stage it (e.g. select the example clip). */
+    onStep: (target: String?) -> Unit = {},
+) {
     val steps = if (mode == ScratchpadMode.SIMPLE) SimpleSteps else AdvancedSteps
     val offersAdvanced = mode == ScratchpadMode.SIMPLE
     var index by remember(mode) { mutableIntStateOf(0) }
     val step = steps[index.coerceAtMost(steps.lastIndex)]
+    LaunchedEffect(step) { onStep(step.target) }
+    val hintAnim = rememberInfiniteTransition(label = "hint")
+    val hintT by hintAnim.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1400, easing = LinearEasing), RepeatMode.Restart),
+        label = "hintT",
+    )
     var originInWindow by remember { mutableStateOf(Offset.Zero) }
     var cardHeightPx by remember { mutableIntStateOf(0) }
     val density = LocalDensity.current
@@ -172,6 +265,7 @@ fun ScratchpadTutorial(mode: ScratchpadMode, targets: TutorialTargets, onFinish:
                     ring.copy(alpha = fade), topLeft = hole.topLeft, size = hole.size,
                     cornerRadius = CornerRadius(corner), style = Stroke(width = 3.dp.toPx()),
                 )
+                drawTourHint(step.hint, r, hintT, ring)
             }
         }
 

@@ -388,6 +388,27 @@ bool NativeAudioEngine::startMultitrackPlayback(const std::vector<dsp::Track> &t
     return ensureOutputStarted();
 }
 
+bool NativeAudioEngine::setMultitrackMix(const std::vector<float> &gains, const std::vector<bool> &muted,
+                                         const std::vector<bool> &soloed) {
+    const auto current = mScenePublisher.latest();
+    if (!current || !current->multitrack) return false;
+    const size_t count = current->multitrack->size();
+    if (gains.size() != count || muted.size() != count || soloed.size() != count) return false;
+    // Copying the track list copies clip metadata and shared_ptrs only; the
+    // audio itself is shared with the scene the RT thread may be reading.
+    auto tracks = std::make_shared<std::vector<dsp::Track>>(*current->multitrack);
+    for (size_t i = 0; i < count; i++) {
+        (*tracks)[i].gain = gains[i];
+        (*tracks)[i].muted = muted[i];
+        (*tracks)[i].soloed = soloed[i];
+    }
+    auto scene = std::make_shared<Scene>();
+    scene->playbackBuffer = current->playbackBuffer;
+    scene->multitrack = tracks;
+    mScenePublisher.publish(scene);
+    return true;
+}
+
 void NativeAudioEngine::stopPlayback() { stopPlaybackInternal(); }
 
 void NativeAudioEngine::stopPlaybackInternal() {

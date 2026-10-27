@@ -112,6 +112,33 @@ data class MultitrackProject(
     }
 
     /**
+     * Voice-notes style trim of a whole track to project frames
+     * [startFrame, endFrame): every clip is cropped to that window (the
+     * audio stays where it is in time) and clips entirely outside it are
+     * dropped. Simple mode's "Trim" on a layer.
+     */
+    fun trimTrack(index: Int, startFrame: Long, endFrame: Long): MultitrackProject {
+        if (index !in tracks.indices || endFrame <= startFrame) return this
+        return updateTrack(index) { t ->
+            t.copy(
+                clips = t.clips.mapNotNull { c ->
+                    val newStart = maxOf(c.startFrame, startFrame)
+                    val newEnd = minOf(c.startFrame + c.lengthFrames, endFrame)
+                    if (newEnd <= newStart) {
+                        null
+                    } else {
+                        c.copy(
+                            startFrame = newStart,
+                            bufferOffsetFrames = c.bufferOffsetFrames + (newStart - c.startFrame),
+                            lengthFrames = newEnd - newStart,
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    /**
      * Ableton's Duplicate: a copy placed right after the clip, replacing
      * whatever it lands on (spliced via [AudioEngine.punchIn], like a take).
      * Shares the original's buffer.

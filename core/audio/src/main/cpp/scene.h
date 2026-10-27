@@ -3,6 +3,7 @@
 #include <atomic>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "dsp/track_mixer.h"
@@ -31,9 +32,9 @@ struct Scene {
 // long as publishes don't happen far faster than audio callbacks return —
 // they don't; loading a new take is a human-triggered, sub-Hz event.
 //
-// publish() must only be called from one thread at a time (the loader
-// thread in this phase). current() must only be called from the audio
-// callback thread.
+// publish() and latest() may be called from any non-RT thread (the loader
+// thread, JNI calls from the UI); a mutex serializes them. current() is the
+// audio callback's: one atomic load, never the mutex.
 class ScenePublisher {
 public:
     ScenePublisher() {
@@ -43,6 +44,7 @@ public:
     }
 
     void publish(std::shared_ptr<Scene> next) {
+        std::lock_guard<std::mutex> lock(mMutex);
         mCurrent.store(next.get(), std::memory_order_release);
         mRetired.push_back(std::move(next));
         constexpr size_t kKeepGenerations = 4;
@@ -51,12 +53,20 @@ public:
         }
     }
 
+    // The most recently published scene, owned, for building the next one
+    // from it (e.g. a mix change during playback). Non-RT only.
+    std::shared_ptr<Scene> latest() {
+        std::lock_guard<std::mutex> lock(mMutex);
+        return mRetired.back();
+    }
+
     // RT-safe: one atomic load, no allocation, no locks.
     const Scene *current() const { return mCurrent.load(std::memory_order_acquire); }
 
 private:
     std::atomic<Scene *> mCurrent;
-    std::deque<std::shared_ptr<Scene>> mRetired; // touched only by the publishing thread
+    std::mutex mMutex;
+    std::deque<std::shared_ptr<Scene>> mRetired; // guarded by mMutex
 };
 
 } // namespace songnotes

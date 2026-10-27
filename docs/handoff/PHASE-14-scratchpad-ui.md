@@ -350,3 +350,45 @@ to the bottom via headers and lanes; visible waveforms; the Simple tour →
 Try it → Advanced tour; recording in Simple adds a new layer with its take;
 Settings rows. **Not verified:** rotation itself. Turning the phone or
 changing its rotation settings wasn't done remotely.
+
+## §10 Feedback round 2: trim and seek in Simple, live mix, true waveforms, tour example
+
+- **Waveforms back to true amplitude** (the user's call: the waveform should
+  show how loud the take really is). §9's per-clip display normalisation is
+  removed from both modes.
+- **Mute/solo/volume work during playback and recording**, in both modes.
+  The engine snapshotted each track's mix when playback (or a take's backing
+  tracks) started. New native `setMultitrackMix(gains, muted, soloed)`
+  republishes the current scene with new flags, sharing every clip's audio
+  (`ScenePublisher` gained a mutex and `latest()` so non-RT threads can
+  build on the current scene). `ScratchpadScreen` pushes the mix whenever
+  it changes while playing/recording; during an Advanced take the engine's
+  list excludes the armed track. The controls stay enabled; rename, delete
+  and arm still wait until playback/recording stops. Verified on device:
+  toggling mute and solo mid-playback doesn't interrupt it (audibility not
+  checked by ear, since the phone was muted).
+- **Simple mode seeker**: drag along any layer's waveform (sideways only, so
+  the list still scrolls), or along a new seek bar under the clock; the
+  playhead has a knob. While playing, a drag previews and letting go jumps
+  playback there.
+- **Simple mode Trim** (⋮ → Trim on a layer): two handles over the layer's
+  waveform, the cut-away parts dimmed, "Keep 0:03.8 – 0:11.0", Cancel /
+  Trim. `MultitrackProject.trimTrack` crops every clip of the layer to the
+  window in place and drops clips entirely outside it (tested in
+  `ArrangementMathTest`). It only shrinks (bounded by the layer's own audio),
+  like a voice-notes app, and it's one undo step.
+- **Tour example demo** (`TutorialExample.kt`): while a tour runs on a song
+  with no audio, both views show a generated example (a hummed-sounding
+  melody and a bass line, labelled "Example: …"), so "tap a clip" has a
+  clip. It's generated in code rather than shipped as a file, display only,
+  and never saved or committed. **Animated hints** over spotlights: a
+  pulsing tap, a touch point sliding along drags (ruler, a clip, a layer's
+  waveform, the track list), and flashing trim edges. The Advanced tour
+  selects the example clip on its trim step so the real tabs show. New
+  steps: "This is a clip" / "Trim from the edges" (Advanced), "Scrub through
+  your demo" (Simple, with the Trim and live mute/solo mentioned).
+
+**Verified on device:** the example demo and hints in the Advanced tour on
+an empty song (that test song was deleted afterwards); seek drag in Simple
+(0:00 → 0:09.1); Trim saved as a crop (start 0 → 3.9 s, buffer offset moved
+by the same amount), then undone; mute/solo during playback.

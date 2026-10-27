@@ -135,6 +135,8 @@ fun ScratchpadScreen(
     var isRecording by remember { mutableStateOf(false) }
     var insertFrame by remember { mutableStateOf(0L) }
     var recordStartFrame by remember { mutableStateOf(0L) }
+    // Where a seek drag is during playback, shown until it's released.
+    var scrubFrame by remember { mutableStateOf<Long?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
     var isExporting by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
@@ -447,6 +449,39 @@ fun ScratchpadScreen(
 
     LaunchedEffect(isRecording) { onRecordingChanged(isRecording) }
 
+    // Mute/solo/volume changes reach what's already playing (or the backing
+    // tracks of a take) live, without restarting. The engine's track list
+    // during a take is every track except the one being recorded onto.
+    val mixFlags = project.tracks.map { Triple(it.gain, it.muted, it.soloed) }
+    LaunchedEffect(mixFlags, isPlaying, isRecording) {
+        if (!isPlaying && !isRecording) return@LaunchedEffect
+        val live = if (isRecording && !recordingNewLayer) {
+            project.tracks.filterIndexed { i, _ -> i != armedTrack }
+        } else {
+            project.tracks
+        }
+        engine.setMultitrackMix(live)
+    }
+
+    // Simple mode's seeker. While playing, dragging only previews (moving
+    // the engine on every frame of a drag would stutter); letting go jumps
+    // playback there, like a voice-notes app.
+    fun seekSimple(frame: Long, done: Boolean) {
+        if (isRecording) return
+        if (!isPlaying) {
+            insertFrame = frame
+            return
+        }
+        if (!done) {
+            scrubFrame = frame
+            return
+        }
+        scrubFrame = null
+        insertFrame = frame
+        engine.stopPlayback()
+        isPlaying = frame < project.totalFrames && project.play(engine, frame)
+    }
+
     fun switchMode(to: ScratchpadMode) {
         if (to == mode) return
         mode = to
@@ -472,6 +507,11 @@ fun ScratchpadScreen(
     }
 
     val recordedSeconds = engineState.framesRecorded / kSampleRate
+    // During a tour on a song with nothing recorded yet, the views show the
+    // example demo instead, so "tap a clip" has a clip. Display only: it's
+    // never committed, saved or played, and it's gone when the tour ends.
+    val showingExample = tutorialMode != null && project.totalFrames == 0L
+    val shownTracks = if (showingExample) TutorialExample.tracks else project.tracks
     // Where the built-in mic is (no permission needed); null if the phone
     // doesn't say. Shown as a pointer while a take is armed or rolling.
     val micNatural = remember { locateBuiltinMic(context) }
@@ -483,6 +523,7 @@ fun ScratchpadScreen(
             val editsEnabled = !isRecording && !isPlaying
             val framesPerBeat = kSampleRate * 60.0 / project.bpm.coerceAtLeast(1.0)
             val positionFrame = when {
+                scrubFrame != null -> scrubFrame!!
                 isPlaying -> engineState.playbackFrame.toLong()
                 isRecording -> recordStartFrame + (engineState.framesRecorded - kPreRollFrames).coerceAtLeast(0)
                 else -> insertFrame
@@ -503,7 +544,7 @@ fun ScratchpadScreen(
                     Box(modifier = Modifier.fillMaxSize()) {
                         SimpleScratchpad(
                             engine = engine,
-                            tracks = project.tracks,
+                            tracks = shownTracks,
                             songTitle = songTitle,
                             landscape = landscape,
                             isRecording = isRecording,
@@ -527,7 +568,7 @@ fun ScratchpadScreen(
                             editsEnabled = editsEnabled,
                             isExporting = isExporting,
                             onBack = onDone,
-                            onSeek = { if (editsEnabled) insertFrame = it },
+                            onSeek = { frame, done -> seekSimple(frame, done) },
                             onRecord = ::onRecordPressed,
                             onPlay = ::togglePlayback,
                             onMetronomeToggle = { commit(project.copy(metronomeOn = !project.metronomeOn)) },
@@ -543,6 +584,7 @@ fun ScratchpadScreen(
                                 commit(project.removeTrack(i))
                                 armedTrack = if (project.tracks.isEmpty()) null else (armedTrack ?: 0).coerceAtMost(project.tracks.lastIndex)
                             },
+                            onTrim = { i, start, end -> commit(project.trimTrack(i, start, end)) },
                             onSwitchToAdvanced = { switchMode(ScratchpadMode.ADVANCED) },
                             onExport = ::exportMixdown,
                             onCalibrate = { showCalibration = true },
@@ -613,7 +655,7 @@ fun ScratchpadScreen(
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         ArrangementView(
                             engine = engine,
-                            tracks = project.tracks,
+                            tracks = shownTracks,
                             bpm = project.bpm,
                             beatsPerBar = project.beatsPerBar,
                             insertFrame = insertFrame,
@@ -760,7 +802,15 @@ fun ScratchpadScreen(
                 }
             }
             tutorialMode?.let { tourMode ->
-                ScratchpadTutorial(tourMode, tutorialTargets, onFinish = { toAdvanced ->
+                ScratchpadTutorial(tourMode, tutorialTargets, onStep = { target ->
+                    // Select the clip the trim step points at, so its tabs show.
+                    selectedClip = if (target == "first_clip") {
+                        shownTracks.indexOfFirst { it.clips.isNotEmpty() }.takeIf { it >= 0 }?.let { ClipRef(it, 0) }
+                    } else {
+                        null
+                    }
+                }, onFinish = { toAdvanced ->
+                    selectedClip = null
                     prefs.setTutorialSeen(tourMode)
                     if (prefs.requestedTutorial == tourMode) prefs.requestedTutorial = null
                     tutorialMode = null
