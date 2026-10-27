@@ -87,6 +87,15 @@ class SongRepository(
     suspend fun existsIncludingDeleted(id: String): Boolean = dao.getByIdIncludingDeleted(id) != null
 
     /**
+     * True only when [id] is a song that was deleted (a tombstone row) -- not
+     * when there's no row at all. Callers cleaning up data stored outside
+     * Room (a song's Scratchpad demo) must treat "no row" as "unknown", never
+     * as "deleted": sync can move a song to a new id, and an id with no row
+     * may simply be one that hasn't been accounted for.
+     */
+    suspend fun isDeleted(id: String): Boolean = dao.getByIdIncludingDeleted(id)?.deletedAt != null
+
+    /**
      * Saves [song] as is, with no merge -- for writers that aren't editing a
      * loaded version (the legacy-JSON import, new songs). The editor uses
      * [saveEdit]. Never resurrects a tombstoned song; see [write] for what's kept.

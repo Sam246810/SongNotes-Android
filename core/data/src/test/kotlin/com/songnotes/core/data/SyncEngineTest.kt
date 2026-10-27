@@ -297,6 +297,20 @@ class SyncEngineTest {
     }
 
     @Test
+    fun `an insert-collision re-id reports the old and new id so the song's demo can follow`() = runBlocking {
+        val moves = mutableListOf<Pair<String, String>>()
+        val reportingEngine = SyncEngine(dao, adapter) { old, new -> moves += old to new }
+        adapter.simulatedCurrentUserId = userId
+        adapter.rows["song-1"] = buildRemoteRow("song-1", rev = 1, title = "Someone Else's Song").copy(user_id = "other-user")
+        dao.upsert(localSong(id = "song-1", rev = 1, remoteRev = null, title = "My New Song"))
+
+        reportingEngine.sync(userId, dek)
+
+        val reIded = dao.rows.values.single { it.title == "My New Song" }
+        assertEquals(listOf("song-1" to reIded.id), moves)
+    }
+
+    @Test
     fun `push includes the local entity's own customChords, barre and all`() = runBlocking {
         val customChordsJson = """{"G":{"frets":[3,5,5,4,3,3],"baseFret":3,"barre":{"fret":3,"fromString":0,"toString":5}}}"""
         dao.upsert(localSong(title = "Has Custom Voicing", customChordsJson = customChordsJson))

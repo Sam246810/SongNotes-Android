@@ -65,6 +65,13 @@ private data class PullResult(val pulled: Int, val unreadable: Int)
 class SyncEngine(
     private val dao: SongDao,
     private val adapter: SongsRemoteAdapter = SupabaseSongsAdapter(),
+    /**
+     * Called after a song is given a new id (the two re-id paths below). A
+     * song's Scratchpad demo lives on disk under its id, outside Room, so
+     * the caller must move it along -- otherwise the demo is orphaned and
+     * the Songs list's orphan sweep used to delete it.
+     */
+    private val onSongReIded: (oldId: String, newId: String) -> Unit = { _, _ -> },
 ) {
     /**
      * @param dekId the envelope `dekId` [dek] came from (see [KeySession]) --
@@ -138,8 +145,10 @@ class SyncEngine(
                     // Never touch a row this device can't read (or that the
                     // account deleted): give the local song a new identity, so
                     // pushPending inserts it as a song of its own.
+                    val newId = UUID.randomUUID().toString()
                     dao.deleteById(cur.id)
-                    dao.upsert(cur.copy(id = UUID.randomUUID().toString(), rev = 1, remoteRev = null, pendingSync = true, baseDocJson = null))
+                    dao.upsert(cur.copy(id = newId, rev = 1, remoteRev = null, pendingSync = true, baseDocJson = null))
+                    onSongReIded(cur.id, newId)
                     return@withLock
                 }
                 val local = cur.toDomain()
@@ -188,6 +197,7 @@ class SyncEngine(
                 val moved = cur.copy(id = UUID.randomUUID().toString(), rev = 1, remoteRev = null, pendingSync = true, baseDocJson = null)
                 dao.deleteById(entity.id)
                 dao.upsert(moved)
+                onSongReIded(entity.id, moved.id)
                 moved
             }
             val inserted = adapter.insert(buildRow(reIdEntity, rev = 1, userId, dek, dekId))

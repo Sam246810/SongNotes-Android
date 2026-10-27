@@ -78,7 +78,7 @@ class SongSyncWorker(context: Context, params: WorkerParameters) : CoroutineWork
             }
 
             val db = SongDatabase.getInstance(applicationContext)
-            val outcome = SyncEngine(db.songDao()).sync(userId, dek, sessionDekId, adopt = adopt)
+            val outcome = SyncEngine(db.songDao(), onSongReIded = ::moveScratchpadDemo).sync(userId, dek, sessionDekId, adopt = adopt)
             if (adopt) prefs.adoptionCompletedForUserId = userId
             prefs.lastSyncAtMs = System.currentTimeMillis()
             prefs.lastSyncError = null
@@ -117,6 +117,22 @@ class SongSyncWorker(context: Context, params: WorkerParameters) : CoroutineWork
      * failure is instead written to [SyncPreferences.lastSyncError] (what the
      * list-screen banner reads) and simply waits for the user's next Sync press.
      */
+    /**
+     * Keeps a song's Scratchpad demo with it when sync gives the song a new
+     * id. The demo lives at `filesDir/scratchpad/<songId>/` (owned by
+     * `:core:audio`'s `MultitrackProjectStorage`); this is a plain directory
+     * rename so `:core:data` needn't depend on `:core:audio`. If the target
+     * somehow exists already, the old folder is left where it is rather than
+     * merged or overwritten -- nothing deletes a folder that has no song row.
+     */
+    private fun moveScratchpadDemo(oldId: String, newId: String) {
+        val root = java.io.File(applicationContext.filesDir, "scratchpad")
+        val from = java.io.File(root, oldId)
+        val to = java.io.File(root, newId)
+        if (!from.exists() || to.exists()) return
+        if (!from.renameTo(to)) Log.w(TAG, "couldn't move scratchpad demo $oldId -> $newId")
+    }
+
     private fun fail(prefs: SyncPreferences, message: String): Result {
         prefs.lastSyncError = message
         return Result.failure(workDataOf(KEY_ERROR to message))

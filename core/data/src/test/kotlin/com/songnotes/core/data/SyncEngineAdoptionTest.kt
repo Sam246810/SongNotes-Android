@@ -127,6 +127,23 @@ class SyncEngineAdoptionTest {
     }
 
     @Test
+    fun `a local id colliding with a remote row deleted on the account gets a new id and reports the move`() = runBlocking {
+        // The song's Scratchpad demo is stored under its id, so the caller
+        // must hear about the new id or the demo is orphaned.
+        val moves = mutableListOf<Pair<String, String>>()
+        val reportingEngine = SyncEngine(dao, adapter) { old, new -> moves += old to new }
+        val local = localSong("song-1", title = "Kept Locally")
+        dao.upsert(local)
+        adapter.rows["song-1"] = remoteRowFor(local, rev = 3).copy(deleted_at = "2026-01-02T00:00:00.000Z")
+
+        reportingEngine.sync(userId, dek, adopt = true)
+
+        val moved = dao.rows.values.single { it.title == "Kept Locally" }
+        assertNotEquals("song-1", moved.id)
+        assertEquals(listOf("song-1" to moved.id), moves)
+    }
+
+    @Test
     fun `a tombstoned song that was never pushed is reclaimed, not pushed as a delete`() = runBlocking {
         dao.upsert(localSong("song-1", deletedAt = 5000L, remoteRev = null))
 

@@ -313,16 +313,19 @@ private suspend fun sweepMigratedLegacyJson(context: android.content.Context, re
  * goes through this screen. Rather than reach into `:core:data` from here
  * (or worse, give it a dependency on `:core:audio` just to delete some
  * files), this runs as a lazy, self-healing sweep on every visit to the
- * list instead: cheap (one folder listing plus one already-tombstone-aware
- * [SongRepository.getById] lookup per entry, and the folder count here is
- * always small), and correct regardless of *how* a song's row ended up
- * gone or tombstoned rather than needing every possible deletion path
- * individually hooked.
+ * list instead: one folder listing plus one lookup per entry, and the
+ * folder count here is always small.
+ *
+ * Only a folder whose song is a tombstone is deleted. A folder with no song
+ * row at all is kept: an earlier version deleted those too, which silently
+ * destroyed demos whenever sync gave a song a new id (SyncEngine now reports
+ * re-ids and SongSyncWorker moves the folder, but "no row" must never be
+ * read as "deleted" -- losing a demo is far worse than leaking a folder).
  */
 private suspend fun sweepOrphanedScratchpads(context: android.content.Context, repo: SongRepository) {
     val scratchpadRoot = File(context.filesDir, "scratchpad")
     val songDirs = scratchpadRoot.listFiles { file -> file.isDirectory } ?: return
     for (dir in songDirs) {
-        if (repo.getById(dir.name) == null) dir.deleteRecursively()
+        if (repo.isDeleted(dir.name)) dir.deleteRecursively()
     }
 }
