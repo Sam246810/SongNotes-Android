@@ -45,6 +45,9 @@ std::vector<float> mixTracks(const std::vector<Track> &tracks, int64_t startFram
     return out;
 }
 
+// Metadata only — never reads `buffer` contents, just copies the pointer
+// through. nativePunchIn (jni_bridge.cpp) relies on this: it passes empty
+// placeholder buffers and maps outputs back to their source by pointer.
 std::vector<Clip> punchIn(const std::vector<Clip> &existingClips, const Clip &insertClip) {
     std::vector<Clip> result;
     const int64_t insertStart = insertClip.startFrame;

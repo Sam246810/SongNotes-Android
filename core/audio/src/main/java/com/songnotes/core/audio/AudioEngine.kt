@@ -203,7 +203,6 @@ class AudioEngine {
      * independent implementations of *mixing*, not of punch-in splicing.
      */
     fun punchIn(existingClips: List<MultitrackClipSpec>, insertClip: MultitrackClipSpec): List<MultitrackClipSpec> {
-        val existingBuffers: Array<FloatArray> = Array(existingClips.size) { existingClips[it].buffer }
         val existingStart = LongArray(existingClips.size) { existingClips[it].startFrame }
         val existingOffset = LongArray(existingClips.size) { existingClips[it].bufferOffsetFrames }
         val existingLength = LongArray(existingClips.size) { existingClips[it].lengthFrames }
@@ -217,20 +216,25 @@ class AudioEngine {
         // an ArrayIndexOutOfBoundsException the first time a real
         // straddling punch-in ran on device.
         val outCapacity = existingClips.size * 2 + 1
-        val outBuffers = arrayOfNulls<FloatArray>(outCapacity)
+        val outSource = IntArray(outCapacity)
         val outStart = LongArray(outCapacity)
         val outOffset = LongArray(outCapacity)
         val outLength = LongArray(outCapacity)
 
         val resultCount = nativePunchIn(
-            existingBuffers, existingStart, existingOffset, existingLength,
-            insertClip.buffer, insertClip.startFrame, insertClip.bufferOffsetFrames, insertClip.lengthFrames,
-            outBuffers, outStart, outOffset, outLength,
+            existingClips.size, existingStart, existingOffset, existingLength,
+            insertClip.startFrame, insertClip.bufferOffsetFrames, insertClip.lengthFrames,
+            outSource, outStart, outOffset, outLength,
         )
+        // Each fragment reuses its source clip's own FloatArray (no audio
+        // crosses JNI — see nativePunchIn's doc comment), so a take split
+        // into head + tail is still ONE buffer in memory, and
+        // MultitrackProjectStorage writes it to disk once.
         return (0 until resultCount).map { i ->
+            val src = outSource[i]
             MultitrackClipSpec(
-                buffer = outBuffers[i]!!, startFrame = outStart[i], bufferOffsetFrames = outOffset[i],
-                lengthFrames = outLength[i],
+                buffer = if (src < 0) insertClip.buffer else existingClips[src].buffer,
+                startFrame = outStart[i], bufferOffsetFrames = outOffset[i], lengthFrames = outLength[i],
             )
         }
     }
@@ -474,15 +478,14 @@ class AudioEngine {
         trackSoloed: BooleanArray,
     ): Boolean
     private external fun nativePunchIn(
-        existingClipBuffers: Array<FloatArray>,
+        existingCount: Int,
         existingClipStartFrames: LongArray,
         existingClipBufferOffsetFrames: LongArray,
         existingClipLengthFrames: LongArray,
-        insertClipBuffer: FloatArray,
         insertStartFrame: Long,
         insertBufferOffsetFrames: Long,
         insertLengthFrames: Long,
-        outClipBuffers: Array<FloatArray?>,
+        outClipSourceIndex: IntArray,
         outClipStartFrames: LongArray,
         outClipBufferOffsetFrames: LongArray,
         outClipLengthFrames: LongArray,

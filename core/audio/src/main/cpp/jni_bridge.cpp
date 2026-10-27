@@ -202,14 +202,25 @@ Java_com_songnotes_core_audio_AudioEngine_nativeStartMultitrackPlayback(
 // Kotlin-side capacity formula got this wrong and undersized the output
 // arrays, which crashed with an ArrayIndexOutOfBoundsException the first
 // time a real straddling-punch-in was exercised on device.
+//
+// No audio crosses this boundary in either direction. dsp::punchIn only
+// ever reads clip *metadata* (start/offset/length) and copies the `buffer`
+// shared_ptr through untouched, so each input clip gets an empty
+// placeholder buffer whose only job is to be a distinct pointer, and each
+// output reports which input it came from in outClipSourceIndex (an index
+// into the existing clips, or -1 for the insert clip). Kotlin then reuses
+// its own FloatArray for that source. An earlier version copied every
+// buffer in and handed back a fresh full-take copy per output fragment —
+// a punch into the middle of a take left two complete copies of it in
+// memory (and on disk, once saved), and every clip drag re-copied every
+// clip on the track.
 JNIEXPORT jint JNICALL
 Java_com_songnotes_core_audio_AudioEngine_nativePunchIn(
-    JNIEnv *env, jobject, jobjectArray existingClipBuffers, jlongArray existingClipStartFrames,
+    JNIEnv *env, jobject, jint existingCount, jlongArray existingClipStartFrames,
     jlongArray existingClipBufferOffsetFrames, jlongArray existingClipLengthFrames,
-    jfloatArray insertClipBuffer, jlong insertStartFrame, jlong insertBufferOffsetFrames,
-    jlong insertLengthFrames, jobjectArray outClipBuffers, jlongArray outClipStartFrames,
-    jlongArray outClipBufferOffsetFrames, jlongArray outClipLengthFrames) {
-    const jsize existingCount = env->GetArrayLength(existingClipBuffers);
+    jlong insertStartFrame, jlong insertBufferOffsetFrames, jlong insertLengthFrames,
+    jintArray outClipSourceIndex, jlongArray outClipStartFrames, jlongArray outClipBufferOffsetFrames,
+    jlongArray outClipLengthFrames) {
     std::vector<jlong> existingStart(static_cast<size_t>(existingCount));
     env->GetLongArrayRegion(existingClipStartFrames, 0, existingCount, existingStart.data());
     std::vector<jlong> existingOffset(static_cast<size_t>(existingCount));
@@ -219,41 +230,34 @@ Java_com_songnotes_core_audio_AudioEngine_nativePunchIn(
 
     std::vector<songnotes::dsp::Clip> existingClips(static_cast<size_t>(existingCount));
     for (jsize i = 0; i < existingCount; i++) {
-        auto *bufferArr = static_cast<jfloatArray>(env->GetObjectArrayElement(existingClipBuffers, i));
-        const jsize len = env->GetArrayLength(bufferArr);
-        auto buffer = std::make_shared<std::vector<float>>(static_cast<size_t>(len));
-        env->GetFloatArrayRegion(bufferArr, 0, len, buffer->data());
-        env->DeleteLocalRef(bufferArr);
-
         auto &clip = existingClips[static_cast<size_t>(i)];
-        clip.buffer = buffer;
+        clip.buffer = std::make_shared<std::vector<float>>();
         clip.startFrame = existingStart[static_cast<size_t>(i)];
         clip.bufferOffsetFrames = existingOffset[static_cast<size_t>(i)];
         clip.lengthFrames = existingLength[static_cast<size_t>(i)];
     }
 
     songnotes::dsp::Clip insertClip;
-    {
-        const jsize len = env->GetArrayLength(insertClipBuffer);
-        auto buffer = std::make_shared<std::vector<float>>(static_cast<size_t>(len));
-        env->GetFloatArrayRegion(insertClipBuffer, 0, len, buffer->data());
-        insertClip.buffer = buffer;
-        insertClip.startFrame = insertStartFrame;
-        insertClip.bufferOffsetFrames = insertBufferOffsetFrames;
-        insertClip.lengthFrames = insertLengthFrames;
-    }
+    insertClip.buffer = std::make_shared<std::vector<float>>();
+    insertClip.startFrame = insertStartFrame;
+    insertClip.bufferOffsetFrames = insertBufferOffsetFrames;
+    insertClip.lengthFrames = insertLengthFrames;
 
     const std::vector<songnotes::dsp::Clip> result = songnotes::dsp::punchIn(existingClips, insertClip);
 
-    const jsize outCapacity = env->GetArrayLength(outClipBuffers);
+    const jsize outCapacity = env->GetArrayLength(outClipSourceIndex);
     const jsize resultCount = std::min(static_cast<jsize>(result.size()), outCapacity);
+    std::vector<jint> outSource(static_cast<size_t>(resultCount), -1);
     for (jsize i = 0; i < resultCount; i++) {
-        const auto &clip = result[static_cast<size_t>(i)];
-        auto *bufferArr = env->NewFloatArray(static_cast<jsize>(clip.buffer->size()));
-        env->SetFloatArrayRegion(bufferArr, 0, static_cast<jsize>(clip.buffer->size()), clip.buffer->data());
-        env->SetObjectArrayElement(outClipBuffers, i, bufferArr);
-        env->DeleteLocalRef(bufferArr);
+        const auto &buffer = result[static_cast<size_t>(i)].buffer;
+        for (jsize e = 0; e < existingCount; e++) {
+            if (existingClips[static_cast<size_t>(e)].buffer == buffer) {
+                outSource[static_cast<size_t>(i)] = e;
+                break;
+            }
+        }
     }
+    env->SetIntArrayRegion(outClipSourceIndex, 0, resultCount, outSource.data());
     std::vector<jlong> outStart(static_cast<size_t>(resultCount));
     std::vector<jlong> outOffset(static_cast<size_t>(resultCount));
     std::vector<jlong> outLength(static_cast<size_t>(resultCount));
