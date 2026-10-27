@@ -60,4 +60,7 @@ dependencies {
     // its companion object's System.loadLibrary("songnotes_audio") would
     // throw UnsatisfiedLinkError outside an actual Android runtime.
     testImplementation(libs.junit)
+    // MultitrackProjectStorageTest: android.jar's org.json is a stub that
+    // throws in plain JVM tests, so put the real implementation first.
+    testImplementation(libs.org.json)
 }
