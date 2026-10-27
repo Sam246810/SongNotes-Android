@@ -509,23 +509,73 @@ the buffer before the *next* take," not a live adaptation. Not device-tested
 with an actual cheap dongle yet; worth doing if one shows up in a bug
 report or is on hand to test with.
 
+## Closing the open gaps (2026-10-26)
+
+Everything the old "What's left" list named, plus Known risks #3–#6, was
+built on branch `scratchpad-phase10-gaps` and checked on the Fold:
+
+- **Punch-in no longer copies audio.** `nativePunchIn` used to hand back a
+  fresh full-take `FloatArray` for every output fragment, so a punch into
+  the middle of a take held two complete copies of it (and saved both), and
+  every clip drag re-copied every clip on the track. It now passes no audio
+  at all: `dsp::punchIn` only reads clip metadata, so the JNI side uses empty
+  placeholder buffers and reports each output's source index; Kotlin reuses
+  its own arrays. Verified on device: a split take's head and tail both point
+  at one file in the manifest.
+- **Saves are incremental and atomic** (`MultitrackProjectStorage`). Audio
+  files are keyed by buffer identity and never rewritten; the manifest is
+  replaced by an atomic rename as the single commit point; unreferenced files
+  are deleted only after that. Clip I/O streams through a 64 KB chunk instead
+  of holding each clip twice. Old `clip_N.f32` projects load unchanged and
+  keep their file. JVM tests: `MultitrackProjectStorageTest` (real `org.json`
+  on the test classpath, since android.jar's is a throwing stub).
+- **Auto-save, no Save button.** Every edit (takes, clip moves, gain on
+  slider release, mute/solo, tempo, count-in, metronome) goes through one
+  `commit()` and a 500 ms debounced save on `AppScope`. Verified by
+  force-stopping and reopening.
+- **Undo/redo**, 30 steps, in the Scratchpad top bar. Snapshots are cheap
+  because buffers are shared. Per session only. A restored snapshot keeps the
+  song's current chart BPM.
+- **10-minute take cap.** Recording stops and saves itself at 10:00, from the
+  Scratchpad or minimized to the lyrics; the transport and the bubble count
+  down through the last minute. The cap is about memory, not storage: a
+  finished take is held whole in the Java heap (~11.5 MB/min; the Fold allows
+  512 MB per app), alongside every other take in the project. The Android
+  voice recorder has no published limit (one unconfirmed report of 3 hours);
+  matching that needs takes streamed from disk instead of held in memory.
+- **Metronome switch + count-in setting, Ableton-style.** A "Click" button in
+  the transport toggles the click live, mid-take and mid-playback (an atomic
+  the RT thread reads every callback; beat scheduling keeps running while
+  it's off). Playback now clicks on the project's beat grid. Count-in is a
+  per-project Off / 1 bar / 2 bars, and a chosen count-in always clicks. With
+  no count-in the downbeat waits out the 0.75 s pre-roll, so the take still
+  lands where it was recorded (otherwise the head trim would eat real audio).
+- **Input level meter** while armed/recording: peak with a ~300 ms fall plus
+  a clip latch, published through `EngineStateBlock` (now 52 bytes).
+- **Settings screen** (gear on the Songs screen's account row): theme as
+  Match device / Light / Dark, and a permanent "Calibrate recording latency"
+  entry that works in release builds.
+
+### Not verified
+- **Whether the click is actually audible/inaudible** at the right moments —
+  the test phone was muted and nothing automated listens to output. Toggling
+  mid-take and mid-playback was exercised without crashes.
+- **The recording click grid is anchored to the take's own downbeat**, which
+  is the punch-in point. If that point isn't on a beat, the recording click
+  and the playback click disagree. Pre-existing; snapping the punch-in to the
+  grid would fix it.
+- **Several long takes in one project** still add up in memory (four
+  10-minute takes is ~460 MB). Same streaming-from-disk fix as the cap.
+
 ## What's left (not started)
 
-- **No metering, no undo.** Standard DAW-adjacent features, out of scope
-  for "prove the engine is reachable from real UI."
-- **No minimized/collapsible transport strip, no theme-in-settings.** The
-  plan's Phase 10 line also mentioned a "minimized transport strip, DAW
-  collapsible to tempo/BPM/start-stop" layout and moving the theme toggle
-  into a settings surface — both pure UI polish with no engine dependency,
-  not attempted this pass.
-- **The metronome click during recording still isn't toggleable** — a
-  Phase 4-documented gap ("Known risks" #6 there) that surfaces here too:
-  every overdub take plays the count-in/metronome click over the backing
-  tracks, with no way to turn it off once past the count-in.
+- **Wired/USB headset mic** — still untested on real hardware (see above).
 - **`host/test_peak_pyramid.cpp` has never actually run** — compile-checked
   as part of the real `.so` build only, same standing limitation as every
   other host GoogleTest target in this repo (no desktop C++ compiler on
   this machine).
+- **Takes held in memory** — the root limit behind the 10-minute cap and the
+  project-size ceiling above.
 
 ## Known risks / things to check first if something breaks
 
@@ -543,30 +593,16 @@ report or is on hand to test with.
    they're equal. Worth a real on-device test of `Remove` + selection
    together next time the device is in hand — this fix is reasoned, not
    yet verified against actual touch input.
-3. **Recording never auto-stops** (matches `armOverdub`'s own documented
-   behavior) — a user who walks away mid-recording just keeps recording
-   until they come back and tap Stop. No timeout, no maximum length.
-4. **`MultitrackProjectStorage.save()` isn't atomic.** It deletes every
-   existing clip file, then writes the new set, then writes the manifest
-   last. A crash or kill between the delete and the last clip write would
-   leave a partially-overwritten project on disk — the next `load()` would
-   either fail (missing a file the manifest references) or silently load
-   a stale mix of old and new clips. Not exercised by the device
-   walkthrough above (which didn't kill the process mid-save); a real
-   fix would write to a temp location and rename over the old one only
-   after everything succeeded.
-5. **Gain/mute/solo changes are only persisted on explicit Save**, not
-   automatically — documented as a deliberate tradeoff (continuous
-   auto-save on every slider drag tick would mean a file write per pixel
-   of movement), but it does mean a user who adjusts a slider and force-
-   quits without tapping Save loses that specific change, even though
-   their recordings are safe (those auto-save on commit). Worth surfacing
-   more visibly in the UI than a plain "Save" button if this trips
-   someone up in practice.
-6. **Every `save()` rewrites every clip's full audio, even unchanged
-   ones** — fine at the scale exercised so far (a couple of tracks,
-   under a minute each), but would get slow for a genuinely large
-   project. No incremental/delta save exists.
+3. **Takes stop at 10 minutes** (`kMaxTakeSeconds` in `ScratchpadScreen.kt`) — see
+   "Closing the open gaps" for why the limit is memory, not storage.
+4. **`MultitrackProjectStorage.save()` is atomic** as of 2026-10-26: the
+   manifest rename is the commit point, and files are only deleted after it.
+   It relies on buffer *identity* to skip unchanged audio, so anything that
+   copies a clip's `FloatArray` (rather than reusing it) silently turns
+   into a full rewrite of that take on the next save.
+5. **Every edit auto-saves** (debounced 500 ms on `AppScope`); there is no
+   Save button any more.
+6. **Saves only write new audio** — see #4.
 7. **Force-phone-mic routing has been tested with a real Bluetooth
    headset (Sony WF-1000XM5)** and works correctly — a Bluetooth route
    always forces the phone mic now (no checkbox, just an informational
