@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -187,12 +188,24 @@ fun ArrangementView(
         val viewportWidthPx = (constraints.maxWidth - headerWidthPx).coerceAtLeast(1f)
         val bodyHeightPx = (constraints.maxHeight - with(density) { RulerHeight.toPx() }).coerceAtLeast(1f)
 
+        // Plain fields, refreshed on every composition, that the long-lived
+        // gesture handlers read through clampScroll(). Capturing the values
+        // in the clamp itself went stale: after adding tracks, the scroll
+        // limit still used the old count and the bottom tracks were
+        // unreachable.
+        val extent = remember { ScrollExtent() }
+        extent.contentBeats = contentBeats
+        extent.viewportWidthPx = viewportWidthPx
+        extent.contentHeightPx = (tracks.size + 1) * laneHeightPx
+        extent.bodyHeightPx = bodyHeightPx
+
         fun clampScroll() {
-            val contentPx = (contentBeats * pxPerBeat).toFloat()
-            scrollX = scrollX.coerceIn(0f, (contentPx - viewportWidthPx * 0.5f).coerceAtLeast(0f))
-            val contentH = (tracks.size + 1) * laneHeightPx
-            scrollY = scrollY.coerceIn(0f, (contentH - bodyHeightPx).coerceAtLeast(0f))
+            val contentPx = (extent.contentBeats * pxPerBeat).toFloat()
+            scrollX = scrollX.coerceIn(0f, (contentPx - extent.viewportWidthPx * 0.5f).coerceAtLeast(0f))
+            scrollY = scrollY.coerceIn(0f, extent.maxScrollY)
         }
+        // Removing tracks (or rotating) can leave the view scrolled past the end.
+        LaunchedEffect(tracks.size, bodyHeightPx) { clampScroll() }
 
         fun fitToProject() {
             val beats = maxOf(projectEnd / framesPerBeat * 1.05, beatsPerBar * 4.0)
@@ -258,7 +271,16 @@ fun ArrangementView(
                 // Track headers, scrolled vertically in step with the lanes.
                 Box(
                     modifier = Modifier.width(headerWidth).fillMaxHeight().clipToBounds()
-                        .tutorialTarget(tutorialTargets, "headers"),
+                        .tutorialTarget(tutorialTargets, "headers")
+                        // Swiping the headers scrolls the tracks; a long press
+                        // first (handled per header) reorders instead.
+                        .pointerInput(Unit) {
+                            detectVerticalDragGestures { change, dy ->
+                                change.consume()
+                                scrollY -= dy
+                                clampScroll()
+                            }
+                        },
                 ) {
                     tracks.forEachIndexed { index, track ->
                         val isDragging = reorderFrom == index
@@ -422,6 +444,18 @@ fun ArrangementView(
                         RecordingClip(rec, laneHeightPx, scrollY, framesPerPx, ::frameToX, viewportWidthPx)
                     }
 
+                    // Vertical scrollbar, only when the tracks don't all fit:
+                    // shows there's more below and can be dragged directly.
+                    if (extent.maxScrollY > 0f) {
+                        VerticalScrollbar(
+                            scrollY = scrollY,
+                            contentHeightPx = extent.contentHeightPx,
+                            viewportHeightPx = extent.bodyHeightPx,
+                            onScrollBy = { scrollY += it; clampScroll() },
+                            modifier = Modifier.align(Alignment.CenterEnd),
+                        )
+                    }
+
                     // Insert marker and playhead.
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val insertX = frameToX(insertFrame)
@@ -439,6 +473,75 @@ fun ArrangementView(
                 }
             }
         }
+    }
+}
+
+/**
+ * How much to scale a clip's waveform for display: phone-mic takes are often
+ * very quiet (a real take here peaked at 0.035, about -29 dBFS), which at true
+ * scale is a flat line. Like a voice-notes app, each clip is scaled to its own
+ * loudest point, capped so near-silence stays flat instead of turning into
+ * amplified noise. Display only; the audio is untouched.
+ */
+internal fun waveformDisplayGain(peak: Float): Float =
+    if (peak < 1e-4f) 1f else (0.95f / peak).coerceIn(1f, 40f)
+
+internal fun waveformDisplayGain(pyramid: PeakPyramid): Float {
+    val level = pyramid.levels.lastOrNull() ?: return 1f
+    var peak = 0f
+    for (i in 0 until level.peakCount) peak = maxOf(peak, -level.mins[i], level.maxes[i])
+    return waveformDisplayGain(peak)
+}
+
+/** A sample (or peak) mapped to -1..1 for drawing: [gain]-scaled, with a gentle curve so quiet detail shows. */
+internal fun waveformDisplayLevel(sample: Float, gain: Float): Float {
+    val v = (abs(sample) * gain).coerceAtMost(1f)
+    return Math.copySign(Math.pow(v.toDouble(), 0.75).toFloat(), sample)
+}
+
+/** The arrangement's scrollable extent; see its use in [ArrangementView]. */
+private class ScrollExtent {
+    var contentBeats = 0.0
+    var viewportWidthPx = 1f
+    var contentHeightPx = 0f
+    var bodyHeightPx = 1f
+    val maxScrollY: Float get() = (contentHeightPx - bodyHeightPx).coerceAtLeast(0f)
+}
+
+/** A slim draggable thumb on the lanes' right edge for scrolling through tracks. */
+@Composable
+private fun VerticalScrollbar(
+    scrollY: Float,
+    contentHeightPx: Float,
+    viewportHeightPx: Float,
+    onScrollBy: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val density = LocalDensity.current
+    val thumbPx = (viewportHeightPx * viewportHeightPx / contentHeightPx).coerceAtLeast(with(density) { 40.dp.toPx() })
+    val travel = (viewportHeightPx - thumbPx).coerceAtLeast(1f)
+    val maxScroll = (contentHeightPx - viewportHeightPx).coerceAtLeast(1f)
+    val thumbTop = scrollY / maxScroll * travel
+    val currentOnScrollBy by rememberUpdatedState(onScrollBy)
+    val scale by rememberUpdatedState(maxScroll / travel)
+    Box(
+        modifier = modifier
+            .width(20.dp)
+            .fillMaxHeight()
+            .pointerInput(Unit) {
+                detectVerticalDragGestures { change, dy -> change.consume(); currentOnScrollBy(dy * scale) }
+            },
+    ) {
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .offset { IntOffset(0, thumbTop.roundToInt()) }
+                .padding(end = 4.dp)
+                .width(5.dp)
+                .height(with(density) { thumbPx.toDp() })
+                .clip(RoundedCornerShape(3.dp))
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.28f)),
+        )
     }
 }
 
@@ -574,6 +677,7 @@ private fun ArrangementClip(
     onTrim: (ClipRef, MultitrackClipSpec) -> Unit,
 ) {
     val pyramid = remember(clip.buffer) { engine.buildPeakPyramid(clip.buffer) }
+    val displayGain = remember(pyramid) { waveformDisplayGain(pyramid) }
     val density = LocalDensity.current
     var gesture by remember { mutableStateOf<ClipGesture?>(null) }
     var dragDx by remember { mutableFloatStateOf(0f) }
@@ -689,6 +793,7 @@ private fun ArrangementClip(
                 top = headerPx + 2f,
                 height = size.height - headerPx - 4f,
                 color = waveColor,
+                displayGain = displayGain,
             )
             if (selected) {
                 drawRoundRect(onSurface, cornerRadius = radius, style = Stroke(width = 2.dp.toPx()))
@@ -713,7 +818,7 @@ private fun ArrangementClip(
  * covers at least one pyramid peak, else reads the samples directly (deep
  * zoom), so it's sharp at every zoom and never stretched.
  */
-private fun DrawScope.drawClipWaveform(
+internal fun DrawScope.drawClipWaveform(
     clip: MultitrackClipSpec,
     pyramid: PeakPyramid,
     firstFrameInClip: Long,
@@ -721,6 +826,7 @@ private fun DrawScope.drawClipWaveform(
     top: Float,
     height: Float,
     color: Color,
+    displayGain: Float = 1f,
 ) {
     if (height <= 0f || clip.lengthFrames <= 0L) return
     val mid = top + height / 2f
@@ -752,8 +858,8 @@ private fun DrawScope.drawClipWaveform(
                 if (s > hi) hi = s
             }
         }
-        val yTop = mid - hi.coerceIn(-1f, 1f) * half
-        val yBottom = mid - lo.coerceIn(-1f, 1f) * half
+        val yTop = mid - waveformDisplayLevel(hi, displayGain) * half
+        val yBottom = mid - waveformDisplayLevel(lo, displayGain) * half
         drawRect(color, topLeft = Offset(col.toFloat(), yTop), size = Size(1f, (yBottom - yTop).coerceAtLeast(1f)))
     }
 }
@@ -791,10 +897,12 @@ private fun RecordingClip(
         val half = (size.height - headerPx) / 2f - 2f
         val pxPerPeak = (rec.framesPerPeak / framesPerPx).toFloat()
         val offset = left - fullLeft
+        // Same display scaling as finished clips, against the loudest level so far.
+        val liveGain = waveformDisplayGain(rec.peaks.maxOrNull() ?: 0f)
         rec.peaks.forEachIndexed { i, peak ->
             val x = i * pxPerPeak - offset
             if (x < -pxPerPeak || x > size.width) return@forEachIndexed
-            val h = (peak.coerceIn(0f, 1f) * half).coerceAtLeast(1f)
+            val h = (waveformDisplayLevel(peak, liveGain) * half).coerceAtLeast(1f)
             drawRect(red, topLeft = Offset(x, mid - h), size = Size(pxPerPeak.coerceAtLeast(1f) * 0.8f, h * 2f))
         }
     }
