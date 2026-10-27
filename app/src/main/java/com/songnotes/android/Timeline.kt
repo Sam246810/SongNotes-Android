@@ -76,12 +76,14 @@ private val PlayheadFlagHeight = 7.dp
  * [ScratchpadScreen] — reads the same regardless of light/dark theme.
  */
 private val TrackPalette = listOf(
-    Color(0xFF6750A4), // purple
-    Color(0xFF00796B), // teal
-    Color(0xFFEF6C00), // orange
-    Color(0xFF1565C0), // blue
-    Color(0xFF2E7D32), // green
-    Color(0xFFAD1457), // pink
+    // Muted, earthy clip colours in the spirit of Ableton's palette, chosen
+    // to sit on parchment and on the dark cozy page alike.
+    Color(0xFFD98E2B), // amber
+    Color(0xFF7FA36B), // sage
+    Color(0xFFC8664A), // clay
+    Color(0xFF5B7FA6), // slate blue
+    Color(0xFFC9A93B), // ochre
+    Color(0xFF9A5F8E), // plum
 )
 
 /** Stable per-track color, cycling through [TrackPalette] for track counts beyond its size. */

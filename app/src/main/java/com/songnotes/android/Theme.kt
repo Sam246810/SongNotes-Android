@@ -69,24 +69,88 @@ private val CozyDarkColors = SongNotesColors(
     scrim = Color.Black.copy(alpha = 0.55f),
 )
 
+// Every role is set explicitly. An earlier version set only primary and the
+// surfaces, so anything using a container or variant role (cards, chips,
+// filled icon buttons -- most of the Scratchpad) fell back to Material's
+// default purple/lavender, which is what made it look like a different app.
+// Secondary is a warm taupe (ink on paper), tertiary a muted sage, and the
+// surface ladder steps from parchment toward a deeper kraft tone.
 private val LightScheme = lightColorScheme(
     primary = Color(0xFFB45309),
     onPrimary = Color.White,
+    primaryContainer = Color(0xFFFCE3C2),
+    onPrimaryContainer = Color(0xFF4A2604),
+    inversePrimary = Color(0xFFF59E0B),
+    secondary = Color(0xFF7C6A55),
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFEDE1CE),
+    onSecondaryContainer = Color(0xFF2F2418),
+    tertiary = Color(0xFF4D7C5B),
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFD9E8D5),
+    onTertiaryContainer = Color(0xFF17301F),
     background = Color(0xFFF7F1E6),
     onBackground = Color(0xFF2A221B),
     surface = Color(0xFFF7F1E6),
     onSurface = Color(0xFF2A221B),
+    surfaceVariant = Color(0xFFEBE0CE),
     onSurfaceVariant = Color(0xFF8A7663),
+    surfaceTint = Color(0xFFB45309),
+    surfaceBright = Color(0xFFFBF6EE),
+    surfaceDim = Color(0xFFE4D8C6),
+    surfaceContainerLowest = Color(0xFFFFFBF5),
+    surfaceContainerLow = Color(0xFFF3EBDE),
+    surfaceContainer = Color(0xFFEEE4D5),
+    surfaceContainerHigh = Color(0xFFE8DDCB),
+    surfaceContainerHighest = Color(0xFFE2D5C1),
+    outline = Color(0xFFB9A891),
+    outlineVariant = Color(0xFFDDD0BC),
+    error = Color(0xFFB3261E),
+    onError = Color.White,
+    errorContainer = Color(0xFFF9DEDC),
+    onErrorContainer = Color(0xFF410E0B),
+    inverseSurface = Color(0xFF362E27),
+    inverseOnSurface = Color(0xFFF7EEE3),
+    scrim = Color.Black,
 )
 
 private val DarkScheme = darkColorScheme(
     primary = Color(0xFFF59E0B),
     onPrimary = Color(0xFF12100E),
+    primaryContainer = Color(0xFF5A3A0C),
+    onPrimaryContainer = Color(0xFFFFDDB0),
+    inversePrimary = Color(0xFFB45309),
+    secondary = Color(0xFFCDBBA4),
+    onSecondary = Color(0xFF2A2119),
+    secondaryContainer = Color(0xFF3E342A),
+    onSecondaryContainer = Color(0xFFEADCC8),
+    tertiary = Color(0xFF9CC5A6),
+    onTertiary = Color(0xFF12241A),
+    tertiaryContainer = Color(0xFF2C4434),
+    onTertiaryContainer = Color(0xFFCDE8D3),
     background = Color(0xFF12100E),
     onBackground = Color(0xFFF5EEE6),
     surface = Color(0xFF1A1613),
     onSurface = Color(0xFFF5EEE6),
+    surfaceVariant = Color(0xFF2F2923),
     onSurfaceVariant = Color(0xFF998471),
+    surfaceTint = Color(0xFFF59E0B),
+    surfaceBright = Color(0xFF3A332C),
+    surfaceDim = Color(0xFF12100E),
+    surfaceContainerLowest = Color(0xFF0E0C0A),
+    surfaceContainerLow = Color(0xFF1E1A16),
+    surfaceContainer = Color(0xFF241F1A),
+    surfaceContainerHigh = Color(0xFF2D2721),
+    surfaceContainerHighest = Color(0xFF37302A),
+    outline = Color(0xFF6E5F51),
+    outlineVariant = Color(0xFF3E352D),
+    error = Color(0xFFF2B8B5),
+    onError = Color(0xFF601410),
+    errorContainer = Color(0xFF8C1D18),
+    onErrorContainer = Color(0xFFF9DEDC),
+    inverseSurface = Color(0xFFEDE3D8),
+    inverseOnSurface = Color(0xFF2A221B),
+    scrim = Color.Black,
 )
 
 val LocalSongNotesColors = staticCompositionLocalOf { WarmLightColors }
@@ -167,6 +231,13 @@ fun SongNotesTheme(mode: ThemeMode = ThemeMode.SYSTEM, content: @Composable () -
                 isAppearanceLightStatusBars = !dark
                 isAppearanceLightNavigationBars = !dark
             }
+            // With 3-button navigation Android lays a translucent grey scrim
+            // over the nav bar "for contrast", which is why it never matched
+            // the theme. Every screen paints its own background edge to edge
+            // and pads its content above the bar, so the scrim isn't needed:
+            // the page colour shows through and the icons follow the theme.
+            window.isNavigationBarContrastEnforced = false
+            window.isStatusBarContrastEnforced = false
         }
     }
     CompositionLocalProvider(LocalSongNotesColors provides if (dark) CozyDarkColors else WarmLightColors) {

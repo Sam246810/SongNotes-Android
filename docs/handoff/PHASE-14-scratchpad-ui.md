@@ -52,3 +52,33 @@ the web app either (a notice there is a separate change in the web repo).
 **Verified:** unit tests only for the callback. The rename itself is three
 lines of `File` calls; checked on device as part of the §6/§9 device pass
 (a song with a demo survives open → Songs list → reopen).
+
+## §2 Look and feel foundation
+
+**Colour schemes.** `Theme.kt`'s Material schemes used to set only primary
+and the surfaces, so every container/variant role (cards, chips, filled icon
+buttons, most of the Scratchpad) fell back to Material's default purple and
+lavender. Both schemes now set every role: secondary is a warm taupe
+(ink on paper), tertiary a muted sage, and the surface-container ladder steps
+from parchment toward a deeper kraft tone (dark: the cozy brown ladder). The
+document palette (`SongNotesColors`) is unchanged, so the editor looks the
+same.
+
+**Track colours.** `TrackPalette` (in `Timeline.kt`, moving to the new
+arrangement view in §3) is now muted earthy clip colours in the spirit of
+Ableton's palette: amber, sage, clay, slate blue, ochre, plum.
+
+**Nav bar.** `SongNotesTheme` now sets `isNavigationBarContrastEnforced` (and
+the status-bar equivalent) to false. With 3-button navigation Android was
+laying a translucent grey scrim over the bar, which is why it never matched
+the theme. Every screen paints its background edge to edge, so the page
+colour now shows through, with icons following the theme as before.
+
+**Insets.** The full-screen column screens that only padded the status bar
+now use `systemBarsPadding()`, so bottom buttons sit above the nav bar:
+calibration wizard (the reported "Start calibration" button), manual and
+tap-along calibration, auth, locked-account, recovery-unlock, sync opt-in,
+and the account recovery-code view.
+
+**Verified on device (dark theme):** calibration's button clears the nav bar,
+the nav bar is the page colour, and the Scratchpad has no purple left.

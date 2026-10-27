@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -85,7 +86,7 @@ fun AccountScreen(onDone: () -> Unit) {
     // screenshot-blocked. A code nobody managed to save is worse than one
     // sitting in a recents thumbnail; it is the only way back into an account.
     if (newRecoveryCode != null) {
-        Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
+        Column(modifier = Modifier.fillMaxSize().systemBarsPadding().padding(24.dp)) {
             Text("Your new recovery code", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text(

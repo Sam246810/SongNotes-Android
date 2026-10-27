@@ -14,7 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -138,7 +138,7 @@ fun AuthScreen(onDone: () -> Unit) {
     }
 
     if (!SupabaseClientProvider.isConfigured) {
-        Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
+        Column(modifier = Modifier.fillMaxSize().systemBarsPadding().padding(24.dp)) {
             Text("Accounts aren't configured", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text(
@@ -199,7 +199,7 @@ fun AuthScreen(onDone: () -> Unit) {
     }
 
     if (needsEmailConfirmation) {
-        Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
+        Column(modifier = Modifier.fillMaxSize().systemBarsPadding().padding(24.dp)) {
             Text("Check your email", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text(
@@ -243,7 +243,7 @@ fun AuthScreen(onDone: () -> Unit) {
         // to leak" and "possible to keep at all", a recovery code nobody saved
         // is the worse failure: it is the only way back into an account.
         // Copy-to-clipboard below is the other half of making it savable.
-        Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
+        Column(modifier = Modifier.fillMaxSize().systemBarsPadding().padding(24.dp)) {
             Text("Save your recovery code", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text(
@@ -277,7 +277,7 @@ fun AuthScreen(onDone: () -> Unit) {
         return
     }
 
-    Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
+    Column(modifier = Modifier.fillMaxSize().systemBarsPadding().padding(24.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
