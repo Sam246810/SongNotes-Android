@@ -78,7 +78,7 @@ class DekVault(context: Context) {
 
     /** Forgets the stored DEK and its Keystore key. Never throws. */
     fun clear() {
-        prefs.edit().clear().apply()
+        prefs.edit().clear().commit() // synchronous: a crash right after mustn't leave the key on disk
         try {
             keyStore().deleteEntry(KEY_ALIAS)
         } catch (e: Exception) {

@@ -6,6 +6,7 @@ import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.exception.AuthRestException
 import io.github.jan.supabase.auth.providers.builtin.Email
 import io.github.jan.supabase.postgrest.postgrest
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -319,9 +320,16 @@ class SupabaseAuthRepository(private val client: SupabaseClient = SupabaseClient
     }
 
     suspend fun signOut() {
-        // The key goes even if the sign-out request fails (offline, say).
         try {
             client.auth.signOut()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Offline, or the server refused: the request only revokes this
+            // session server-side, so sign out here regardless -- a thrown
+            // sign-out crashed the app and left it signed in.
+            Log.w(TAG, "sign-out request failed; clearing the session on this device only", e)
+            client.auth.clearSession()
         } finally {
             KeySession.clear()
         }
