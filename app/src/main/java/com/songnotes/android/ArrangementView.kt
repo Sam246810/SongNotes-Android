@@ -162,6 +162,7 @@ fun ArrangementView(
     laneHeight: Dp,
     trackHeader: @Composable (index: Int, track: MultitrackTrackSpec) -> Unit,
     modifier: Modifier = Modifier,
+    tutorialTargets: TutorialTargets? = null,
 ) {
     val density = LocalDensity.current
     val safeBpm = if (bpm > 0.0) bpm else 120.0
@@ -249,13 +250,16 @@ fun ArrangementView(
                     playheadFrame = playheadFrame,
                     onScrub = { x -> onInsertFrameChange(ArrangementMath.snap(xToFrame(x), snapUnitFrames)) },
                     enabled = editable,
-                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                    modifier = Modifier.weight(1f).fillMaxHeight().tutorialTarget(tutorialTargets, "ruler"),
                 )
             }
 
             Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 // Track headers, scrolled vertically in step with the lanes.
-                Box(modifier = Modifier.width(headerWidth).fillMaxHeight().clipToBounds()) {
+                Box(
+                    modifier = Modifier.width(headerWidth).fillMaxHeight().clipToBounds()
+                        .tutorialTarget(tutorialTargets, "headers"),
+                ) {
                     tracks.forEachIndexed { index, track ->
                         val isDragging = reorderFrom == index
                         Box(
@@ -340,6 +344,7 @@ fun ArrangementView(
                         .weight(1f)
                         .fillMaxHeight()
                         .clipToBounds()
+                        .tutorialTarget(tutorialTargets, "lanes")
                         .pointerInput(Unit) {
                             detectTransformGestures { centroid, pan, zoom, _ ->
                                 if (zoom != 1f) {

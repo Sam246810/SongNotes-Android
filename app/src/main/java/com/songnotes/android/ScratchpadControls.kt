@@ -141,6 +141,7 @@ fun ScratchpadControlBar(
     onToggleOrientation: () -> Unit,
     onCalibrate: () -> Unit,
     onTutorial: () -> Unit,
+    tutorialTargets: TutorialTargets? = null,
 ) {
     val left: @Composable () -> Unit = {
         if (isRecording) {
@@ -181,6 +182,7 @@ fun ScratchpadControlBar(
             activeColor = RecordRed,
             idleTint = RecordRed,
             onClick = onRecord,
+            modifier = Modifier.tutorialTarget(tutorialTargets, "record"),
         )
         Spacer(Modifier.width(12.dp))
         Column {
@@ -202,7 +204,11 @@ fun ScratchpadControlBar(
         OverflowMenu(isExporting, editsEnabled, portraitMode, onExport, onToggleOrientation, onCalibrate, onTutorial)
     }
 
-    Surface(color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 0.dp) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        tonalElevation = 0.dp,
+        modifier = Modifier.tutorialTarget(tutorialTargets, "controls"),
+    ) {
         if (compact) {
             // Two rows: settings on top, transport + undo/redo/menu below, so
             // nothing (above all the menu, the way back to landscape) gets
@@ -334,9 +340,10 @@ private fun TransportButton(
     activeColor: Color,
     onClick: () -> Unit,
     idleTint: Color = MaterialTheme.colorScheme.onSurface,
+    modifier: Modifier = Modifier,
 ) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .size(44.dp)
             .clip(CircleShape)
             .background(if (active) activeColor else MaterialTheme.colorScheme.surfaceContainerHighest)

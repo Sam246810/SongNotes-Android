@@ -141,6 +141,8 @@ fun ScratchpadScreen(
     var engineState by remember { mutableStateOf(EngineState.idle()) }
     var snapOn by remember { mutableStateOf(true) }
     var tempoDialogOpen by remember { mutableStateOf(false) }
+    val tutorialTargets = remember { TutorialTargets() }
+    var showTutorial by remember { mutableStateOf(false) }
     val livePeaks = remember { mutableStateListOf<Float>() }
     val scope = rememberCoroutineScope()
     val storage = remember(songId) { MultitrackProjectStorage(context, songId) }
@@ -494,7 +496,8 @@ fun ScratchpadScreen(
                         onExport = ::exportMixdown,
                         onToggleOrientation = { portraitMode = !portraitMode; prefs.portrait = portraitMode },
                         onCalibrate = { showCalibration = true },
-                        onTutorial = { /* §7 */ },
+                        onTutorial = { showTutorial = true },
+                        tutorialTargets = tutorialTargets,
                     )
 
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -582,6 +585,7 @@ fun ScratchpadScreen(
                                 )
                             },
                             modifier = Modifier.fillMaxSize(),
+                            tutorialTargets = tutorialTargets,
                         )
 
                         if (currentInputRoute?.isBluetooth == true && !bluetoothNoticeDismissed) {
@@ -633,6 +637,23 @@ fun ScratchpadScreen(
                 val configuration = LocalConfiguration.current
                 val rotation = remember(configuration) { context.display?.rotation ?: android.view.Surface.ROTATION_0 }
                 MicPointer(rotateNaturalFraction(micNatural, rotation), Modifier.windowInsetsPadding(WindowInsets.safeDrawing))
+            }
+
+            // First ever Scratchpad open (any song), or a replay requested from
+            // Settings. Waits a beat so the rotation to landscape has settled
+            // and the spotlight targets have their final positions.
+            LaunchedEffect(Unit) {
+                if (!prefs.tutorialSeen || prefs.tutorialRequested) {
+                    delay(700)
+                    showTutorial = true
+                }
+            }
+            if (showTutorial) {
+                ScratchpadTutorial(tutorialTargets, onFinish = {
+                    showTutorial = false
+                    prefs.tutorialSeen = true
+                    prefs.tutorialRequested = false
+                })
             }
 
             if (tempoDialogOpen) {

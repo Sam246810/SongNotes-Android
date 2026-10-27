@@ -55,6 +55,8 @@ fun SettingsScreen(
     // Same overlay pattern ScratchpadScreen uses for the wizard: shows on
     // top, Back or Done returns to exactly this screen.
     var showCalibration by remember { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scratchpadPrefs = remember { ScratchpadPreferences(context) }
     if (showCalibration) {
         BackHandler { showCalibration = false }
         CalibrationWizardScreen(engine = engine, onDone = { showCalibration = false })
@@ -118,6 +120,34 @@ fun SettingsScreen(
                             "Run it once for each pair of headphones or speaker you record with.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+            }
+
+            // Replays the first-run Scratchpad tour. The Scratchpad lives inside
+            // a song, so this queues it for the next time one is opened.
+            var tutorialQueued by remember { mutableStateOf(scratchpadPrefs.tutorialRequested) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        scratchpadPrefs.tutorialRequested = true
+                        tutorialQueued = true
+                    }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Scratchpad tutorial", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        if (tutorialQueued) {
+                            "It'll play the next time you open a song's Scratchpad."
+                        } else {
+                            "A short tour of recording, clips and tracks. Plays the next time you open a song's Scratchpad."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (tutorialQueued) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)

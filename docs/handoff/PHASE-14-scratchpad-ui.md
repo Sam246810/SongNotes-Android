@@ -229,3 +229,35 @@ cover screen; not checked.
 badge appears on the song with a demo. The green mic dot while playing is
 Android's privacy indicator: the engine always opens its input stream
 alongside output (unchanged behaviour, not new in this phase).
+
+## §7 First-run tutorial
+
+`ScratchpadTutorial.kt`: a six-step spotlight tour over the real UI: a dimmed
+screen with a rounded cut-out (offscreen layer + `BlendMode.Clear`) around
+one target, plus a card with Skip / Back / Next.
+1. control bar
+2. Record (arm + record, the insert marker, recording while on the lyrics)
+3. ruler (insert marker, pinch/scroll, finer snap when zoomed)
+4. lanes (select, move across tracks, trim tabs, Split/Duplicate/Delete, Undo)
+5. track headers (Arm/M/S, rename/delete, long-press reorder, add track)
+6. no spotlight: **"Saved on this phone"** — auto-saved, offline, per song,
+   no account needed, **not on the web app yet, coming soon** — and **"You
+   can replay this tour anytime from Settings → Scratchpad tutorial."**
+
+Targets register themselves with `Modifier.tutorialTarget(targets, key)`
+(window bounds via `onGloballyPositioned`). The card goes below the target,
+else above, else (a target as big as the arrangement) at the bottom over its
+emptier part.
+
+**When it shows:** once ever, on the first Scratchpad open of any song
+(`ScratchpadPreferences.tutorialSeen`, set by finishing or skipping), after
+a 700 ms beat so the rotation to landscape has settled. Never per song.
+**Replay:** Settings → "Scratchpad tutorial" queues it
+(`tutorialRequested`) for the next Scratchpad open (the Scratchpad lives
+inside a song, so it can't open from Settings directly), and the row says
+so. The ⋮ menu's "Scratchpad tutorial" opens it immediately.
+
+**Verified on device:** shows on first open, steps and spotlights line up,
+doesn't return on reopen, and the Settings replay plays once then clears.
+The test phone's "seen" flag was reset afterwards so the user gets the real
+first run.
