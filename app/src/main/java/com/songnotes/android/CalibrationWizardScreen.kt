@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -197,6 +198,9 @@ fun CalibrationWizardScreen(engine: AudioEngine, onDone: () -> Unit) {
         }
     }
 
+    // Opaque and touch-blocking: the Scratchpad shows the wizard as an
+    // overlay, so without its own surface the tracks show through and take taps.
+    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -227,6 +231,7 @@ fun CalibrationWizardScreen(engine: AudioEngine, onDone: () -> Unit) {
             is WizardStep.Saved -> SavedStep(route = current.route, offsetFrames = current.offsetFrames, onDone = onDone)
             is WizardStep.Failed -> FailedStep(message = current.message, onRetry = { step = WizardStep.Intro })
         }
+    }
     }
 }
 
