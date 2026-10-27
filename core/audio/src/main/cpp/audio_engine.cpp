@@ -343,7 +343,7 @@ bool NativeAudioEngine::startPlaybackFromBuffer(const std::vector<float> &buffer
 }
 
 bool NativeAudioEngine::startMultitrackPlayback(const std::vector<dsp::Track> &tracks, double bpm,
-                                                int32_t beatsPerBar) {
+                                                int32_t beatsPerBar, int64_t startFrame) {
     if (!ensureStreamsOpen()) return false;
     stopPlaybackInternal();
     stopCalibrationInternal();
@@ -372,14 +372,15 @@ bool NativeAudioEngine::startMultitrackPlayback(const std::vector<dsp::Track> &t
         std::lock_guard<std::mutex> lock(mRebuildMutex);
         sr = sampleRateLocked();
     }
-    mPlaybackCursor = 0; // reused across Playing/Calibrating/MultitrackPlaying — mutually exclusive modes
+    // Reused across Playing/Calibrating/MultitrackPlaying — mutually exclusive modes.
+    mPlaybackCursor = std::clamp<int64_t>(startFrame, 0, totalFrames);
     mMultitrackTotalFrames = totalFrames;
     mPlaybackBeatIntervalFrames = bpm > 0.0 ? static_cast<double>(sr) * 60.0 / bpm : 0.0;
     mPlaybackBeatsPerBar = std::max(1, beatsPerBar);
     mActiveClickTemplate = nullptr; // RT-owned, but the RT thread isn't in a click-rendering mode yet
     mActiveClickReadPos = 0;
     mState.playbackTotalFrames.store(static_cast<int32_t>(totalFrames), std::memory_order_relaxed);
-    mState.playbackFrame.store(0, std::memory_order_relaxed);
+    mState.playbackFrame.store(static_cast<int32_t>(mPlaybackCursor), std::memory_order_relaxed);
     mState.isPlaying.store(1, std::memory_order_relaxed);
     mScenePublisher.publish(scene);
     mMode.store(static_cast<int32_t>(EngineMode::MultitrackPlaying), std::memory_order_release);

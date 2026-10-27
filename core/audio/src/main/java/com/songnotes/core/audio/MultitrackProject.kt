@@ -60,12 +60,76 @@ data class MultitrackProject(
             track.clips.maxOfOrNull { it.startFrame + it.lengthFrames } ?: 0L
         } ?: 0L
 
-    /** Appends a new track (empty by default — a fresh target for a punch-in take). */
-    fun addTrack(track: MultitrackTrackSpec = MultitrackTrackSpec(clips = emptyList())): MultitrackProject =
-        copy(tracks = tracks + track)
+    /**
+     * Appends [track], or by default a new empty one named Ableton-style
+     * ("3 Audio", skipping a name already taken) with the next unused colour.
+     */
+    fun addTrack(track: MultitrackTrackSpec? = null): MultitrackProject {
+        if (track != null) return copy(tracks = tracks + track)
+        val taken = tracks.map { it.name }.toSet()
+        var number = tracks.size + 1
+        while ("$number Audio" in taken) number++
+        val color = (tracks.maxOfOrNull { it.colorIndex } ?: -1) + 1
+        return copy(tracks = tracks + MultitrackTrackSpec(clips = emptyList(), name = "$number Audio", colorIndex = color))
+    }
 
     fun removeTrack(index: Int): MultitrackProject =
         copy(tracks = tracks.filterIndexed { i, _ -> i != index })
+
+    /** Moves the track at [from] so it ends up at index [to] (both clamped), the rest keeping their order. */
+    fun moveTrack(from: Int, to: Int): MultitrackProject {
+        if (from !in tracks.indices) return this
+        val target = to.coerceIn(0, tracks.lastIndex)
+        if (target == from) return this
+        val list = tracks.toMutableList()
+        list.add(target, list.removeAt(from))
+        return copy(tracks = list)
+    }
+
+    fun renameTrack(index: Int, name: String): MultitrackProject = updateTrack(index) { it.copy(name = name) }
+
+    fun deleteClip(trackIndex: Int, clipIndex: Int): MultitrackProject =
+        updateTrack(trackIndex) { t -> t.copy(clips = t.clips.filterIndexed { i, _ -> i != clipIndex }) }
+
+    /**
+     * Splits a clip in two at project frame [atFrame] (Ableton's Split). Both
+     * halves share the original buffer. A split point outside the clip's
+     * interior is a no-op.
+     */
+    fun splitClip(trackIndex: Int, clipIndex: Int, atFrame: Long): MultitrackProject {
+        val clip = tracks.getOrNull(trackIndex)?.clips?.getOrNull(clipIndex) ?: return this
+        val offsetIntoClip = atFrame - clip.startFrame
+        if (offsetIntoClip <= 0L || offsetIntoClip >= clip.lengthFrames) return this
+        val head = clip.copy(lengthFrames = offsetIntoClip)
+        val tail = clip.copy(
+            startFrame = atFrame,
+            bufferOffsetFrames = clip.bufferOffsetFrames + offsetIntoClip,
+            lengthFrames = clip.lengthFrames - offsetIntoClip,
+        )
+        return updateTrack(trackIndex) { t ->
+            t.copy(clips = t.clips.flatMapIndexed { i, c -> if (i == clipIndex) listOf(head, tail) else listOf(c) })
+        }
+    }
+
+    /**
+     * Ableton's Duplicate: a copy placed right after the clip, replacing
+     * whatever it lands on (spliced via [AudioEngine.punchIn], like a take).
+     * Shares the original's buffer.
+     */
+    fun duplicateClip(engine: AudioEngine, trackIndex: Int, clipIndex: Int): MultitrackProject {
+        val clip = tracks.getOrNull(trackIndex)?.clips?.getOrNull(clipIndex) ?: return this
+        return withPunchIn(engine, trackIndex, clip.copy(startFrame = clip.startFrame + clip.lengthFrames))
+    }
+
+    /**
+     * Moves a clip to another track (or the same one) as [moved] — the
+     * clip's new position/trim, computed by [ArrangementMath] — splicing it
+     * over whatever it lands on.
+     */
+    fun moveClip(engine: AudioEngine, fromTrack: Int, clipIndex: Int, toTrack: Int, moved: MultitrackClipSpec): MultitrackProject {
+        if (tracks.getOrNull(fromTrack)?.clips?.getOrNull(clipIndex) == null || toTrack !in tracks.indices) return this
+        return deleteClip(fromTrack, clipIndex).withPunchIn(engine, toTrack, moved)
+    }
 
     fun withTrackGain(index: Int, gain: Float): MultitrackProject = updateTrack(index) { it.copy(gain = gain) }
 
@@ -137,7 +201,8 @@ data class MultitrackProject(
     }
 
     /** Plays every track in this project via [AudioEngine.startMultitrackPlayback], with the click on this project's beat grid. */
-    fun play(engine: AudioEngine): Boolean = engine.startMultitrackPlayback(tracks, bpm, beatsPerBar)
+    fun play(engine: AudioEngine, fromFrame: Long = 0L): Boolean =
+        engine.startMultitrackPlayback(tracks, bpm, beatsPerBar, fromFrame)
 
     /**
      * Arms a real overdub recording onto [targetIndex] — every OTHER

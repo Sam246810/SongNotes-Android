@@ -186,13 +186,20 @@ class AudioEngine {
      *
      * [bpm]/[beatsPerBar] put a metronome click on the project's beat grid
      * while [setMetronomeOn] is on; [bpm] 0 (the default) plays no click.
+     * [startFrame] is the project frame to start from; [EngineState.playbackFrame]
+     * reports project frames either way.
      */
-    fun startMultitrackPlayback(tracks: List<MultitrackTrackSpec>, bpm: Double = 0.0, beatsPerBar: Int = 4): Boolean {
+    fun startMultitrackPlayback(
+        tracks: List<MultitrackTrackSpec>,
+        bpm: Double = 0.0,
+        beatsPerBar: Int = 4,
+        startFrame: Long = 0L,
+    ): Boolean {
         if (!ensureCreated()) return false
         val f = flattenTracks(tracks)
         return nativeStartMultitrackPlayback(
             handle, f.clipBuffers, f.clipStartFrames, f.clipBufferOffsetFrames, f.clipLengthFrames,
-            f.trackClipCounts, f.trackGains, f.trackMuted, f.trackSoloed, bpm, beatsPerBar,
+            f.trackClipCounts, f.trackGains, f.trackMuted, f.trackSoloed, bpm, beatsPerBar, startFrame,
         )
     }
 
@@ -496,6 +503,7 @@ class AudioEngine {
         trackSoloed: BooleanArray,
         bpm: Double,
         beatsPerBar: Int,
+        startFrame: Long,
     ): Boolean
     private external fun nativeSetMetronomeOn(handle: Long, on: Boolean)
     private external fun nativePunchIn(
@@ -600,6 +608,10 @@ data class MultitrackTrackSpec(
     val gain: Float = 1.0f,
     val muted: Boolean = false,
     val soloed: Boolean = false,
+    /** Display name ("1 Audio" by default, Ableton-style); UI only, never crosses JNI. */
+    val name: String = "",
+    /** Index into the UI's clip colour palette, kept with the track so its colour follows it when reordered. UI only. */
+    val colorIndex: Int = 0,
 )
 
 /** JNI-shaped output of [AudioEngine.flattenTracks] — see its doc comment. */

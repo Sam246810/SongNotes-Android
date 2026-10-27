@@ -88,6 +88,8 @@ class MultitrackProjectStorage(private val projectDir: File) {
                     .put("gain", track.gain.toDouble())
                     .put("muted", track.muted)
                     .put("soloed", track.soloed)
+                    .put("name", track.name)
+                    .put("colorIndex", track.colorIndex)
                     .put("clips", clipsJson),
             )
         }
@@ -155,6 +157,10 @@ class MultitrackProjectStorage(private val projectDir: File) {
                 gain = trackJson.getDouble("gain").toFloat(),
                 muted = trackJson.getBoolean("muted"),
                 soloed = trackJson.getBoolean("soloed"),
+                // Projects saved before tracks had names/colours get the
+                // defaults a new project would have given them.
+                name = trackJson.optString("name", "").ifEmpty { "${i + 1} Audio" },
+                colorIndex = trackJson.optInt("colorIndex", i),
             )
         }
         writtenBuffers.clear()

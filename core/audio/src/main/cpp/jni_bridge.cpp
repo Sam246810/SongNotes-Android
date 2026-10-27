@@ -179,13 +179,13 @@ Java_com_songnotes_core_audio_AudioEngine_nativeStartMultitrackPlayback(
     JNIEnv *env, jobject, jlong handle, jobjectArray clipBuffers, jlongArray clipStartFrames,
     jlongArray clipBufferOffsetFrames, jlongArray clipLengthFrames, jintArray trackClipCounts,
     jfloatArray trackGains, jbooleanArray trackMuted, jbooleanArray trackSoloed, jdouble bpm,
-    jint beatsPerBar) {
+    jint beatsPerBar, jlong startFrame) {
     auto *engine = toEngine(handle);
     if (!engine || !clipBuffers || !trackClipCounts) return JNI_FALSE;
     const auto tracks =
         parseFlatTracks(env, clipBuffers, clipStartFrames, clipBufferOffsetFrames, clipLengthFrames,
                          trackClipCounts, trackGains, trackMuted, trackSoloed);
-    return engine->startMultitrackPlayback(tracks, bpm, beatsPerBar) ? JNI_TRUE : JNI_FALSE;
+    return engine->startMultitrackPlayback(tracks, bpm, beatsPerBar, startFrame) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL

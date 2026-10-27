@@ -106,8 +106,12 @@ public:
     // bpm/beatsPerBar drive the metronome during playback (see
     // setMetronomeOn): clicks land on the project's own beat grid, beat 0
     // at project frame 0. bpm <= 0 (the default) means no playback click.
+    //
+    // startFrame is the project frame playback begins at (Ableton plays from
+    // the insert marker); playbackFrame in the state block reports project
+    // frames, so the UI's playhead needs no offset.
     bool startMultitrackPlayback(const std::vector<dsp::Track> &tracks, double bpm = 0.0,
-                                 int32_t beatsPerBar = 4);
+                                 int32_t beatsPerBar = 4, int64_t startFrame = 0);
 
     void stopPlayback();
 
