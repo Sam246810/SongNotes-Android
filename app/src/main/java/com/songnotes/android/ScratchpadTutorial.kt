@@ -130,8 +130,8 @@ private const val SavedOnPhone =
 private val SimpleSteps = listOf(
     TutorialStep(
         "simple_record",
-        "Record a layer",
-        "Tap the big red button and sing, hum or play. Tap it again to stop. Every take becomes a new layer that plays along with the ones before it, so you can stack harmonies and parts.",
+        "Record a voice note",
+        "Tap the big red button and sing, hum or play. Tap it again to stop. Record again and it adds on to the end. For more tracks, use Advanced.",
         TourHint.Tap,
     ),
     TutorialStep(
@@ -143,7 +143,7 @@ private val SimpleSteps = listOf(
     TutorialStep(
         "first_layer_wave",
         "Scrub through your demo",
-        "This is a layer's waveform (here, an example; your own takes will look like this). Drag along it, or along the bar under the clock, to move the playhead: play starts there, and so does your next layer.",
+        "This is a layer's waveform (here, an example; your own takes will look like this). Drag along it, or along the bar under the clock, to move the playhead: that's where play starts.",
         TourHint.DragSideways,
     ),
     TutorialStep(

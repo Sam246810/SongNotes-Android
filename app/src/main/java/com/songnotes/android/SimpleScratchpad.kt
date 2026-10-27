@@ -114,11 +114,12 @@ fun Modifier.notebookPaper(rule: Color, margin: Color, spacing: Dp = 34.dp, marg
     }
 
 /**
- * Simple mode: a multitrack voice-notes recorder with a metronome. Every
- * take is a new layer that plays along with the ones before it; there are no
- * bars, beats or grid. Layers stack as cards on ruled paper, each with its
+ * Simple mode: a voice-notes recorder with a metronome, for the song's
+ * voice note (Track 1). Every take goes on the end of it, Samsung Voice
+ * Recorder style; there are no bars, beats or grid. Tracks show as cards on
+ * ruled paper (the old layer view, until Simple's rebuild), each with its
  * whole-song waveform, mute, solo and volume. Tap a waveform to move the
- * playhead; that's where play starts and where the next layer begins.
+ * playhead; that's where play starts.
  *
  * It edits the same project as Advanced mode, so switching never loses
  * anything (a song's demo is one thing, shown two ways).
@@ -411,7 +412,7 @@ private fun EmptyDemo(modifier: Modifier) {
         Text("Hum it before it's gone", style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(6.dp))
         Text(
-            "Tap the red button to record your first layer. Every take after that stacks on top and plays along.",
+            "Tap the red button to record a voice note. Tap it again later to add on to the end.",
             style = MaterialTheme.typography.bodyMedium,
             color = SongNotesTheme.colors.muted,
         )
@@ -732,10 +733,10 @@ private fun SimpleTransport(
                 when {
                     isArmed && countInBeatsRemaining > 0 -> "Count-in… $countInBeatsRemaining"
                     isArmed -> "Get ready…"
-                    isRecording -> timeCaption ?: "Recording a new layer"
+                    isRecording -> timeCaption ?: "Recording"
                     isPlaying -> "Playing"
-                    layerCount == 0 -> "Tap ● to record your first layer"
-                    else -> "Tap ● to add another layer"
+                    layerCount == 0 -> "Tap ● to record a voice note"
+                    else -> "Tap ● to keep recording"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = SongNotesTheme.colors.muted,
@@ -799,34 +800,45 @@ private fun SimpleTransport(
  * anywhere along it; during playback, letting go jumps playback there.
  */
 @Composable
-private fun SeekBar(positionFrame: Long, timelineFrames: Long, onSeek: (Long, Boolean) -> Unit, modifier: Modifier = Modifier) {
+internal fun SeekBar(positionFrame: Long, timelineFrames: Long, onSeek: (Long, Boolean) -> Unit, modifier: Modifier = Modifier) {
     val currentOnSeek by rememberUpdatedState(onSeek)
     val track = MaterialTheme.colorScheme.surfaceContainerHighest
     val fill = MaterialTheme.colorScheme.primary
+    // The line is inset by the thumb's radius, so the thumb stays inside the
+    // bar's bounds at either end instead of drawing over its neighbours.
+    val thumbRadius = 8.dp
     Canvas(
         modifier = modifier
             .height(28.dp)
             .pointerInput(timelineFrames) {
-                detectTapGestures { currentOnSeek((it.x / size.width * timelineFrames).toLong().coerceIn(0L, timelineFrames), true) }
+                val inset = thumbRadius.toPx()
+                fun frameAt(x: Float): Long =
+                    ((x - inset) / (size.width - 2 * inset).coerceAtLeast(1f) * timelineFrames).toLong().coerceIn(0L, timelineFrames)
+                detectTapGestures { currentOnSeek(frameAt(it.x), true) }
             }
             .pointerInput(timelineFrames) {
+                val inset = thumbRadius.toPx()
+                fun frameAt(x: Float): Long =
+                    ((x - inset) / (size.width - 2 * inset).coerceAtLeast(1f) * timelineFrames).toLong().coerceIn(0L, timelineFrames)
                 var last = 0L
                 detectHorizontalDragGestures(
                     onDragEnd = { currentOnSeek(last, true) },
                     onDragCancel = { currentOnSeek(last, true) },
                 ) { change, _ ->
                     change.consume()
-                    last = (change.position.x / size.width * timelineFrames).toLong().coerceIn(0L, timelineFrames)
+                    last = frameAt(change.position.x)
                     currentOnSeek(last, false)
                 }
             },
     ) {
         val mid = size.height / 2f
         val h = 4.dp.toPx()
-        val x = (positionFrame.toDouble() / timelineFrames * size.width).toFloat().coerceIn(0f, size.width)
-        drawRoundRect(track, topLeft = Offset(0f, mid - h / 2f), size = Size(size.width, h), cornerRadius = CornerRadius(h / 2f))
-        drawRoundRect(fill, topLeft = Offset(0f, mid - h / 2f), size = Size(x, h), cornerRadius = CornerRadius(h / 2f))
-        drawCircle(fill, radius = 8.dp.toPx(), center = Offset(x, mid))
+        val r = thumbRadius.toPx()
+        val width = (size.width - 2 * r).coerceAtLeast(0f)
+        val x = r + (positionFrame.toDouble() / timelineFrames * width).toFloat().coerceIn(0f, width)
+        drawRoundRect(track, topLeft = Offset(r, mid - h / 2f), size = Size(width, h), cornerRadius = CornerRadius(h / 2f))
+        drawRoundRect(fill, topLeft = Offset(r, mid - h / 2f), size = Size(x - r, h), cornerRadius = CornerRadius(h / 2f))
+        drawCircle(fill, radius = r, center = Offset(x, mid))
     }
 }
 
@@ -847,7 +859,7 @@ private fun BigRecordButton(isRecording: Boolean, enabled: Boolean, onClick: () 
             .background(if (enabled) RecordRed else RecordRed.copy(alpha = 0.35f))
             .clickable(enabled = enabled, onClick = onClick)
             .semantics {
-                contentDescription = if (isRecording) "Stop recording" else "Record a layer"
+                contentDescription = if (isRecording) "Stop recording" else "Record"
                 role = Role.Button
             },
         contentAlignment = Alignment.Center,

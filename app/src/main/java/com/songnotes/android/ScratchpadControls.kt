@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.GridOff
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Stop
@@ -273,7 +274,7 @@ private fun TimeSignatureChip(beatsPerBar: Int, enabled: Boolean, onChange: (Int
  * the small arrow), the way Ableton's metronome button carries it.
  */
 @Composable
-private fun MetronomeButton(
+internal fun MetronomeButton(
     on: Boolean,
     countInBars: Int,
     enabled: Boolean,
@@ -655,42 +656,34 @@ fun InputLevelMeter(peakMilli: Int, clipped: Boolean, modifier: Modifier = Modif
 fun formatElapsed(seconds: Int): String = "%d:%02d".format(seconds / 60, seconds % 60)
 
 /**
- * Shown over the lyrics while a take keeps rolling with the Scratchpad
- * hidden, so leaving to look at the lyrics never looks like it stopped the
- * take. Tap to come back.
+ * The song's voice note at the foot of the lyrics, voice-recorder style:
+ * Record (onto the end of Track 1, wherever the playhead is), play and a seek line,
+ * the metronome switch with its count-in menu, and a way into the
+ * Scratchpad. While a take rolls — started here or in the Scratchpad and
+ * then hidden — it shows the count-in beats, then the time and input level,
+ * so looking at the lyrics never looks like it stopped the take.
  */
 @Composable
-fun MinimizedRecordingBubble(elapsedText: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Surface(
-        onClick = onClick,
-        modifier = modifier,
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.error,
-        contentColor = MaterialTheme.colorScheme.onError,
-        shadowElevation = 6.dp,
-    ) {
-        Row(modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Mic, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text(elapsedText, style = MaterialTheme.typography.labelLarge)
-            Spacer(Modifier.width(8.dp))
-            Text("Recording — tap to view", style = MaterialTheme.typography.labelMedium)
-        }
-    }
-}
-
-/**
- * The song's demo, playable from the lyrics without opening the Scratchpad,
- * voice-notes style: play/pause, elapsed / total, a thin progress line. Tap
- * the label to open the Scratchpad.
- */
-@Composable
-fun DemoMiniPlayer(
-    elapsedSeconds: Int,
-    totalSeconds: Int,
-    progress: Float,
+fun LyricsRecorderBar(
+    isRecording: Boolean,
+    isArmed: Boolean,
+    countInBeatsRemaining: Int,
+    countInBeatsTotal: Int,
     isPlaying: Boolean,
+    positionFrame: Long,
+    totalFrames: Long,
+    sampleRate: Int,
+    /** "stops in 42s" near the take limit, else null. */
+    limitCaption: String?,
+    meterPeakMilli: Int,
+    meterClipped: Boolean,
+    metronomeOn: Boolean,
+    countInBars: Int,
+    onRecord: () -> Unit,
     onPlayToggle: () -> Unit,
+    onSeek: (frame: Long, done: Boolean) -> Unit,
+    onMetronomeToggle: () -> Unit,
+    onCountInChange: (Int) -> Unit,
     onOpen: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -700,33 +693,110 @@ fun DemoMiniPlayer(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         shadowElevation = 6.dp,
     ) {
-        Column {
-            Row(
-                modifier = Modifier.padding(start = 6.dp, end = 16.dp, top = 4.dp, bottom = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+        Row(
+            modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            BarRecordButton(isRecording = isRecording, enabled = !isPlaying, onClick = onRecord)
+            if (!isRecording && totalFrames > 0L) {
                 IconButton(onClick = onPlayToggle) {
                     Icon(
                         if (isPlaying) Icons.Filled.Stop else Icons.Filled.PlayArrow,
-                        contentDescription = if (isPlaying) "Stop demo" else "Play demo",
+                        contentDescription = if (isPlaying) "Stop" else "Play voice note",
                         tint = MaterialTheme.colorScheme.primary,
                     )
                 }
-                Column(modifier = Modifier.clickable(onClick = onOpen).padding(vertical = 4.dp)) {
-                    Text("Demo  ›", style = MaterialTheme.typography.labelLarge)
-                    Text(
-                        "${formatElapsed(elapsedSeconds)} / ${formatElapsed(totalSeconds)}",
-                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+            } else {
+                Spacer(Modifier.width(10.dp))
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                val clock = formatElapsed((positionFrame / sampleRate).toInt())
+                when {
+                    isArmed -> {
+                        Text(
+                            if (countInBeatsTotal > 0) "Count-in" else "Get ready…",
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                        if (countInBeatsTotal > 0) {
+                            CountInDots(total = countInBeatsTotal, remaining = countInBeatsRemaining, modifier = Modifier.padding(top = 4.dp))
+                        }
+                    }
+                    isRecording -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(8.dp).clip(CircleShape).background(RecordRed))
+                            Spacer(Modifier.width(6.dp))
+                            Text(clock, style = MaterialTheme.typography.labelLarge.copy(fontFamily = FontFamily.Monospace), color = RecordRed)
+                            limitCaption?.let {
+                                Spacer(Modifier.width(8.dp))
+                                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                            }
+                        }
+                        InputLevelMeter(meterPeakMilli, meterClipped, modifier = Modifier.padding(top = 6.dp).fillMaxWidth().height(5.dp))
+                    }
+                    totalFrames > 0L -> {
+                        val timeline = maxOf(totalFrames, positionFrame)
+                        Text(
+                            "$clock / ${formatElapsed(((timeline + sampleRate - 1) / sampleRate).toInt())}",
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        SeekBar(positionFrame = positionFrame, timelineFrames = timeline, onSeek = onSeek, modifier = Modifier.fillMaxWidth())
+                    }
+                    else -> {
+                        Text("Voice note", style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            "Tap ● to record",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
-            Box(
-                Modifier.padding(horizontal = 20.dp).padding(bottom = 6.dp).fillMaxWidth().height(3.dp)
-                    .clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceContainerHighest),
-            ) {
-                Box(Modifier.fillMaxWidth(progress.coerceIn(0f, 1f)).fillMaxHeight().background(MaterialTheme.colorScheme.primary))
+            Spacer(Modifier.width(8.dp))
+            MetronomeButton(
+                on = metronomeOn,
+                countInBars = countInBars,
+                enabled = !isRecording,
+                onToggle = onMetronomeToggle,
+                onCountIn = onCountInChange,
+            )
+            IconButton(onClick = onOpen) {
+                Icon(Icons.Filled.OpenInFull, contentDescription = "Open Scratchpad", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
             }
+        }
+    }
+}
+
+/** Red dot to record, a white square in red to stop. */
+@Composable
+private fun BarRecordButton(isRecording: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(if (enabled || isRecording) RecordRed else RecordRed.copy(alpha = 0.35f))
+            .clickable(enabled = enabled || isRecording, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (isRecording) {
+            Box(Modifier.size(14.dp).clip(RoundedCornerShape(3.dp)).background(Color.White))
+        } else {
+            Icon(Icons.Filled.Mic, contentDescription = "Record voice note", tint = Color.White, modifier = Modifier.size(22.dp))
+        }
+    }
+}
+
+/** One dot per count-in beat, filled as they're counted off. */
+@Composable
+private fun CountInDots(total: Int, remaining: Int, modifier: Modifier = Modifier) {
+    Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        val counted = (total - remaining).coerceIn(0, total)
+        for (i in 0 until total) {
+            Box(
+                Modifier.size(9.dp).clip(CircleShape).background(
+                    if (i < counted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest,
+                ),
+            )
         }
     }
 }

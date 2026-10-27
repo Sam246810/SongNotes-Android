@@ -44,16 +44,15 @@ import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.FormatSize
+import androidx.compose.material.icons.filled.KeyboardDoubleArrowDown
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -203,8 +202,8 @@ private const val SPLIT_DEBOUNCE_MS = 180L
  */
 private const val HISTORY_DEBOUNCE_MS = 600L
 
-/** The autoscroll button's height plus its margins -- see [AutoscrollControls]. */
-private val AUTOSCROLL_BUTTON_CLEARANCE = 88.dp
+/** The voice-note bar's height plus its margins -- see [LyricsRecorderBar]. */
+private val LYRICS_BAR_CLEARANCE = 88.dp
 private const val MAX_HISTORY = 100
 
 /**
@@ -782,6 +781,19 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
                 autoscrollEnabled = false
                 break
             }
+        }
+    }
+
+    fun toggleAutoscroll() {
+        if (autoscrollEnabled) {
+            autoscrollEnabled = false
+            return
+        }
+        scope.launch {
+            // Nothing left below: play from the top again, like replaying a
+            // track, rather than starting and stopping on the same frame.
+            if (!lazyListState.canScrollForward) lazyListState.animateScrollToItem(0)
+            autoscrollEnabled = true
         }
     }
 
@@ -1403,6 +1415,23 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
                 Icon(Icons.Filled.Add, contentDescription = "Transpose up", tint = ChordColor)
             }
             Spacer(Modifier.weight(1f))
+            // Autoscroll lives up here so the foot of the sheet is free for
+            // the voice-note bar; its speed shows in a row below while it runs.
+            IconButton(onClick = ::toggleAutoscroll, enabled = autoscrollEnabled || lyricsCanScroll) {
+                Icon(
+                    when {
+                        autoscrollEnabled -> Icons.Filled.Pause
+                        lyricsAtEnd && lyricsCanScroll -> Icons.Filled.Replay
+                        else -> Icons.Filled.KeyboardDoubleArrowDown
+                    },
+                    contentDescription = when {
+                        autoscrollEnabled -> "Stop autoscroll"
+                        lyricsAtEnd && lyricsCanScroll -> "Autoscroll from the top"
+                        else -> "Start autoscroll"
+                    },
+                    tint = if (autoscrollEnabled || lyricsCanScroll) ChordColor else TextMuted,
+                )
+            }
             // Text size: one button, its A-/A+ in a menu that stays open while
             // you tap -- two always-visible buttons didn't fit beside the rest.
             Box {
@@ -1422,15 +1451,22 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
                 }
             }
         }
+        if (autoscrollEnabled) {
+            AutoscrollSpeedRow(
+                speed = autoscrollSpeed,
+                onSpeedChange = { autoscrollSpeed = it },
+                onStop = { autoscrollEnabled = false },
+            )
+        }
         HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = PaperLine, thickness = 1.dp)
         Spacer(Modifier.height(4.dp))
 
         LazyColumn(
             state = lazyListState,
             // Room past the last row to scroll it, and "+ Add line", clear of
-            // the autoscroll button floating over the bottom corner (hidden
-            // while the keyboard is up, so no room needed then).
-            contentPadding = PaddingValues(bottom = if (WindowInsets.isImeVisible) 8.dp else AUTOSCROLL_BUTTON_CLEARANCE),
+            // the voice-note bar floating over the bottom (hidden while the
+            // keyboard is up, so no room needed then).
+            contentPadding = PaddingValues(bottom = if (WindowInsets.isImeVisible) 8.dp else LYRICS_BAR_CLEARANCE),
             modifier = Modifier
                 .fillMaxSize()
                 // Edge-to-edge: without this the list ran on under the system
@@ -1538,42 +1574,6 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
         }
     }
 
-    // Drawn before ScratchpadScreen/ChordVoicingPanel below so either one's
-    // surface covers this button when showing. (The chord panel used to be
-    // drawn first, despite this comment, and the Play button floated on top
-    // of its sheet.) Also hidden outright while a chord's panel is open, since
-    // the sheet is bottom-anchored right where the button sits. Hidden while
-    // the keyboard is up: the screen ends at the keyboard, so the button would
-    // ride up over the row being typed in, and autoscroll is for playing, not
-    // writing.
-    if (!WindowInsets.isImeVisible && activeChordName == null) {
-        AutoscrollControls(
-            enabled = autoscrollEnabled,
-            atEnd = lyricsAtEnd,
-            canScroll = lyricsCanScroll,
-            onToggle = {
-                if (autoscrollEnabled) {
-                    autoscrollEnabled = false
-                } else {
-                    scope.launch {
-                        // Nothing left below: play from the top again, like
-                        // replaying a track, rather than starting and
-                        // stopping on the same frame (which only flashed the
-                        // speed pill up and away).
-                        if (!lazyListState.canScrollForward) lazyListState.animateScrollToItem(0)
-                        autoscrollEnabled = true
-                    }
-                }
-            },
-            speed = autoscrollSpeed,
-            onSpeedChange = { autoscrollSpeed = it },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .navigationBarsPadding()
-                .padding(16.dp),
-        )
-    }
-
     activeChordName?.let { name ->
         ChordVoicingPanel(
             chordName = name,
@@ -1606,6 +1606,7 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
         onRecordingChanged = { isScratchpadRecording = it },
         onDone = { scratchpadOpen = false },
         onExpand = { scratchpadOpen = true },
+        lyricsBarAllowed = activeChordName == null && !pianoOpen,
     )
     }
 }
@@ -1923,66 +1924,34 @@ private fun chordAtColumn(tokens: List<ChordToken>, column: Int): String? {
 }
 
 /**
- * Autoscroll's whole UI footprint: a round toggle button (Play while off,
- * Pause while on, Replay at the end of the song -- it scrolls back to the top
- * and plays from there -- and greyed out when the whole song fits on screen
- * with nothing to scroll), with a small speed pill above it that only appears while
- * running -- a stepped +/- rather than a drag slider, matching the same
- * "tap targets, not fine gestures" language [TimelineZoomControls] in
- * `ScratchpadScreen.kt` already established for a very similar "adjust a
- * number in small steps" control. Deliberately no persistent settings
- * screen for this: the concept UG's autoscroll is chasing is "one tap
- * before I start playing," not a configuration surface.
+ * Autoscroll's speed while it runs, as a row under the toolbar (the toggle
+ * itself is in the toolbar): a stepped -/+ rather than a drag slider, the
+ * same "tap targets, not fine gestures" language as the Scratchpad's zoom.
+ * Deliberately no settings screen: autoscroll is "one tap before I start
+ * playing," not a configuration surface.
  */
 @Composable
-private fun AutoscrollControls(
-    enabled: Boolean,
-    atEnd: Boolean,
-    canScroll: Boolean,
-    onToggle: () -> Unit,
-    speed: Float,
-    onSpeedChange: (Float) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Column(horizontalAlignment = Alignment.End, modifier = modifier) {
-        if (enabled) {
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 4.dp,
-                modifier = Modifier.padding(bottom = 8.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 4.dp)) {
-                    IconButton(
-                        enabled = speed > 0.25f,
-                        onClick = { onSpeedChange((speed - 0.25f).coerceAtLeast(0.25f)) },
-                    ) { Text("−", style = MaterialTheme.typography.titleMedium) }
-                    Text(
-                        "%.2fx".format(speed),
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.width(42.dp),
-                    )
-                    IconButton(
-                        enabled = speed < 3f,
-                        onClick = { onSpeedChange((speed + 0.25f).coerceAtMost(3f)) },
-                    ) { Text("+", style = MaterialTheme.typography.titleMedium) }
-                }
-            }
-        }
-        FilledIconButton(onClick = onToggle, enabled = enabled || canScroll) {
-            Icon(
-                when {
-                    enabled -> Icons.Filled.Pause
-                    atEnd && canScroll -> Icons.Filled.Replay
-                    else -> Icons.Filled.PlayArrow
-                },
-                contentDescription = when {
-                    enabled -> "Stop autoscroll"
-                    atEnd && canScroll -> "Autoscroll from the top"
-                    else -> "Start autoscroll"
-                },
-            )
-        }
+private fun AutoscrollSpeedRow(speed: Float, onSpeedChange: (Float) -> Unit, onStop: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Autoscroll", style = MaterialTheme.typography.labelLarge, color = ChordColor)
+        Spacer(Modifier.weight(1f))
+        IconButton(
+            enabled = speed > 0.25f,
+            onClick = { onSpeedChange((speed - 0.25f).coerceAtLeast(0.25f)) },
+        ) { Text("−", style = MaterialTheme.typography.titleMedium, color = ChordColor) }
+        Text(
+            "%.2fx".format(speed),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.width(42.dp),
+        )
+        IconButton(
+            enabled = speed < 3f,
+            onClick = { onSpeedChange((speed + 0.25f).coerceAtMost(3f)) },
+        ) { Text("+", style = MaterialTheme.typography.titleMedium, color = ChordColor) }
+        TextButton(onClick = onStop) { Text("Stop", color = ChordColor) }
     }
 }
 

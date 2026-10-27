@@ -39,6 +39,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -88,6 +89,12 @@ private val EdgeGrabZone = 24.dp
 /** Closest grid lines (and snap units) may sit; finer zoom gives finer units, Ableton's adaptive grid. */
 private val MinGridSpacing = 12.dp
 private val MinRulerLabelSpacing = 48.dp
+
+/** How close to either end of the ruler a scrub drag starts scrolling the view along with it. */
+private val RulerEdgeZone = 40.dp
+
+/** Scroll speed at the very edge of [RulerEdgeZone] (and beyond it), in dp per second. */
+private const val RulerEdgeMaxDpPerSecond = 900f
 
 /** A clip, addressed by position in the project. */
 data class ClipRef(val track: Int, val clip: Int)
@@ -238,6 +245,44 @@ fun ArrangementView(
         fun frameToX(frame: Long): Float = (frame / framesPerBeat * pxPerBeat).toFloat() - scrollX
         fun xToFrame(x: Float): Long = ((x + scrollX) * framesPerPx).toLong().coerceAtLeast(0L)
 
+        // A remembered lambda keyed on what it uses, not a function
+        // reference: a reference to a local fun was memoized from the first
+        // composition and kept converting with the first zoom level.
+        val scrubTo: (Float) -> Unit = remember(viewportWidthPx, snapUnitFrames, framesPerPx, onInsertFrameChange) {
+            { x -> onInsertFrameChange(ArrangementMath.snap(xToFrame(x.coerceIn(0f, viewportWidthPx)), snapUnitFrames)) }
+        }
+        val currentScrubTo by rememberUpdatedState(scrubTo)
+
+        // Where a ruler scrub drag is (ruler x; may be past either end), null
+        // when not dragging. Held near or past an edge, the view scrolls
+        // that way and the insert marker comes along, faster the further
+        // in, the way Ableton's ruler follows a drag off screen.
+        var rulerDragX by remember { mutableStateOf<Float?>(null) }
+        LaunchedEffect(rulerDragX != null) {
+            if (rulerDragX == null) return@LaunchedEffect
+            val zone = with(density) { RulerEdgeZone.toPx() }
+            val maxSpeed = with(density) { RulerEdgeMaxDpPerSecond.dp.toPx() }
+            var last = withFrameNanos { it }
+            while (true) {
+                val now = withFrameNanos { it }
+                val seconds = (now - last) / 1_000_000_000f
+                last = now
+                val x = rulerDragX ?: break
+                val width = extent.viewportWidthPx
+                val depth = when {
+                    x > width - zone -> ((x - (width - zone)) / zone).coerceAtMost(1f)
+                    x < zone -> -((zone - x) / zone).coerceAtMost(1f)
+                    else -> 0f
+                }
+                if (depth != 0f) {
+                    val before = scrollX
+                    scrollX += depth * maxSpeed * seconds
+                    clampScroll()
+                    if (scrollX != before) currentScrubTo(x)
+                }
+            }
+        }
+
         Column(modifier = Modifier.fillMaxSize()) {
             // Ruler row: fit-to-project button over the header column.
             Row(modifier = Modifier.fillMaxWidth().height(RulerHeight)) {
@@ -261,7 +306,8 @@ fun ArrangementView(
                     framesPerBeat = framesPerBeat,
                     insertFrame = insertFrame,
                     playheadFrame = playheadFrame,
-                    onScrub = { x -> onInsertFrameChange(ArrangementMath.snap(xToFrame(x), snapUnitFrames)) },
+                    onScrub = scrubTo,
+                    onDragX = { rulerDragX = it },
                     enabled = editable,
                     modifier = Modifier.weight(1f).fillMaxHeight().tutorialTarget(tutorialTargets, "ruler"),
                 )
@@ -360,7 +406,10 @@ fun ArrangementView(
                 val currentOnSelect by rememberUpdatedState(onSelect)
                 val currentOnInsert by rememberUpdatedState(onInsertFrameChange)
                 val currentClampScroll by rememberUpdatedState(::clampScroll)
-                val currentXToFrame by rememberUpdatedState(::xToFrame)
+                // Keyed lambda, not ::xToFrame: the reference was memoized
+                // from the first composition, so taps placed the marker with
+                // the zoom level the view opened at.
+                val currentXToFrame by rememberUpdatedState(remember(framesPerPx) { { x: Float -> xToFrame(x) } })
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -564,6 +613,8 @@ private fun Ruler(
     insertFrame: Long,
     playheadFrame: Long?,
     onScrub: (x: Float) -> Unit,
+    /** The drag's x while a scrub drag is held (even past the ruler's ends), null once it ends. */
+    onDragX: (Float?) -> Unit,
     enabled: Boolean,
     modifier: Modifier,
 ) {
@@ -576,8 +627,12 @@ private fun Ruler(
     val background = MaterialTheme.colorScheme.surfaceContainerHigh
     val minLabelPx = with(density) { MinRulerLabelSpacing.toPx() }.toDouble()
     val currentOnScrub by rememberUpdatedState(onScrub)
+    val currentOnDragX by rememberUpdatedState(onDragX)
     Canvas(
         modifier = modifier
+            // Labels for bars just off the left edge would otherwise draw
+            // over the track-header column once the view is scrolled.
+            .clipToBounds()
             .background(background)
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
@@ -585,7 +640,15 @@ private fun Ruler(
             }
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
-                detectDragGestures { change, _ -> change.consume(); currentOnScrub(change.position.x) }
+                detectDragGestures(
+                    onDragStart = { currentOnDragX(it.x) },
+                    onDragEnd = { currentOnDragX(null) },
+                    onDragCancel = { currentOnDragX(null) },
+                ) { change, _ ->
+                    change.consume()
+                    currentOnDragX(change.position.x)
+                    currentOnScrub(change.position.x)
+                }
             },
     ) {
         val bar = beatsPerBar.coerceAtLeast(1)
