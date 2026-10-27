@@ -169,3 +169,45 @@ follow, order persists); a short (4s) clip dragged hard left stops at 0 with
 no jitter or shrink, and drags right cleanly; a live recording clip with the
 header meter; rotation mid-take. **Not verified**: pinch zoom (adb can't
 pinch; the gesture is Compose's standard `detectTransformGestures`).
+
+## §5 Recording polish: notification and mic pointer
+
+**Notification.** The app never requested `POST_NOTIFICATIONS`, so on
+Android 13+ the recording foreground service's notification was never shown,
+and its icon was a placeholder play glyph. Now:
+- A mic status-bar icon (`res/drawable/ic_stat_mic.xml`), "Recording ·
+  Scratchpad · <song title>", a running chronometer, and a tap target that
+  brings the running app back (launcher-style intent, not a second
+  activity).
+- On Android 16+ it requests **promotion** (Live Updates:
+  `android.requestPromotedOngoing` + `POST_PROMOTED_NOTIFICATIONS`). On
+  One UI 8 that's the status-bar timer chip / Now Bar, like Samsung Voice
+  Recorder. It's a request; the system decides.
+- `POST_NOTIFICATIONS` is asked **once**, on the first Record (after mic
+  permission), with a one-line reason; recording starts whatever the answer
+  (`ScratchpadPreferences.notificationPermissionAsked`).
+- `RecordingForegroundService.start(context, title)` / `.stop(context)`
+  helpers; the calibration/diagnostics screens still start it plainly.
+
+**Mic pointer.** `AudioManager.getMicrophones()` (no permission) reports
+each built-in mic's position in metres. `locateBuiltinMic` takes the one
+nearest the bottom (the usual recording mic) and turns it into a fraction
+of the natural-orientation screen; `rotateNaturalFraction` maps that to
+the current rotation. While a take is armed or recording, a pulsing red
+"mic" tag with an arrow sits at the nearest screen edge, inside the safe
+area. Hidden when the phone doesn't report positions or an external
+(wired/USB) mic is in use.
+
+The Fold 6 (cover screen) reports four mics; the primary is
+`builtin_mic_1`, "bottom", at (0.027, 0.006) m on a 0.059 × 0.147 m
+screen → 46% across the bottom edge. In landscape the tag appears on the
+nav-bar side, which is the phone's natural bottom: correct.
+
+**Verified on device:** the permission prompt appears on the first Record,
+and the take still starts after dismissing it; the mic tag shows on the
+correct edge during a take. **Not verified:** the notification and Live
+Update themselves. Notification permission is a setting on the user's
+phone, so it wasn't granted during testing, and the "already asked" flag
+was reset afterwards so the user gets the prompt on their own first
+Record. The inner (unfolded) display may report positions relative to the
+cover screen; not checked.

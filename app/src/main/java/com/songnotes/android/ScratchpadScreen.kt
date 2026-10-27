@@ -4,10 +4,10 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -117,6 +117,8 @@ fun ScratchpadScreen(
      * following it live. One-directional by request.
      */
     songBpm: Int,
+    /** Shown in the recording notification ("Scratchpad · <title>"). */
+    songTitle: String = "",
     onDone: () -> Unit,
     onExpand: () -> Unit,
     onRecordingChanged: (Boolean) -> Unit = {},
@@ -252,7 +254,7 @@ fun ScratchpadScreen(
         onDispose {
             if (isRecording) {
                 engine.stopRecording()
-                context.stopService(Intent(context, RecordingForegroundService::class.java))
+                RecordingForegroundService.stop(context)
             }
         }
     }
@@ -305,14 +307,14 @@ fun ScratchpadScreen(
         val route = AudioRouteDetector(context).currentInputRoute()
         val calibrationOffsetFrames = CalibrationStore(context).load(route.routeKey)?.offsetFrames ?: 0.0
 
-        context.startForegroundService(Intent(context, RecordingForegroundService::class.java))
+        RecordingForegroundService.start(context, songTitle)
         val armed = project.armOverdub(
             engine, takeFile.absolutePath,
             targetIndex = targetIndex, backingTracksStartFrame = insertFrame,
             calibrationOffsetFrames = calibrationOffsetFrames,
         )
         if (!armed) {
-            context.stopService(Intent(context, RecordingForegroundService::class.java))
+            RecordingForegroundService.stop(context)
             statusMessage = "Couldn't start recording — see Diagnostics for the last error."
             return
         }
@@ -324,7 +326,7 @@ fun ScratchpadScreen(
 
     fun stopRecordingAndCommit(hitTakeLimit: Boolean = false) {
         engine.stopRecording()
-        context.stopService(Intent(context, RecordingForegroundService::class.java))
+        RecordingForegroundService.stop(context)
         val targetIndex = armedTrack
         scope.launch {
             delay(150) // let the writer thread flush its last buffered frames to disk
@@ -376,16 +378,35 @@ fun ScratchpadScreen(
         }
     }
 
+    // Notification permission is asked once, on the first Record, so the
+    // status bar can show the mic + timer while a take rolls. Recording goes
+    // ahead whatever the answer.
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        beginRecording()
+    }
+
+    fun beginRecordingAskingForNotificationsOnce() {
+        val needsAsk = Build.VERSION.SDK_INT >= 33 && !prefs.notificationPermissionAsked &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        if (needsAsk) {
+            prefs.notificationPermissionAsked = true
+            statusMessage = "Allow notifications to see a recording timer in the status bar."
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            beginRecording()
+        }
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         hasRecordPermission = granted
-        if (granted) beginRecording() else statusMessage = "Microphone permission is required to record."
+        if (granted) beginRecordingAskingForNotificationsOnce() else statusMessage = "Microphone permission is required to record."
     }
 
     fun onRecordPressed() {
         when {
             isRecording -> stopRecordingAndCommit()
             !hasRecordPermission -> permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            else -> beginRecording()
+            else -> beginRecordingAskingForNotificationsOnce()
         }
     }
 
@@ -416,6 +437,10 @@ fun ScratchpadScreen(
     }
 
     val recordedSeconds = engineState.framesRecorded / kSampleRate
+    // Where the built-in mic is (no permission needed); null if the phone
+    // doesn't say. Shown as a pointer while a take is armed or rolling.
+    val micNatural = remember { locateBuiltinMic(context) }
+    val usingBuiltinMic = currentInputRoute.let { it == null || it.isBuiltinMic || it.isBluetooth } || forceBuiltinMic
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (visible) {
@@ -599,6 +624,12 @@ fun ScratchpadScreen(
                         }
                     }
                 }
+            }
+
+            if (isRecording && usingBuiltinMic && micNatural != null) {
+                val configuration = LocalConfiguration.current
+                val rotation = remember(configuration) { context.display?.rotation ?: android.view.Surface.ROTATION_0 }
+                MicPointer(rotateNaturalFraction(micNatural, rotation), Modifier.windowInsetsPadding(WindowInsets.safeDrawing))
             }
 
             if (tempoDialogOpen) {

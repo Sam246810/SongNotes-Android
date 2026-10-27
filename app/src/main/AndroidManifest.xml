@@ -12,6 +12,11 @@
          haptic cueing during calibration (visual + haptic only, no
          audible click competing with the sweep/mic). -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- The recording notification: the status-bar mic + timer while a Scratchpad
+         take rolls (asked for once, on the first Record). Promoted = Android 16
+         Live Updates, which put it in the status-bar chip / Samsung's Now Bar. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
 
     <!-- No android:icon yet — Phase 0 has no app icon asset. Android falls back to a
          system default launcher icon until Phase 8 (or earlier, whenever branding lands). -->

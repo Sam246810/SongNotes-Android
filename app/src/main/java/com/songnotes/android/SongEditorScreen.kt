@@ -1602,6 +1602,7 @@ fun SongEditorScreen(songId: String, engine: AudioEngine, onDone: () -> Unit) {
         songId = songId,
         visible = scratchpadOpen,
         songBpm = meta.bpm,
+        songTitle = title,
         onRecordingChanged = { isScratchpadRecording = it },
         onDone = { scratchpadOpen = false },
         onExpand = { scratchpadOpen = true },
