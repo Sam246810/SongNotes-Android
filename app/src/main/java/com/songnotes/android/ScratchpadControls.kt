@@ -34,7 +34,6 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SaveAlt
-import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
@@ -126,7 +125,6 @@ fun ScratchpadControlBar(
     canRedo: Boolean,
     editsEnabled: Boolean,
     isExporting: Boolean,
-    portraitMode: Boolean,
     onBack: () -> Unit,
     onTempoClick: () -> Unit,
     onBeatsPerBarChange: (Int) -> Unit,
@@ -138,7 +136,7 @@ fun ScratchpadControlBar(
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onExport: () -> Unit,
-    onToggleOrientation: () -> Unit,
+    onSwitchToSimple: () -> Unit,
     onCalibrate: () -> Unit,
     onTutorial: () -> Unit,
     tutorialTargets: TutorialTargets? = null,
@@ -201,7 +199,7 @@ fun ScratchpadControlBar(
     val right: @Composable () -> Unit = {
         IconButton(enabled = canUndo, onClick = onUndo) { Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo") }
         IconButton(enabled = canRedo, onClick = onRedo) { Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo") }
-        OverflowMenu(isExporting, editsEnabled, portraitMode, onExport, onToggleOrientation, onCalibrate, onTutorial)
+        OverflowMenu(isExporting, editsEnabled, onExport, onSwitchToSimple, onCalibrate, onTutorial)
     }
 
     Surface(
@@ -244,10 +242,10 @@ private fun ControlChip(text: String, enabled: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .padding(horizontal = 4.dp)
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerHighest)
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+            .padding(horizontal = 12.dp, vertical = 7.dp),
     ) {
         Text(text, style = MaterialTheme.typography.labelLarge.copy(fontFamily = FontFamily.Monospace), maxLines = 1)
     }
@@ -287,7 +285,7 @@ private fun MetronomeButton(
         Row(
             modifier = Modifier
                 .padding(horizontal = 4.dp)
-                .clip(RoundedCornerShape(6.dp))
+                .clip(RoundedCornerShape(12.dp))
                 .background(if (on) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -367,9 +365,8 @@ private fun TransportButton(
 private fun OverflowMenu(
     isExporting: Boolean,
     editsEnabled: Boolean,
-    portraitMode: Boolean,
     onExport: () -> Unit,
-    onToggleOrientation: () -> Unit,
+    onSwitchToSimple: () -> Unit,
     onCalibrate: () -> Unit,
     onTutorial: () -> Unit,
 ) {
@@ -384,9 +381,10 @@ private fun OverflowMenu(
                 onClick = { open = false; onExport() },
             )
             DropdownMenuItem(
-                text = { Text(if (portraitMode) "Landscape view" else "Portrait view") },
-                leadingIcon = { Icon(Icons.Filled.ScreenRotation, contentDescription = null) },
-                onClick = { open = false; onToggleOrientation() },
+                text = { Text("Simple mode") },
+                leadingIcon = { Icon(Icons.Filled.Mic, contentDescription = null) },
+                enabled = editsEnabled,
+                onClick = { open = false; onSwitchToSimple() },
             )
             DropdownMenuItem(
                 text = { Text("Calibrate recording latency") },
@@ -529,10 +527,10 @@ private fun HeaderToggle(
 ) {
     Box(
         modifier = Modifier
-            .size(26.dp)
-            .clip(RoundedCornerShape(4.dp))
+            .size(28.dp)
+            .clip(RoundedCornerShape(8.dp))
             .background(if (on) onColor else MaterialTheme.colorScheme.surfaceContainerHighest)
-            .border(1.dp, if (on) onColor else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(4.dp))
+            .border(1.dp, if (on) onColor else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
             .clickable(enabled = enabled, onClickLabel = description, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {

@@ -83,7 +83,7 @@ private const val MaxPxPerBeat = 3000.0
 
 private val RulerHeight = 28.dp
 private val ClipHeaderHeight = 14.dp
-private val ClipCorner = 4.dp
+private val ClipCorner = 8.dp
 private val EdgeGrabZone = 24.dp
 /** Closest grid lines (and snap units) may sit; finer zoom gives finer units, Ableton's adaptive grid. */
 private val MinGridSpacing = 12.dp
@@ -720,6 +720,7 @@ private fun ArrangementClip(
     val currentTrackCount by rememberUpdatedState(trackCount)
 
     val onSurface = MaterialTheme.colorScheme.onSurface
+    val selectionColor = MaterialTheme.colorScheme.primary
     // Ableton's look: a light body in the track colour with a dark waveform,
     // and a slightly deeper header strip. Readable on both paper themes.
     val bodyColor = lerp(color, Color.White, 0.35f)
@@ -796,7 +797,7 @@ private fun ArrangementClip(
                 displayGain = displayGain,
             )
             if (selected) {
-                drawRoundRect(onSurface, cornerRadius = radius, style = Stroke(width = 2.dp.toPx()))
+                drawRoundRect(selectionColor, cornerRadius = radius, style = Stroke(width = 2.5.dp.toPx()))
                 // Trim tabs, only where the real edge is on screen.
                 val tabW = 6.dp.toPx()
                 val tabH = size.height * 0.45f

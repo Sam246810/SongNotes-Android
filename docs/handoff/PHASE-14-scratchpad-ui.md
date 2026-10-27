@@ -282,3 +282,71 @@ first run.
      excludes `file`). Worth revisiting alongside #3.
   5. Pinch zoom and the Live Update notification are not device-verified.
      Check by hand.
+
+## §9 Feedback round 1: scrolling, waveforms, rotation, Simple mode
+
+From the user's first hands-on pass (pinch zoom confirmed working).
+
+**Scrolling past three tracks.** Two causes. The vertical scroll limit was
+computed in a function the gesture handler captured, so it used the track
+count from an earlier composition: tracks added later were unreachable
+(logged: `tracks=10` while 11 were on screen). The clamp now reads a
+`ScrollExtent` holder refreshed every composition. Also, swiping the track
+headers did nothing; they now scroll the tracks (a long press still starts a
+reorder), and a slim draggable scrollbar appears on the right when tracks
+overflow.
+
+**Waveforms "virtually non-existent".** The takes really are quiet: a test
+take peaked at 0.035 (about -29 dBFS), with RMS around -58 dBFS from the
+phone's raw mic input, which at true scale draws as a flat line. Each
+clip's waveform is now scaled for display to its own peak (capped at 40x so
+near-silence stays flat) with a gentle 0.75 curve
+(`waveformDisplayGain` / `waveformDisplayLevel`); the live recording
+waveform uses the same scaling. **Display only**: the audio and playback
+level are unchanged, so quiet takes still play back quietly (a per-clip
+normalize/gain could follow if that bothers anyone).
+
+**Rotation.** The Scratchpad now turns with the phone (`FULL_USER`, which
+respects the system auto-rotate lock) instead of forcing landscape; the
+"Portrait view" menu item is gone. Other screens stay portrait.
+
+**Simple mode** (`SimpleScratchpad.kt`), the default: a multitrack
+voice-notes recorder with a metronome, no bars, beats or grid.
+- Ruled notebook paper with a margin line, a "Demo / song title" header.
+- Layers as rounded cards: name, length, mute, solo, ⋮ (rename, volume,
+  delete), and the layer's waveform across the whole demo on a shared time
+  axis (at least 15 s, so a first short idea doesn't fill the card). Tap a
+  waveform to move the playhead (where play and the next layer start).
+- **Every take is a new layer**: the layer is only added when the take
+  exists (one undo step for layer + take), so an empty take leaves nothing
+  behind. While recording, a red "Recording a new layer…" card grows with a
+  live waveform and the list scrolls to it.
+- A cozy transport: big clock, a large record button, play, and a metronome
+  pill (tap the icon for the click, tap the tempo to change it, ▾ for
+  count-in). In landscape the transport sits beside the layers.
+- Same project as Advanced, so switching never loses anything: ⋮ →
+  "Advanced mode" / Advanced's ⋮ → "Simple mode". Mode is remembered
+  app-wide (`ScratchpadPreferences.mode`).
+
+**Tours per mode** (user's spec). The first ever Scratchpad open runs the
+Simple tour (record, metronome, layers, saved on this phone), ending with
+"Want more control?" → **Try it** switches to Advanced, whose own tour runs
+the first time Advanced is ever used (by any route). The Advanced tour's
+ruler step now says outright that the insert marker is grabbed **up in the
+ruler** (tap or drag there). Settings has "Scratchpad tutorial: Simple" and
+"…: Advanced"; each queues its tour (switching to that mode) for the next
+Scratchpad open. The tour card now measures itself (it overflowed the
+screen edge and covered its target), and round targets get a round
+spotlight.
+
+**Cozier Advanced.** Rounder clips (8dp), chips (12dp) and track buttons
+(8dp), and a warm primary selection outline instead of a dark one.
+
+**Mic tag** is smaller and no longer a Material `Surface`, which swallowed
+touches: the Fold's mic sits right under Simple mode's record button.
+
+**Verified on device (portrait, light theme):** scrolling a 12-track project
+to the bottom via headers and lanes; visible waveforms; the Simple tour →
+Try it → Advanced tour; recording in Simple adds a new layer with its take;
+Settings rows. **Not verified:** rotation itself. Turning the phone or
+changing its rotation settings wasn't done remotely.

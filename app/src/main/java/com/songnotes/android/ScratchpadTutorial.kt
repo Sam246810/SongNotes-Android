@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -41,9 +42,11 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /** Where each spotlit part of the Scratchpad is on screen, filled in by [tutorialTarget]. */
@@ -58,7 +61,37 @@ fun Modifier.tutorialTarget(targets: TutorialTargets?, key: String): Modifier =
 
 private data class TutorialStep(val target: String?, val title: String, val body: String)
 
-private val Steps = listOf(
+private const val SavedOnPhone =
+    "Every change saves automatically, on this phone and offline, as this song's own demo. You don't need an " +
+        "account. Demos aren't on the web app yet; that's coming soon."
+
+/** Simple mode's tour; its last step offers Advanced mode. */
+private val SimpleSteps = listOf(
+    TutorialStep(
+        "simple_record",
+        "Record a layer",
+        "Tap the big red button and sing, hum or play. Tap it again to stop. Every take becomes a new layer that plays along with the ones before it, so you can stack harmonies and parts.",
+    ),
+    TutorialStep(
+        "simple_metronome",
+        "Keep time",
+        "Tap the metronome to switch the click on or off, even mid-take. Tap the tempo to change it; the little ▾ sets a count-in before you start.",
+    ),
+    TutorialStep(
+        "simple_layers",
+        "Your layers",
+        "Each layer has mute, solo and a ⋮ menu for volume, renaming and deleting. Tap a waveform to move the playhead: play starts there, and so does your next layer.",
+    ),
+    TutorialStep(null, "Saved on this phone", SavedOnPhone),
+    TutorialStep(
+        null,
+        "Want more control?",
+        "Advanced mode works like a small DAW: bars and beats, a snap grid, and moving, trimming and splitting clips across tracks. Both modes edit the same demo, so you can switch any time from the ⋮ menu.\n\nReplay these tours from Settings → Scratchpad tutorials.",
+    ),
+)
+
+/** Advanced mode's tour, shown the first time someone opens Advanced. */
+private val AdvancedSteps = listOf(
     TutorialStep(
         "controls",
         "Your controls",
@@ -71,8 +104,8 @@ private val Steps = listOf(
     ),
     TutorialStep(
         "ruler",
-        "Find your place",
-        "Tap or drag the ruler (or tap an empty spot) to move the insert marker. Play starts from it and new takes land on it. Pinch to zoom; drag empty space to scroll. The closer you zoom, the finer clips snap.",
+        "Move the insert marker",
+        "The insert marker is grabbed up here, in the ruler: tap anywhere along it, or put your finger on the ruler and drag, to move it. Play starts from the marker and new takes land on it. Pinch to zoom; drag empty space to scroll. The closer you zoom, the finer clips snap.",
     ),
     TutorialStep(
         "lanes",
@@ -82,25 +115,32 @@ private val Steps = listOf(
     TutorialStep(
         "headers",
         "Tracks",
-        "Each track has Arm, Mute and Solo. Tap its name to rename or delete it. Long-press and drag a track to reorder it. Add tracks from the empty lane underneath.",
+        "Each track has Arm, Mute and Solo. Tap its name to rename or delete it. Swipe the track list to scroll; long-press and drag a track to reorder it. Add tracks from the empty lane underneath.",
     ),
     TutorialStep(
         null,
         "Saved on this phone",
-        "Every change saves automatically, on this phone and offline, as this song's own demo. You don't need an account. Demos aren't on the web app yet; that's coming soon.\n\nYou can replay this tour anytime from Settings → Scratchpad tutorial.",
+        SavedOnPhone + "\n\nSimple mode is in the ⋮ menu, and you can replay this tour from Settings → Scratchpad tutorials.",
     ),
 )
 
 /**
- * The first-run Scratchpad tour: a dimmed screen with a spotlight cut around
- * one part of the real UI per step and a card explaining it. Shown once ever
- * (not per song), and again on request from Settings or the ⋮ menu.
+ * A Scratchpad tour: a dimmed screen with a spotlight cut around one part of
+ * the real UI per step and a card explaining it. Each mode has its own tour,
+ * shown once ever (not per song) the first time that mode is used, and again
+ * on request from Settings or the ⋮ menu.
+ *
+ * The Simple tour ends by offering Advanced mode: [onFinish] gets true when
+ * the user takes it up.
  */
 @Composable
-fun ScratchpadTutorial(targets: TutorialTargets, onFinish: () -> Unit) {
-    var index by remember { mutableIntStateOf(0) }
-    val step = Steps[index]
+fun ScratchpadTutorial(mode: ScratchpadMode, targets: TutorialTargets, onFinish: (switchToAdvanced: Boolean) -> Unit) {
+    val steps = if (mode == ScratchpadMode.SIMPLE) SimpleSteps else AdvancedSteps
+    val offersAdvanced = mode == ScratchpadMode.SIMPLE
+    var index by remember(mode) { mutableIntStateOf(0) }
+    val step = steps[index.coerceAtMost(steps.lastIndex)]
     var originInWindow by remember { mutableStateOf(Offset.Zero) }
+    var cardHeightPx by remember { mutableIntStateOf(0) }
     val density = LocalDensity.current
     val spotlight = step.target?.let { targets.bounds[it] }?.translate(-originInWindow)
     val fade by animateFloatAsState(if (spotlight != null) 1f else 0f, label = "spotlight")
@@ -118,13 +158,19 @@ fun ScratchpadTutorial(targets: TutorialTargets, onFinish: () -> Unit) {
             drawRect(Color.Black.copy(alpha = 0.62f))
             spotlight?.let { r ->
                 val hole = Rect(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad)
+                // Round targets (the record button) get a round spotlight.
+                val corner = if (abs(hole.width - hole.height) < 0.2f * maxOf(hole.width, hole.height)) {
+                    minOf(hole.width, hole.height) / 2f
+                } else {
+                    16f
+                }
                 drawRoundRect(
                     Color.Transparent, topLeft = hole.topLeft, size = hole.size,
-                    cornerRadius = CornerRadius(16f), blendMode = BlendMode.Clear,
+                    cornerRadius = CornerRadius(corner), blendMode = BlendMode.Clear,
                 )
                 drawRoundRect(
                     ring.copy(alpha = fade), topLeft = hole.topLeft, size = hole.size,
-                    cornerRadius = CornerRadius(16f), style = Stroke(width = 3.dp.toPx()),
+                    cornerRadius = CornerRadius(corner), style = Stroke(width = 3.dp.toPx()),
                 )
             }
         }
@@ -134,7 +180,8 @@ fun ScratchpadTutorial(targets: TutorialTargets, onFinish: () -> Unit) {
         val cardMaxWidth = 420.dp
         val cardY: Float? = spotlight?.let { r ->
             val gap = with(density) { 16.dp.toPx() }
-            val estimatedCard = with(density) { 210.dp.toPx() }
+            // The card's real height once measured; a guess for its first frame.
+            val estimatedCard = if (cardHeightPx > 0) cardHeightPx.toFloat() else with(density) { 220.dp.toPx() }
             when {
                 r.bottom + gap + estimatedCard < heightPx -> r.bottom + gap
                 r.top - gap - estimatedCard > 0f -> r.top - gap - estimatedCard
@@ -150,7 +197,9 @@ fun ScratchpadTutorial(targets: TutorialTargets, onFinish: () -> Unit) {
         }
         Box(
             modifier = if (cardY != null && cardX != null) {
-                Modifier.offset { IntOffset(cardX.roundToInt(), cardY.roundToInt()) }
+                Modifier
+                    .offset { IntOffset(cardX.roundToInt(), cardY.roundToInt()) }
+                    .width(with(density) { cardWidthPx.toDp() })
             } else {
                 Modifier.fillMaxSize().padding(24.dp)
             },
@@ -160,11 +209,11 @@ fun ScratchpadTutorial(targets: TutorialTargets, onFinish: () -> Unit) {
                 shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 shadowElevation = 8.dp,
-                modifier = Modifier.widthIn(max = cardMaxWidth),
+                modifier = Modifier.widthIn(max = cardMaxWidth).onSizeChanged { cardHeightPx = it.height },
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
                     Text(
-                        "${index + 1} of ${Steps.size}",
+                        "${index + 1} of ${steps.size}",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary,
                     )
@@ -174,14 +223,23 @@ fun ScratchpadTutorial(targets: TutorialTargets, onFinish: () -> Unit) {
                     Text(step.body, style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(16.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        if (index < Steps.lastIndex) {
-                            TextButton(onClick = onFinish) { Text("Skip") }
+                        if (index < steps.lastIndex) {
+                            TextButton(onClick = { onFinish(false) }) { Text("Skip") }
                         }
                         if (index > 0) {
                             TextButton(onClick = { index-- }) { Text("Back") }
                         }
-                        Button(onClick = { if (index < Steps.lastIndex) index++ else onFinish() }) {
-                            Text(if (index < Steps.lastIndex) "Next" else "Got it")
+                        if (index == steps.lastIndex && offersAdvanced) {
+                            TextButton(onClick = { onFinish(false) }) { Text("Stay simple") }
+                        }
+                        Button(onClick = { if (index < steps.lastIndex) index++ else onFinish(offersAdvanced) }) {
+                            Text(
+                                when {
+                                    index < steps.lastIndex -> "Next"
+                                    offersAdvanced -> "Try it"
+                                    else -> "Got it"
+                                },
+                            )
                         }
                     }
                 }

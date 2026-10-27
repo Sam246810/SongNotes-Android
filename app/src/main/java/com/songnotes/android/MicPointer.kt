@@ -11,6 +11,8 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -23,13 +25,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
@@ -109,7 +111,8 @@ fun MicPointer(fraction: Pair<Float, Float>, modifier: Modifier = Modifier) {
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val w = constraints.maxWidth.toFloat()
         val h = constraints.maxHeight.toFloat()
-        val tagSize = with(density) { 56.dp.toPx() }
+        val tagDp = 44.dp
+        val tagSize = with(density) { tagDp.toPx() }
         val inset = with(density) { 6.dp.toPx() }
         val x = when (edge) {
             0 -> inset
@@ -121,17 +124,21 @@ fun MicPointer(fraction: Pair<Float, Float>, modifier: Modifier = Modifier) {
             3 -> h - tagSize - inset
             else -> (fy * h - tagSize / 2f).coerceIn(inset, h - tagSize - inset)
         }
-        Surface(
-            modifier = Modifier.offset { IntOffset(x.roundToInt(), y.roundToInt()) }.size(56.dp).alpha(pulse),
-            shape = RoundedCornerShape(14.dp),
-            color = RecordRed,
-            contentColor = Color.White,
-            shadowElevation = 4.dp,
+        // A plain Box, not a Surface: Material's Surface swallows touches, and
+        // the mic often sits right where a control is (Simple mode's record
+        // button), so the tag must let taps through.
+        Column(
+            modifier = Modifier
+                .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
+                .size(tagDp)
+                .alpha(pulse * 0.9f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(RecordRed),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 4.dp)) {
-                Text("➜", modifier = Modifier.rotate(arrowRotation), style = MaterialTheme.typography.titleMedium)
-                Icon(Icons.Filled.Mic, contentDescription = "Your phone's microphone is this way", modifier = Modifier.size(20.dp))
-            }
+            Text("➜", modifier = Modifier.rotate(arrowRotation), style = MaterialTheme.typography.labelLarge, color = Color.White)
+            Icon(Icons.Filled.Mic, contentDescription = "Your phone's microphone is this way", tint = Color.White, modifier = Modifier.size(16.dp))
         }
     }
 }

@@ -125,32 +125,37 @@ fun SettingsScreen(
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
             }
 
-            // Replays the first-run Scratchpad tour. The Scratchpad lives inside
-            // a song, so this queues it for the next time one is opened.
-            var tutorialQueued by remember { mutableStateOf(scratchpadPrefs.tutorialRequested) }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        scratchpadPrefs.tutorialRequested = true
-                        tutorialQueued = true
+            // Replays a Scratchpad tour. The Scratchpad lives inside a song,
+            // so this queues it for the next time one is opened.
+            var queued by remember { mutableStateOf(scratchpadPrefs.requestedTutorial) }
+            for (tour in ScratchpadMode.entries) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            scratchpadPrefs.requestedTutorial = tour
+                            queued = tour
+                        }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            if (tour == ScratchpadMode.SIMPLE) "Scratchpad tutorial: Simple" else "Scratchpad tutorial: Advanced",
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            when {
+                                queued == tour -> "It'll play the next time you open a song's Scratchpad."
+                                tour == ScratchpadMode.SIMPLE -> "Recording layers, the metronome, and where your demo is saved."
+                                else -> "The arrangement view: the ruler and insert marker, clips, snapping and tracks."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (queued == tour) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Scratchpad tutorial", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        if (tutorialQueued) {
-                            "It'll play the next time you open a song's Scratchpad."
-                        } else {
-                            "A short tour of recording, clips and tracks. Plays the next time you open a song's Scratchpad."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (tutorialQueued) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
                 }
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
             }
         }
     }

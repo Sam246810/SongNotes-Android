@@ -142,12 +142,16 @@ fun ScratchpadScreen(
     var snapOn by remember { mutableStateOf(true) }
     var tempoDialogOpen by remember { mutableStateOf(false) }
     val tutorialTargets = remember { TutorialTargets() }
-    var showTutorial by remember { mutableStateOf(false) }
+    // The tour on screen, if any, and one queued to start once a mode switch has laid out.
+    var tutorialMode by remember { mutableStateOf<ScratchpadMode?>(null) }
+    var pendingTutorial by remember { mutableStateOf<ScratchpadMode?>(null) }
     val livePeaks = remember { mutableStateListOf<Float>() }
     val scope = rememberCoroutineScope()
     val storage = remember(songId) { MultitrackProjectStorage(context, songId) }
     val prefs = remember { ScratchpadPreferences(context) }
-    var portraitMode by remember { mutableStateOf(prefs.portrait) }
+    var mode by remember { mutableStateOf(prefs.mode) }
+    // Simple mode records each take as a new layer rather than onto an armed track.
+    var recordingNewLayer by remember { mutableStateOf(false) }
     val inputPreference = remember { RecordingInputPreference(context) }
     var forceBuiltinMic by remember { mutableStateOf(false) }
     var currentInputRoute by remember { mutableStateOf<AudioRoute?>(null) }
@@ -208,16 +212,14 @@ fun ScratchpadScreen(
         if (songBpm > 0 && project.bpm != songBpm.toDouble()) project = project.copy(bpm = songBpm.toDouble())
     }
 
-    // Landscape by default while the Scratchpad is on screen (the manifest's
-    // configChanges keep rotation from recreating the activity, which owns
-    // the audio engine); every other screen stays portrait.
+    // While the Scratchpad is on screen it turns with the phone, respecting
+    // the system auto-rotate lock (FULL_USER); every other screen stays
+    // portrait. The manifest's configChanges keep rotation from recreating
+    // the activity, which owns the audio engine.
     val activity = remember(context) { context.findActivity() }
-    DisposableEffect(visible, portraitMode) {
-        activity?.requestedOrientation = when {
-            !visible -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            portraitMode -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            else -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        }
+    DisposableEffect(visible) {
+        activity?.requestedOrientation =
+            if (visible) ActivityInfo.SCREEN_ORIENTATION_FULL_USER else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
     }
 
@@ -300,20 +302,24 @@ fun ScratchpadScreen(
     }
 
     fun beginRecording() {
-        if (project.tracks.isEmpty()) return
+        // Simple mode: every take is a new layer on top of the others.
+        // Advanced: onto the armed track, like Ableton.
+        val newLayer = mode == ScratchpadMode.SIMPLE
+        if (!newLayer && project.tracks.isEmpty()) return
         if (project.bpm <= 0.0) {
             statusMessage = "Set a tempo before recording."
             return
         }
-        val targetIndex = (armedTrack ?: 0).coerceAtMost(project.tracks.lastIndex)
-        armedTrack = targetIndex
+        val armProject = if (newLayer) project.addTrack() else project
+        val targetIndex = if (newLayer) armProject.tracks.lastIndex else (armedTrack ?: 0).coerceAtMost(project.tracks.lastIndex)
+        if (!newLayer) armedTrack = targetIndex
         selectedClip = null
 
         val route = AudioRouteDetector(context).currentInputRoute()
         val calibrationOffsetFrames = CalibrationStore(context).load(route.routeKey)?.offsetFrames ?: 0.0
 
         RecordingForegroundService.start(context, songTitle)
-        val armed = project.armOverdub(
+        val armed = armProject.armOverdub(
             engine, takeFile.absolutePath,
             targetIndex = targetIndex, backingTracksStartFrame = insertFrame,
             calibrationOffsetFrames = calibrationOffsetFrames,
@@ -324,6 +330,7 @@ fun ScratchpadScreen(
             return
         }
         recordStartFrame = insertFrame
+        recordingNewLayer = newLayer
         livePeaks.clear()
         isRecording = true
         statusMessage = null
@@ -332,18 +339,25 @@ fun ScratchpadScreen(
     fun stopRecordingAndCommit(hitTakeLimit: Boolean = false) {
         engine.stopRecording()
         RecordingForegroundService.stop(context)
-        val targetIndex = armedTrack
+        val newLayer = recordingNewLayer
+        val armedIndex = armedTrack
         scope.launch {
             delay(150) // let the writer thread flush its last buffered frames to disk
             val takeSamples = withContext(Dispatchers.IO) { MultitrackProjectStorage.readF32(takeFile) }
             isRecording = false
             livePeaks.clear()
-            if (takeSamples.isEmpty() || targetIndex == null || targetIndex > project.tracks.lastIndex) {
+            if (takeSamples.isEmpty() || (!newLayer && (armedIndex == null || armedIndex > project.tracks.lastIndex))) {
                 statusMessage = "Recording produced no audio."
                 return@launch
             }
             val newClip = MultitrackClipSpec(buffer = takeSamples, startFrame = recordStartFrame)
-            commit(project.withPunchIn(engine, targetIndex, newClip))
+            // A new layer is only added once its take exists, so an empty or
+            // failed take never leaves an empty layer behind; one undo step
+            // removes layer and take together.
+            val base = if (newLayer) project.addTrack() else project
+            val targetIndex = if (newLayer) base.tracks.lastIndex else armedIndex!!
+            commit(base.withPunchIn(engine, targetIndex, newClip))
+            if (newLayer) armedTrack = targetIndex
             val name = project.tracks[targetIndex].name
             statusMessage = if (hitTakeLimit) {
                 "Reached the ${kMaxTakeSeconds / 60}-minute take limit — take saved on $name."
@@ -433,6 +447,22 @@ fun ScratchpadScreen(
 
     LaunchedEffect(isRecording) { onRecordingChanged(isRecording) }
 
+    fun switchMode(to: ScratchpadMode) {
+        if (to == mode) return
+        mode = to
+        prefs.mode = to
+        selectedClip = null
+        // The first time a mode is used, its tour follows once it has laid out.
+        if (!prefs.tutorialSeen(to)) pendingTutorial = to
+    }
+
+    LaunchedEffect(pendingTutorial) {
+        val next = pendingTutorial ?: return@LaunchedEffect
+        delay(600)
+        tutorialMode = next
+        pendingTutorial = null
+    }
+
     // Status lines fade on their own.
     LaunchedEffect(statusMessage) {
         if (statusMessage != null) {
@@ -457,7 +487,88 @@ fun ScratchpadScreen(
                 isRecording -> recordStartFrame + (engineState.framesRecorded - kPreRollFrames).coerceAtLeast(0)
                 else -> insertFrame
             }
+            val liveTake = if (isRecording && !engineState.isArmed) {
+                RecordingPreview(
+                    trackIndex = if (recordingNewLayer) project.tracks.size else (armedTrack ?: 0),
+                    startFrame = recordStartFrame,
+                    lengthFrames = (engineState.framesRecorded - kPreRollFrames).coerceAtLeast(0).toLong(),
+                    peaks = livePeaks.toList(),
+                    framesPerPeak = (kSampleRate * kPollMs / 1000).toInt(),
+                )
+            } else {
+                null
+            }
             Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
+                if (mode == ScratchpadMode.SIMPLE) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        SimpleScratchpad(
+                            engine = engine,
+                            tracks = project.tracks,
+                            songTitle = songTitle,
+                            landscape = landscape,
+                            isRecording = isRecording,
+                            isArmed = engineState.isArmed && isRecording,
+                            countInBeatsRemaining = engineState.countInBeatsRemaining,
+                            isPlaying = isPlaying,
+                            positionFrame = positionFrame,
+                            timeCaption = if (isRecording && recordedSeconds >= kMaxTakeSeconds - kTakeLimitWarnSeconds) {
+                                "Stops automatically in ${(kMaxTakeSeconds - recordedSeconds).coerceAtLeast(0)}s"
+                            } else {
+                                null
+                            },
+                            recording = liveTake,
+                            meterPeakMilli = engineState.inputPeakMilli,
+                            meterClipped = engineState.inputClipped,
+                            metronomeOn = project.metronomeOn,
+                            bpm = project.bpm,
+                            countInBars = project.countInBars,
+                            canUndo = editsEnabled && undoStack.isNotEmpty(),
+                            canRedo = editsEnabled && redoStack.isNotEmpty(),
+                            editsEnabled = editsEnabled,
+                            isExporting = isExporting,
+                            onBack = onDone,
+                            onSeek = { if (editsEnabled) insertFrame = it },
+                            onRecord = ::onRecordPressed,
+                            onPlay = ::togglePlayback,
+                            onMetronomeToggle = { commit(project.copy(metronomeOn = !project.metronomeOn)) },
+                            onTempoClick = { tempoDialogOpen = true },
+                            onCountInChange = { commit(project.copy(countInBars = it)) },
+                            onUndo = ::undo,
+                            onRedo = ::redo,
+                            onMuteToggle = { i -> commit(project.withTrackMuted(i, !project.tracks[i].muted)) },
+                            onSoloToggle = { i -> commit(project.withTrackSoloed(i, !project.tracks[i].soloed)) },
+                            onGainChange = { i, g -> commit(project.withTrackGain(i, g)) },
+                            onRename = { i, name -> commit(project.renameTrack(i, name)) },
+                            onDelete = { i ->
+                                commit(project.removeTrack(i))
+                                armedTrack = if (project.tracks.isEmpty()) null else (armedTrack ?: 0).coerceAtMost(project.tracks.lastIndex)
+                            },
+                            onSwitchToAdvanced = { switchMode(ScratchpadMode.ADVANCED) },
+                            onExport = ::exportMixdown,
+                            onCalibrate = { showCalibration = true },
+                            onTutorial = { tutorialMode = ScratchpadMode.SIMPLE },
+                            tutorialTargets = tutorialTargets,
+                            modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing),
+                        )
+                        if (currentInputRoute?.isBluetooth == true && !bluetoothNoticeDismissed) {
+                            BluetoothNotice(
+                                onCalibrate = { showCalibration = true },
+                                onDismiss = { bluetoothNoticeDismissed = true },
+                                modifier = Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.safeDrawing).padding(top = 56.dp),
+                            )
+                        }
+                        statusMessage?.let {
+                            StatusPill(
+                                message = it,
+                                onDismiss = { statusMessage = null },
+                                modifier = Modifier
+                                    .align(if (landscape) Alignment.BottomStart else Alignment.BottomCenter)
+                                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                                    .padding(bottom = if (landscape) 16.dp else 210.dp, start = 16.dp, end = 16.dp),
+                            )
+                        }
+                    }
+                } else {
                 Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
                     ScratchpadControlBar(
                         compact = !landscape,
@@ -482,7 +593,6 @@ fun ScratchpadScreen(
                         canRedo = editsEnabled && redoStack.isNotEmpty(),
                         editsEnabled = editsEnabled,
                         isExporting = isExporting,
-                        portraitMode = portraitMode,
                         onBack = onDone,
                         onTempoClick = { tempoDialogOpen = true },
                         onBeatsPerBarChange = { commit(project.copy(beatsPerBar = it)) },
@@ -494,9 +604,9 @@ fun ScratchpadScreen(
                         onUndo = ::undo,
                         onRedo = ::redo,
                         onExport = ::exportMixdown,
-                        onToggleOrientation = { portraitMode = !portraitMode; prefs.portrait = portraitMode },
+                        onSwitchToSimple = { switchMode(ScratchpadMode.SIMPLE) },
                         onCalibrate = { showCalibration = true },
-                        onTutorial = { showTutorial = true },
+                        onTutorial = { tutorialMode = ScratchpadMode.ADVANCED },
                         tutorialTargets = tutorialTargets,
                     )
 
@@ -509,19 +619,7 @@ fun ScratchpadScreen(
                             insertFrame = insertFrame,
                             onInsertFrameChange = { insertFrame = it },
                             playheadFrame = if (isPlaying) engineState.playbackFrame.toLong() else null,
-                            recording = if (isRecording && !engineState.isArmed) {
-                                armedTrack?.let {
-                                    RecordingPreview(
-                                        trackIndex = it,
-                                        startFrame = recordStartFrame,
-                                        lengthFrames = (engineState.framesRecorded - kPreRollFrames).coerceAtLeast(0).toLong(),
-                                        peaks = livePeaks.toList(),
-                                        framesPerPeak = (kSampleRate * kPollMs / 1000).toInt(),
-                                    )
-                                }
-                            } else {
-                                null
-                            },
+                            recording = liveTake,
                             selected = selectedClip,
                             onSelect = { selectedClip = it },
                             snapEnabled = snapOn,
@@ -631,6 +729,7 @@ fun ScratchpadScreen(
                         }
                     }
                 }
+                }
             }
 
             if (isRecording && usingBuiltinMic && micNatural != null) {
@@ -639,20 +738,35 @@ fun ScratchpadScreen(
                 MicPointer(rotateNaturalFraction(micNatural, rotation), Modifier.windowInsetsPadding(WindowInsets.safeDrawing))
             }
 
-            // First ever Scratchpad open (any song), or a replay requested from
-            // Settings. Waits a beat so the rotation to landscape has settled
-            // and the spotlight targets have their final positions.
+            // A replay queued from Settings (switching to its mode if needed),
+            // else the current mode's tour the first time it's ever used. Waits
+            // a beat so any rotation has settled and the spotlight targets
+            // have their final positions.
             LaunchedEffect(Unit) {
-                if (!prefs.tutorialSeen || prefs.tutorialRequested) {
-                    delay(700)
-                    showTutorial = true
+                val requested = prefs.requestedTutorial
+                when {
+                    requested != null -> {
+                        if (requested != mode) {
+                            mode = requested
+                            prefs.mode = requested
+                        }
+                        delay(700)
+                        tutorialMode = requested
+                    }
+                    !prefs.tutorialSeen(mode) -> {
+                        delay(700)
+                        tutorialMode = mode
+                    }
                 }
             }
-            if (showTutorial) {
-                ScratchpadTutorial(tutorialTargets, onFinish = {
-                    showTutorial = false
-                    prefs.tutorialSeen = true
-                    prefs.tutorialRequested = false
+            tutorialMode?.let { tourMode ->
+                ScratchpadTutorial(tourMode, tutorialTargets, onFinish = { toAdvanced ->
+                    prefs.setTutorialSeen(tourMode)
+                    if (prefs.requestedTutorial == tourMode) prefs.requestedTutorial = null
+                    tutorialMode = null
+                    // "Try Advanced" at the end of the Simple tour: switch, and
+                    // Advanced's own tour follows the first time.
+                    if (toAdvanced) switchMode(ScratchpadMode.ADVANCED)
                 })
             }
 
