@@ -105,13 +105,12 @@ enum class ThemeMode {
     DARK,
     ;
 
-    fun next(): ThemeMode = entries[(ordinal + 1) % entries.size]
-
-    val label: String
+    /** Shown in [SettingsScreen]'s theme choices. */
+    val displayName: String
         get() = when (this) {
-            SYSTEM -> "Theme: system"
-            LIGHT -> "Theme: light"
-            DARK -> "Theme: dark"
+            SYSTEM -> "Match device"
+            LIGHT -> "Light"
+            DARK -> "Dark"
         }
 }
 

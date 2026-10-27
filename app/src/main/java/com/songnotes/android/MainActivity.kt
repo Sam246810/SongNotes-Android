@@ -16,9 +16,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BrightnessAuto
-import androidx.compose.material.icons.filled.DarkMode
-import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -71,6 +69,7 @@ private sealed interface Screen {
     data object Wizard : Screen
     data object Manual : Screen
     data object TapAlong : Screen
+    data object Settings : Screen
 }
 
 // FragmentActivity, not the usual bare ComponentActivity Compose apps default
@@ -186,10 +185,7 @@ class MainActivity : FragmentActivity() {
                                     syncController = syncController,
                                     onSignInClick = onSignInClick,
                                     onAccountClick = { screen = Screen.Account },
-                                    themeMode = themeMode,
-                                    onCycleTheme = {
-                                        themeMode = themeMode.next().also { themePreference.mode = it }
-                                    },
+                                    onSettingsClick = { screen = Screen.Settings },
                                 )
                                 // The only remaining way to reach Diagnostics (and
                                 // transitively Wizard/Manual/TapAlong) in a real
@@ -227,6 +223,18 @@ class MainActivity : FragmentActivity() {
                         Screen.Account -> {
                             BackHandler { screen = Screen.Songs }
                             AccountScreen(onDone = { screen = Screen.Songs })
+                        }
+                        Screen.Settings -> {
+                            BackHandler { screen = Screen.Songs }
+                            SettingsScreen(
+                                engine = audioEngine,
+                                themeMode = themeMode,
+                                onThemeModeChange = { mode ->
+                                    themeMode = mode
+                                    themePreference.mode = mode
+                                },
+                                onDone = { screen = Screen.Songs },
+                            )
                         }
                         Screen.Unlock -> {
                             BackHandler { screen = Screen.Songs }
@@ -330,8 +338,7 @@ private fun SyncHeader(
     syncController: SyncController,
     onSignInClick: () -> Unit,
     onAccountClick: () -> Unit,
-    themeMode: ThemeMode,
-    onCycleTheme: () -> Unit,
+    onSettingsClick: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -420,10 +427,10 @@ private fun SyncHeader(
     // Google Play's Account Deletion policy requires a reachable deletion
     // path beyond sign-out; this links out to the web app's own delete flow
     // rather than reimplementing it (see WebLinks.kt's WEB_DELETE_ACCOUNT_URL).
-    // Always rendered, even signed out, because the theme toggle lives here
+    // Always rendered, even signed out, because the Settings gear lives here
     // and has to stay reachable either way -- SpaceBetween then puts the
-    // account links left and the toggle right, and still right-aligns the
-    // toggle when the links are absent and the first child is empty.
+    // account links left and the gear right, and still right-aligns the
+    // gear when the links are absent and the first child is empty.
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -443,23 +450,13 @@ private fun SyncHeader(
                 }
             }
         }
-        // Cycles system -> light -> dark. Three states rather than a two-state
-        // switch because "follow the device" is a real, distinct choice and the
-        // default -- a plain toggle would make it unreachable once touched.
-        //
-        // Down here rather than beside Sign out: up there it was a non-weighted
-        // child taking its width before the identity column got any, so every
-        // pixel it spent came out of the email, which ellipsised a normal
-        // address. On this row nothing competes with it.
-        IconButton(onClick = onCycleTheme) {
-            Icon(
-                imageVector = when (themeMode) {
-                    ThemeMode.SYSTEM -> Icons.Filled.BrightnessAuto
-                    ThemeMode.LIGHT -> Icons.Filled.LightMode
-                    ThemeMode.DARK -> Icons.Filled.DarkMode
-                },
-                contentDescription = themeMode.label,
-            )
+        // Theme and calibration (SettingsScreen). Down here rather than
+        // beside Sign out: up there it was a non-weighted child taking its
+        // width before the identity column got any, so every pixel it spent
+        // came out of the email, which ellipsised a normal address. On this
+        // row nothing competes with it.
+        IconButton(onClick = onSettingsClick) {
+            Icon(Icons.Filled.Settings, contentDescription = "Settings")
         }
     }
     }
