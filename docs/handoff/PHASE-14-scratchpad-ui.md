@@ -261,3 +261,24 @@ so. The ⋮ menu's "Scratchpad tutorial" opens it immediately.
 doesn't return on reopen, and the Settings replay plays once then clears.
 The test phone's "seen" flag was reset afterwards so the user gets the real
 first run.
+
+## §8 Web notice, to-do, wrap-up
+
+- **Web app** (separate repo, `C:\Users\Sam\Documents\SongNotes`, branch
+  `scratchpad-phone-demo-notice`, committed locally, **not pushed**): a
+  one-line note at the top of the DAW panel saying demos recorded in the
+  Android app stay on the phone for now and seeing them on the web is
+  coming soon. `vite build` is clean.
+- **To-do (next phases):**
+  1. **Recordable piano in the Scratchpad**: the piano as a track source
+     (the native piano already renders through the same mixer and plays
+     during recording, see PHASE-09).
+  2. **Stream takes from disk**, to lift the 10-minute take cap and the
+     project-size memory ceiling.
+  3. **Demos on the web app / across devices** (the notice above promises
+     this). Needs an audio sync design: the encrypted song sync carries
+     JSON, not audio.
+  4. Demos don't survive a phone change (`data_extraction_rules.xml`
+     excludes `file`). Worth revisiting alongside #3.
+  5. Pinch zoom and the Live Update notification are not device-verified.
+     Check by hand.
