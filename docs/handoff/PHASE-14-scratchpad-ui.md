@@ -82,3 +82,90 @@ and the account recovery-code view.
 
 **Verified on device (dark theme):** calibration's button clears the nav bar,
 the nav bar is the page colour, and the Scratchpad has no purple left.
+
+## §3 Arrangement view (Ableton-style timeline)
+
+`Timeline.kt` and `Waveform.kt` are gone; `ArrangementView.kt` replaces them.
+
+**Why the old one looked broken.** It always scaled "project length = screen
+width". Committing a drag that changed the project's length rescaled
+everything, which is why a short clip "shortened" when dragged right. The
+drag preview didn't apply the commit's clamp (`start ≥ 0`), which is why
+dragging left jittered. And the waveform drew the clip's window stretched
+to whatever width the preview had, so trimming stretched the audio instead
+of cropping it.
+
+**The model now.**
+- Fixed **pixels-per-beat** zoom, independent of project length. Pinch to
+  zoom around your fingers; drag empty lane space to pan (both axes). A
+  fit-to-project button sits above the track headers. The view fits
+  automatically when the project first has audio and whenever its width
+  changes (rotation, unfold).
+- All scale/grid/edit math is in `core:audio`'s `ArrangementMath` (JVM-tested
+  in `ArrangementMathTest`). The live drag preview and the commit call
+  **the same function**, so a clip lands exactly where it was shown.
+- **Adaptive ruler**: label spacing doubles (1, 2, 4, 8… bars) until labels
+  are ≥ 48dp apart, and unlabelled bar ticks thin out below 6dp. Zoomed in,
+  beats get "1.2"-style labels. This fixes the overlapping bar numbers.
+- **Adaptive grid + snap** (Ableton's): the grid unit is the finest of bar
+  multiples → bar → beat → 1/2 … 1/128 beat whose lines are ≥ 12dp apart.
+  Moves and trims snap to it, so zoomed far in it's effectively free
+  placement. The grid button in the control bar turns snapping off.
+- **Clips look like Ableton's**: a light body in the track colour, a darker
+  header strip with the track name, and a dark waveform. Waveforms draw at
+  the arrangement's absolute scale (pyramid when a pixel covers ≥ 1 peak,
+  raw samples when zoomed in further), so **trim crops**. Only the on-screen
+  part of a clip is laid out, because a 10-minute take at deep zoom would
+  be millions of pixels wide.
+- **Interaction**: tap a clip to select it, which also puts the insert
+  marker there. Drag to move, including up/down onto another track.
+  Selected clips show trim tabs at their real edges. A floating action bar
+  offers **Split** (at the insert marker), **Duplicate** (placed right
+  after) and **Delete**. Tap empty space to deselect and set the marker.
+  The ruler taps and scrubs the marker.
+- **Playhead**: playback now starts **from the insert marker** (native
+  `startMultitrackPlayback` takes a start frame), and the view follows it a
+  page at a time.
+- **Recording** draws a red clip growing on the armed track from the
+  marker, with a live waveform from the polled input level.
+- **Tracks**: `MultitrackTrackSpec` gained `name` ("1 Audio" style, unique)
+  and `colorIndex`, both persisted with defaults for old projects. Colour
+  follows a track when it's reordered. New project ops: `moveTrack`,
+  `renameTrack`, `deleteClip`, `splitClip`, `duplicateClip`, `moveClip`.
+
+## §4 Scratchpad layout
+
+- **Landscape by default** while the Scratchpad is on screen
+  (`requestedOrientation`), with **Portrait view** in the ⋮ menu,
+  remembered app-wide (`ScratchpadPreferences`). Other screens stay
+  portrait. The manifest gained `configChanges` for orientation/size, so
+  rotating (or unfolding) never recreates the activity, which owns the
+  audio engine. Verified: a take keeps recording through a switch to
+  portrait and saves.
+- **Control bar replaces the "Session" card**, laid out like Ableton's
+  control bar: back · `100 BPM` (tap: tempo dialog) · `4/4` (menu) ·
+  **metronome** (tap toggles; the ▾ menu holds **Count-in: None / 1 bar /
+  2 bars**, where Ableton keeps it) · grid/snap · **Play / Record** ·
+  position `bar.beat.16th` + clock · undo / redo · ⋮ (export mixdown,
+  portrait/landscape, calibrate, tutorial). In portrait it wraps to two
+  rows. The first portrait attempt pushed ⋮ off screen (no way back to
+  landscape), caught on device and fixed.
+- **Track headers** beside their lanes: colour strip, name (tap → Rename /
+  Volume (portrait) / Delete track), **Arm** (the record target, replacing
+  "selected track"), **M**, **S**, and in landscape an inline volume
+  slider. The armed track shows the input meter while recording.
+  **Long-press-drag a header to reorder** (a line shows where it lands).
+- **Add track** is Ableton's empty drop area below the last track: a
+  dashed lane with "+ Add track" in the header column.
+- Arm and Record use a fixed Ableton red (`RecordRed`), not the theme's
+  error colour (pink in dark mode).
+- Status messages float as a pill over the arrangement and fade after 4s;
+  the Bluetooth notice floats at the top.
+
+**Verified on device (Fold, dark theme):** landscape and portrait layouts;
+fit-to-project; select → split → add track → drag the tail onto track 2;
+left-trim snaps to a bar and crops; long-press reorder (colours and arm
+follow, order persists); a short (4s) clip dragged hard left stops at 0 with
+no jitter or shrink, and drags right cleanly; a live recording clip with the
+header meter; rotation mid-take. **Not verified**: pinch zoom (adb can't
+pinch; the gesture is Compose's standard `detectTransformGestures`).
