@@ -28,6 +28,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bluetooth
@@ -42,7 +44,6 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
@@ -72,6 +73,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -99,14 +101,16 @@ import com.songnotes.core.audio.MultitrackProjectStorage
 import com.songnotes.core.audio.MultitrackTrackSpec
 import com.songnotes.core.audio.RecordingInputPreference
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val kSampleRate = 48000
+
+/** How many edits Undo can step back through. */
+private const val kUndoDepth = 30
 
 /** Whole-number BPM ("120") when it is one, else one decimal place ("120.5") — avoids "80.0" in the text field. */
 private fun formatBpm(bpm: Double): String =
@@ -129,12 +133,12 @@ private fun formatBpm(bpm: Double): String =
  * gets its own scratchpad session, not one shared project app-wide, since
  * this only ever opens from inside that song's own editor now (see
  * [SongEditorScreen]; there is no other way to reach this screen). Auto-loaded
- * once when this screen first composes, auto-saved after every mutation that
- * matters (a committed recording, adding/removing a track) so closing the
- * app mid-session doesn't lose a take, plus an explicit "Save" button for
- * gain/mute/solo tweaks — those aren't auto-saved on every slider drag
- * tick (that would mean a file write per pixel of drag), so a deliberate
- * Save is how those specifically get persisted.
+ * once when this screen first composes, and auto-saved (debounced) after
+ * every edit — takes, clip moves, gain/mute/solo, tempo — with no Save
+ * button. That's cheap now that saving only writes audio that isn't on
+ * disk yet (see [MultitrackProjectStorage]); a gain change writes a few
+ * hundred bytes of JSON. Every edit goes through `commit()`, which also
+ * feeds the undo/redo history in the top bar.
  *
  * UI shape: a [Scaffold] with the transport controls (record/play/add
  * track/export) pinned in a bottom bar rather than living at the bottom of
@@ -222,6 +226,21 @@ fun ScratchpadScreen(
     // currently looking at the timeline, not part of the project itself.
     var timelineZoom by remember { mutableStateOf(TimelineMinZoom) }
 
+    // False until the saved project (if any) has been read back — the
+    // auto-save below must never write the placeholder one-track project
+    // over a real one that just hasn't finished loading.
+    var projectLoaded by remember { mutableStateOf(false) }
+    // Undo history: whole-project snapshots. Cheap, since MultitrackProject
+    // is immutable and clips share their audio buffers by reference — a
+    // snapshot is a few small lists, not a copy of any audio. Per editing
+    // session only (not persisted), like most mobile editors.
+    val undoStack = remember { mutableStateListOf<MultitrackProject>() }
+    val redoStack = remember { mutableStateListOf<MultitrackProject>() }
+    // Consecutive commits with the same key (typing a BPM digit by digit)
+    // collapse into one undo step.
+    var lastCommitKey by remember { mutableStateOf<String?>(null) }
+    var pendingSave by remember { mutableStateOf<Job?>(null) }
+
     var hasRecordPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -251,6 +270,22 @@ fun ScratchpadScreen(
         } else if (songBpm > 0) {
             project = project.copy(bpm = songBpm.toDouble())
             bpmText = formatBpm(project.bpm)
+        }
+        projectLoaded = true
+    }
+
+    // Auto-save, debounced so typing a BPM or a burst of mute/solo taps is
+    // one write. Launched on AppScope rather than this composable's scope
+    // so closing the editor right after an edit can't cancel the pending
+    // write (the SongDraftAutosaver lesson). Only the delay is cancellable;
+    // a save that's already running finishes, and storage serializes them.
+    LaunchedEffect(project, projectLoaded) {
+        if (!projectLoaded) return@LaunchedEffect
+        val snapshot = project
+        pendingSave?.cancel()
+        pendingSave = AppScope.io.launch {
+            delay(500)
+            storage.save(snapshot)
         }
     }
 
@@ -339,11 +374,41 @@ fun ScratchpadScreen(
         }
     }
 
-    fun persist(toSave: MultitrackProject, announce: Boolean = false) {
-        scope.launch {
-            withContext(Dispatchers.Default) { storage.save(toSave) }
-            if (announce) statusMessage = "Saved."
+    /** Applies a user edit: records the current project for undo, then replaces it (auto-save follows). */
+    fun commit(next: MultitrackProject, coalesceKey: String? = null) {
+        if (next == project) return
+        if (coalesceKey == null || coalesceKey != lastCommitKey) {
+            undoStack.add(project)
+            if (undoStack.size > kUndoDepth) undoStack.removeAt(0)
         }
+        redoStack.clear()
+        lastCommitKey = coalesceKey
+        project = next
+    }
+
+    // Shared tail of undo/redo. Tempo follows the song's chart BPM (see the
+    // songBpm effect above), so a restored snapshot keeps the CURRENT tempo
+    // rather than reverting a change made on the lyrics page.
+    fun restore(snapshot: MultitrackProject) {
+        project = if (songBpm > 0) snapshot.copy(bpm = songBpm.toDouble()) else snapshot
+        bpmText = formatBpm(project.bpm)
+        lastCommitKey = null
+        selectedTrackIndex = when {
+            project.tracks.isEmpty() -> null
+            else -> (selectedTrackIndex ?: 0).coerceAtMost(project.tracks.lastIndex)
+        }
+    }
+
+    fun undo() {
+        val previous = undoStack.removeLastOrNull() ?: return
+        redoStack.add(project)
+        restore(previous)
+    }
+
+    fun redo() {
+        val next = redoStack.removeLastOrNull() ?: return
+        undoStack.add(project)
+        restore(next)
     }
 
     fun beginRecording() {
@@ -386,17 +451,14 @@ fun ScratchpadScreen(
         val targetIndex = selectedTrackIndex
         scope.launch {
             delay(150) // let the writer thread flush its last buffered frames to disk
-            val takeBytes = takeFile.readBytes()
+            val takeSamples = withContext(Dispatchers.IO) { MultitrackProjectStorage.readF32(takeFile) }
             isRecording = false
-            if (takeBytes.isEmpty() || targetIndex == null) {
+            if (takeSamples.isEmpty() || targetIndex == null) {
                 statusMessage = "Recording produced no audio."
                 return@launch
             }
-            val takeSamples = FloatArray(takeBytes.size / 4)
-            ByteBuffer.wrap(takeBytes).order(ByteOrder.nativeOrder()).asFloatBuffer().get(takeSamples)
             val newClip = MultitrackClipSpec(buffer = takeSamples, startFrame = scrubFrame)
-            project = project.withPunchIn(engine, targetIndex, newClip)
-            persist(project)
+            commit(project.withPunchIn(engine, targetIndex, newClip))
             statusMessage = "Recorded %.1fs onto track %d.".format(
                 takeSamples.size / kSampleRate.toDouble(), targetIndex + 1,
             )
@@ -494,8 +556,12 @@ fun ScratchpadScreen(
                     }
                 },
                 actions = {
-                    IconButton(enabled = !isRecording, onClick = { persist(project, announce = true) }) {
-                        Icon(Icons.Filled.Save, contentDescription = "Save")
+                    val canEdit = !isRecording && !isPlaying
+                    IconButton(enabled = canEdit && undoStack.isNotEmpty(), onClick = ::undo) {
+                        Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo")
+                    }
+                    IconButton(enabled = canEdit && redoStack.isNotEmpty(), onClick = ::redo) {
+                        Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo")
                     }
                 },
             )
@@ -512,10 +578,7 @@ fun ScratchpadScreen(
                 selectedTrackIndex = selectedTrackIndex,
                 playbackFrame = engineState.playbackFrame,
                 playbackTotalFrames = engineState.playbackTotalFrames,
-                onAddTrack = {
-                    project = project.addTrack()
-                    persist(project)
-                },
+                onAddTrack = { commit(project.addTrack()) },
                 onRecordPressed = ::onRecordPressed,
                 onPlayToggle = ::togglePlayback,
                 onExport = ::exportMixdown,
@@ -614,10 +677,10 @@ fun ScratchpadScreen(
                 onBpmChange = { text ->
                     bpmText = text
                     val parsed = text.toDoubleOrNull()
-                    if (parsed != null && parsed > 0.0) project = project.copy(bpm = parsed)
+                    if (parsed != null && parsed > 0.0) commit(project.copy(bpm = parsed), coalesceKey = "bpm")
                 },
                 beatsPerBar = project.beatsPerBar,
-                onBeatsPerBarChange = { project = project.copy(beatsPerBar = it) },
+                onBeatsPerBarChange = { commit(project.copy(beatsPerBar = it)) },
                 enabled = !isRecording,
                 route = currentInputRoute,
                 forceBuiltinMic = forceBuiltinMic,
@@ -677,8 +740,7 @@ fun ScratchpadScreen(
                             enabled = !isRecording && !isPlaying,
                             zoom = timelineZoom,
                             onClipChange = { trackIndex, clipIndex, transform ->
-                                project = project.withClipTransform(engine, trackIndex, clipIndex, transform)
-                                persist(project)
+                                commit(project.withClipTransform(engine, trackIndex, clipIndex, transform))
                             },
                             modifier = Modifier.fillMaxWidth(),
                         )
@@ -715,15 +777,15 @@ fun ScratchpadScreen(
                     enabled = !isRecording && !isPlaying,
                     silencedBySolo = soloedTrackExists && !track.soloed,
                     onSelect = { selectedTrackIndex = if (selectedTrackIndex == index) null else index },
-                    onGainChange = { project = project.withTrackGain(index, it) },
-                    onMutedChange = { project = project.withTrackMuted(index, it) },
-                    onSoloedChange = { project = project.withTrackSoloed(index, it) },
+                    onGainChange = { commit(project.withTrackGain(index, it)) },
+                    onMutedChange = { commit(project.withTrackMuted(index, it)) },
+                    onSoloedChange = { commit(project.withTrackSoloed(index, it)) },
                     onRemove = {
                         // Removing every track, down to zero, is allowed --
                         // the transport bar just disables Record/Play/Export
                         // in that state (see ScratchpadTransportBar's
                         // hasTracks), leaving Add track as the way back.
-                        project = project.removeTrack(index)
+                        commit(project.removeTrack(index))
                         // selectedTrackIndex is a list position, not a stable
                         // track identity — removing a track shifts every later
                         // index down by one, so a selection AFTER the removed
@@ -734,7 +796,6 @@ fun ScratchpadScreen(
                             selectedTrackIndex != null && selectedTrackIndex!! > index -> selectedTrackIndex!! - 1
                             else -> selectedTrackIndex
                         }
-                        persist(project)
                     },
                 )
             }
@@ -926,6 +987,7 @@ private fun TrackRow(
     /** True when some OTHER track is soloed, silencing this one even though [MultitrackTrackSpec.muted] is false. */
     silencedBySolo: Boolean,
     onSelect: () -> Unit,
+    /** Called once when a drag on the gain slider ends, not per drag tick — each call is an undo step and a save. */
     onGainChange: (Float) -> Unit,
     onMutedChange: (Boolean) -> Unit,
     onSoloedChange: (Boolean) -> Unit,
@@ -937,6 +999,9 @@ private fun TrackRow(
     // whole strip rather than relying on the mute/solo chips alone to
     // communicate audibility across every OTHER track on screen.
     val isAudible = !track.muted && !silencedBySolo
+    // The slider's position while a drag is in flight; null otherwise.
+    var draggingGain by remember { mutableStateOf<Float?>(null) }
+    val shownGain = draggingGain ?: track.gain
     Card(
         onClick = onSelect,
         enabled = enabled,
@@ -975,20 +1040,24 @@ private fun TrackRow(
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    if (track.gain > 0f) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+                    if (shownGain > 0f) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
                 )
                 Slider(
-                    value = track.gain,
-                    onValueChange = onGainChange,
+                    value = shownGain,
+                    onValueChange = { draggingGain = it },
+                    onValueChangeFinished = {
+                        draggingGain?.let(onGainChange)
+                        draggingGain = null
+                    },
                     valueRange = 0f..2f,
                     enabled = enabled,
                     modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
                 )
                 Text(
-                    "%.1f".format(track.gain),
+                    "%.1f".format(shownGain),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.width(28.dp),
                 )
