@@ -319,8 +319,12 @@ class SupabaseAuthRepository(private val client: SupabaseClient = SupabaseClient
     }
 
     suspend fun signOut() {
-        client.auth.signOut()
-        KeySession.clear()
+        // The key goes even if the sign-out request fails (offline, say).
+        try {
+            client.auth.signOut()
+        } finally {
+            KeySession.clear()
+        }
     }
 
     /**

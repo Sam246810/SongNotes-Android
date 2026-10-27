@@ -343,8 +343,13 @@ private fun SyncHeader(
             onConfirm = {
                 showSignOutDialog = false
                 scope.launch {
-                    authRepo.signOut()
-                    syncController.disableSync()
+                    // disableSync drops the Keystore-wrapped key; it has to run
+                    // even if the sign-out request fails (offline, say).
+                    try {
+                        authRepo.signOut()
+                    } finally {
+                        syncController.disableSync()
+                    }
                 }
             },
             onDismiss = { showSignOutDialog = false },

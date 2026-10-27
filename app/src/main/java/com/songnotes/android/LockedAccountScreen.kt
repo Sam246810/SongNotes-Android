@@ -135,8 +135,13 @@ fun LockedAccountScreen(onUnlocked: () -> Unit, onSignOut: () -> Unit) {
         // PrivacyScreen "Forgot your password? Sign out instead").
         TextButton(onClick = {
             scope.launch {
-                authRepo.signOut() // also clears KeySession
-                onSignOut()
+                // signOut also clears KeySession; onSignOut drops the stored
+                // key, and has to run even if the sign-out request fails.
+                try {
+                    authRepo.signOut()
+                } finally {
+                    onSignOut()
+                }
             }
         }) {
             Text("Forgot your password? Sign out instead")
