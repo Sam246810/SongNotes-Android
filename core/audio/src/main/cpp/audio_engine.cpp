@@ -339,7 +339,8 @@ bool NativeAudioEngine::startPlaybackFromBuffer(const std::vector<float> &buffer
     return ensureOutputStarted();
 }
 
-bool NativeAudioEngine::startMultitrackPlayback(const std::vector<dsp::Track> &tracks) {
+bool NativeAudioEngine::startMultitrackPlayback(const std::vector<dsp::Track> &tracks, double bpm,
+                                                int32_t beatsPerBar) {
     if (!ensureStreamsOpen()) return false;
     stopPlaybackInternal();
     stopCalibrationInternal();
@@ -363,8 +364,17 @@ bool NativeAudioEngine::startMultitrackPlayback(const std::vector<dsp::Track> &t
         }
     }
 
+    int32_t sr;
+    {
+        std::lock_guard<std::mutex> lock(mRebuildMutex);
+        sr = sampleRateLocked();
+    }
     mPlaybackCursor = 0; // reused across Playing/Calibrating/MultitrackPlaying — mutually exclusive modes
     mMultitrackTotalFrames = totalFrames;
+    mPlaybackBeatIntervalFrames = bpm > 0.0 ? static_cast<double>(sr) * 60.0 / bpm : 0.0;
+    mPlaybackBeatsPerBar = std::max(1, beatsPerBar);
+    mActiveClickTemplate = nullptr; // RT-owned, but the RT thread isn't in a click-rendering mode yet
+    mActiveClickReadPos = 0;
     mState.playbackTotalFrames.store(static_cast<int32_t>(totalFrames), std::memory_order_relaxed);
     mState.playbackFrame.store(0, std::memory_order_relaxed);
     mState.isPlaying.store(1, std::memory_order_relaxed);
@@ -612,9 +622,19 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
                 1, static_cast<int64_t>(std::llround(static_cast<double>(stream->getSampleRate()) * 60.0 / cmd.bpm)));
             mBeatsPerBar = cmd.beatsPerBar;
             mArmFrame = mStreamFrameCounter;
-            mDownbeatFrame = mArmFrame + static_cast<int64_t>(cmd.countInBeats) * mBeatIntervalFrames;
+            // The downbeat must be at least the pre-roll away: capture
+            // starts preRollFrames before it, and the writer thread trims
+            // exactly that much off the take's head. With no count-in (or
+            // a count-in shorter than the pre-roll, at extreme tempos) a
+            // downbeat at mArmFrame would put the capture start in the
+            // past, the head trim would eat real audio, and the take would
+            // land preRoll early on the timeline.
+            const int64_t countInFrames = static_cast<int64_t>(cmd.countInBeats) * mBeatIntervalFrames;
+            mDownbeatFrame = mArmFrame + std::max(countInFrames, cmd.preRollFrames);
             mPreRollStartFrame = mDownbeatFrame - cmd.preRollFrames;
-            mNextClickFrame = mArmFrame;
+            // First click is the first count-in beat (or, with no count-in,
+            // the downbeat itself) — always on the take's own beat grid.
+            mNextClickFrame = mDownbeatFrame - countInFrames;
             mBeatIndexInBar = 0;
             mActiveClickTemplate = nullptr;
             mActiveClickReadPos = 0;
@@ -766,6 +786,31 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
                     out[frame * outChannels + ch] = sample;
                 }
             }
+
+            // Metronome on the project's beat grid (beat k at project frame
+            // round(k * interval), downbeat every mPlaybackBeatsPerBar). The
+            // grid is recomputed from the cursor each callback rather than
+            // stepped like the recording click, so there's no drift and no
+            // state to reset when the switch flips mid-playback.
+            if (mPlaybackBeatIntervalFrames > 0.0) {
+                const bool audible = mMetronomeOn.load(std::memory_order_relaxed);
+                renderClickTail(out, toMix, outChannels, audible);
+                const int64_t windowEnd = mPlaybackCursor + toMix;
+                auto beat = static_cast<int64_t>(std::ceil(static_cast<double>(mPlaybackCursor) /
+                                                           mPlaybackBeatIntervalFrames));
+                for (;; beat++) {
+                    const auto beatFrame =
+                        static_cast<int64_t>(std::llround(static_cast<double>(beat) * mPlaybackBeatIntervalFrames));
+                    if (beatFrame >= windowEnd) break;
+                    // Rounding can land a beat just before the cursor; it
+                    // was already in the previous callback's window.
+                    if (beatFrame < mPlaybackCursor || mActiveClickTemplate != nullptr) continue;
+                    const auto &tmpl =
+                        (beat % mPlaybackBeatsPerBar == 0) ? mClickTemplateDownbeat : mClickTemplateRegular;
+                    startClick(out, toMix, outChannels, tmpl, static_cast<int32_t>(beatFrame - mPlaybackCursor),
+                               audible);
+                }
+            }
             mPlaybackCursor += toMix;
             mState.playbackFrame.store(static_cast<int32_t>(mPlaybackCursor), std::memory_order_relaxed);
             if (mPlaybackCursor >= mMultitrackTotalFrames) {
@@ -835,23 +880,12 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
         // Metronome: finish any click already in progress, then start any
         // click(s) scheduled within the remainder of this callback. No live
         // input monitoring is mixed in here — see the plan's "don't build
-        // software input monitoring" decision.
-        if (mActiveClickTemplate != nullptr) {
-            const auto &tmpl = *mActiveClickTemplate;
-            const auto remaining = static_cast<int32_t>(tmpl.size()) - mActiveClickReadPos;
-            const int32_t toCopy = std::min(remaining, numFrames);
-            for (int32_t frame = 0; frame < toCopy; frame++) {
-                const float sample = tmpl[static_cast<size_t>(mActiveClickReadPos + frame)];
-                for (int32_t ch = 0; ch < outChannels; ch++) {
-                    out[frame * outChannels + ch] += sample;
-                }
-            }
-            mActiveClickReadPos += toCopy;
-            if (mActiveClickReadPos >= static_cast<int32_t>(tmpl.size())) {
-                mActiveClickTemplate = nullptr;
-                mActiveClickReadPos = 0;
-            }
-        }
+        // software input monitoring" decision. The count-in (Armed) always
+        // clicks; after the downbeat the Metronome switch decides, but the
+        // beat schedule below advances either way so re-enabling it
+        // mid-take lands on the beat.
+        const bool clickAudible = mode == EngineMode::Armed || mMetronomeOn.load(std::memory_order_relaxed);
+        renderClickTail(out, numFrames, outChannels, clickAudible);
 
         while (mActiveClickTemplate == nullptr && mNextClickFrame < mStreamFrameCounter + numFrames) {
             const auto &tmpl = (mBeatIndexInBar == 0) ? mClickTemplateDownbeat : mClickTemplateRegular;
@@ -862,19 +896,12 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
             // immediately rather than silently dropping the beat.
             const auto offsetInCallback =
                 static_cast<int32_t>(std::max<int64_t>(0, mNextClickFrame - mStreamFrameCounter));
-            const int32_t framesAvailableInCallback = numFrames - offsetInCallback;
-            const auto toCopy =
-                static_cast<int32_t>(std::min<size_t>(tmpl.size(), static_cast<size_t>(framesAvailableInCallback)));
-            for (int32_t frame = 0; frame < toCopy; frame++) {
-                const float sample = tmpl[static_cast<size_t>(frame)];
-                for (int32_t ch = 0; ch < outChannels; ch++) {
-                    out[(offsetInCallback + frame) * outChannels + ch] += sample;
-                }
-            }
-            if (toCopy < static_cast<int32_t>(tmpl.size())) {
-                mActiveClickTemplate = &tmpl;
-                mActiveClickReadPos = toCopy;
-            }
+            // Only a click whose own beat is the downbeat or later follows
+            // the switch; one still inside the count-in always plays, even
+            // if it falls in the same callback as the downbeat.
+            const bool thisClickAudible =
+                mNextClickFrame < mDownbeatFrame || mMetronomeOn.load(std::memory_order_relaxed);
+            startClick(out, numFrames, outChannels, tmpl, offsetInCallback, thisClickAudible);
 
             if (mode == EngineMode::Armed) {
                 const int32_t remaining = mState.countInBeatsRemaining.load(std::memory_order_relaxed);
@@ -957,6 +984,44 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
 
     mStreamFrameCounter += numFrames;
     return oboe::DataCallbackResult::Continue;
+}
+
+void NativeAudioEngine::renderClickTail(float *out, int32_t numFrames, int32_t outChannels, bool audible) {
+    if (mActiveClickTemplate == nullptr) return;
+    const auto &tmpl = *mActiveClickTemplate;
+    const int32_t toCopy = std::min(static_cast<int32_t>(tmpl.size()) - mActiveClickReadPos, numFrames);
+    if (audible) {
+        for (int32_t frame = 0; frame < toCopy; frame++) {
+            const float sample = tmpl[static_cast<size_t>(mActiveClickReadPos + frame)];
+            for (int32_t ch = 0; ch < outChannels; ch++) {
+                out[frame * outChannels + ch] += sample;
+            }
+        }
+    }
+    mActiveClickReadPos += toCopy;
+    if (mActiveClickReadPos >= static_cast<int32_t>(tmpl.size())) {
+        mActiveClickTemplate = nullptr;
+        mActiveClickReadPos = 0;
+    }
+}
+
+void NativeAudioEngine::startClick(float *out, int32_t numFrames, int32_t outChannels,
+                                   const std::vector<float> &tmpl, int32_t offset, bool audible) {
+    const int32_t framesAvailable = numFrames - offset;
+    if (framesAvailable <= 0) return;
+    const auto toCopy = static_cast<int32_t>(std::min<size_t>(tmpl.size(), static_cast<size_t>(framesAvailable)));
+    if (audible) {
+        for (int32_t frame = 0; frame < toCopy; frame++) {
+            const float sample = tmpl[static_cast<size_t>(frame)];
+            for (int32_t ch = 0; ch < outChannels; ch++) {
+                out[(offset + frame) * outChannels + ch] += sample;
+            }
+        }
+    }
+    if (toCopy < static_cast<int32_t>(tmpl.size())) {
+        mActiveClickTemplate = &tmpl;
+        mActiveClickReadPos = toCopy;
+    }
 }
 
 void NativeAudioEngine::onErrorAfterClose(oboe::AudioStream *stream, oboe::Result error) {

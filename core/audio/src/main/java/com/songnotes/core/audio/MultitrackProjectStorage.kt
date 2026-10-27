@@ -95,6 +95,8 @@ class MultitrackProjectStorage(private val projectDir: File) {
             .put("tracks", tracksJson)
             .put("bpm", project.bpm)
             .put("beatsPerBar", project.beatsPerBar)
+            .put("metronomeOn", project.metronomeOn)
+            .put("countInBars", project.countInBars)
             .toString()
 
         val tmp = File(projectDir, "manifest.json.tmp")
@@ -157,13 +159,16 @@ class MultitrackProjectStorage(private val projectDir: File) {
         }
         writtenBuffers.clear()
         buffersByFile.forEach { (name, buffer) -> writtenBuffers[buffer] = name }
-        // optDouble/optInt fall back to MultitrackProject's own defaults for
-        // a manifest saved before bpm/beatsPerBar existed — old scratchpads
-        // still load instead of failing to parse.
+        // opt* fall back to MultitrackProject's own defaults for a manifest
+        // saved before a field existed — old scratchpads still load
+        // instead of failing to parse.
+        val defaults = MultitrackProject()
         return MultitrackProject(
             tracks = tracks,
-            bpm = root.optDouble("bpm", MultitrackProject().bpm),
-            beatsPerBar = root.optInt("beatsPerBar", MultitrackProject().beatsPerBar),
+            bpm = root.optDouble("bpm", defaults.bpm),
+            beatsPerBar = root.optInt("beatsPerBar", defaults.beatsPerBar),
+            metronomeOn = root.optBoolean("metronomeOn", defaults.metronomeOn),
+            countInBars = root.optInt("countInBars", defaults.countInBars),
         )
     }
 

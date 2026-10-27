@@ -102,7 +102,12 @@ public:
     // tracks; auto-stops there, same as startPlaybackFromBuffer(). Shares
     // stopPlayback()/mPlaybackCursor with the single-buffer Playing mode
     // (mutually exclusive, so no separate cursor field is needed).
-    bool startMultitrackPlayback(const std::vector<dsp::Track> &tracks);
+    //
+    // bpm/beatsPerBar drive the metronome during playback (see
+    // setMetronomeOn): clicks land on the project's own beat grid, beat 0
+    // at project frame 0. bpm <= 0 (the default) means no playback click.
+    bool startMultitrackPlayback(const std::vector<dsp::Track> &tracks, double bpm = 0.0,
+                                 int32_t beatsPerBar = 4);
 
     void stopPlayback();
 
@@ -148,6 +153,14 @@ public:
     // Plain atomic write, no command queue — see mPianoMasterGain's own
     // doc comment for why volume doesn't need frame-accurate scheduling.
     void setPianoVolume(float gain) { mPianoMasterGain.store(gain, std::memory_order_relaxed); }
+
+    // The metronome during recording (after the count-in) and multitrack
+    // playback — Ableton's Metronome switch. Live: the RT thread reads it
+    // every callback, so toggling mid-take or mid-playback takes effect
+    // within one buffer. Beat scheduling keeps running while it's off, so
+    // turning it back on lands on the beat. The count-in always clicks
+    // regardless (it's only there when the user chose a count-in).
+    void setMetronomeOn(bool on) { mMetronomeOn.store(on, std::memory_order_relaxed); }
 
     EngineStateBlock *stateBlock() { return &mState; }
 
@@ -231,6 +244,16 @@ private:
     void handlePianoNoteOn(int32_t midi, double engineSampleRateHz);
     void handlePianoNoteOff(int32_t midi);
 
+    // RT-thread-only metronome rendering, shared by the recording and
+    // playback click paths. renderClickTail continues a click that started
+    // in an earlier callback; startClick begins `tmpl` at `offset` frames
+    // into this callback and leaves any remainder for the next one. With
+    // `audible` false both still advance their bookkeeping but add nothing
+    // to `out`.
+    void renderClickTail(float *out, int32_t numFrames, int32_t outChannels, bool audible);
+    void startClick(float *out, int32_t numFrames, int32_t outChannels, const std::vector<float> &tmpl,
+                    int32_t offset, bool audible);
+
     std::mutex mRebuildMutex; // guards stream open/close/rebuild; never touched by the RT thread
     std::shared_ptr<oboe::AudioStream> mOutputStream;
     std::shared_ptr<oboe::AudioStream> mInputStream;
@@ -272,6 +295,12 @@ private:
     std::vector<float> mClickTemplateRegular;
     const std::vector<float> *mActiveClickTemplate = nullptr;
     int32_t mActiveClickReadPos = 0;
+    std::atomic<bool> mMetronomeOn{true}; // see setMetronomeOn()
+    // Playback click grid, set by startMultitrackPlayback() before its
+    // mode store (same handoff as mMultitrackTotalFrames). Fractional so a
+    // long playback doesn't drift off the timeline's own beat grid.
+    double mPlaybackBeatIntervalFrames = 0.0; // 0 = no playback click
+    int32_t mPlaybackBeatsPerBar = 4;
 
     // Recording path: RT thread -> ring buffer -> writer thread -> file.
     // A permanent member (not allocated per-take) deliberately — see

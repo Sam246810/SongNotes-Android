@@ -28,12 +28,16 @@ class MultitrackProjectStorageTest {
             ),
             bpm = 87.0,
             beatsPerBar = 3,
+            metronomeOn = false,
+            countInBars = 2,
         )
         MultitrackProjectStorage(dir).save(project)
 
         val loaded = MultitrackProjectStorage(dir).load()!!
         assertEquals(87.0, loaded.bpm, 0.0)
         assertEquals(3, loaded.beatsPerBar)
+        assertEquals(false, loaded.metronomeOn)
+        assertEquals(2, loaded.countInBars)
         assertEquals(0.5f, loaded.tracks[0].gain)
         assertEquals(true, loaded.tracks[0].muted)
         assertEquals(true, loaded.tracks[1].soloed)
@@ -126,6 +130,8 @@ class MultitrackProjectStorageTest {
 
         val loaded = MultitrackProjectStorage(dir).load()!!
         assertArrayEquals(a, loaded.tracks[0].clips[0].buffer, 0f)
-        assertEquals(100.0, loaded.bpm, 0.0) // default for a pre-bpm manifest
+        assertEquals(100.0, loaded.bpm, 0.0) // defaults for fields an old manifest predates
+        assertEquals(true, loaded.metronomeOn)
+        assertEquals(1, loaded.countInBars)
     }
 }

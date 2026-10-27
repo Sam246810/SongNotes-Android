@@ -25,12 +25,14 @@ class AudioEngine {
 
     private var handle: Long = 0L
     private var stateBuffer: ByteBuffer? = null
+    private var metronomeOn = true
 
     private fun ensureCreated(): Boolean {
         if (handle == 0L) {
             handle = nativeCreate()
             if (handle != 0L) {
                 stateBuffer = nativeGetStateBuffer(handle)?.order(ByteOrder.nativeOrder())
+                nativeSetMetronomeOn(handle, metronomeOn)
             }
         }
         return handle != 0L
@@ -181,14 +183,28 @@ class AudioEngine {
      * the RT callback via `dsp::mixTracksInto`; this call itself just
      * marshals the buffers across JNI once and returns immediately (mirrors
      * [startPlaybackFromBuffer]'s synchronous, no-loader-thread shape).
+     *
+     * [bpm]/[beatsPerBar] put a metronome click on the project's beat grid
+     * while [setMetronomeOn] is on; [bpm] 0 (the default) plays no click.
      */
-    fun startMultitrackPlayback(tracks: List<MultitrackTrackSpec>): Boolean {
+    fun startMultitrackPlayback(tracks: List<MultitrackTrackSpec>, bpm: Double = 0.0, beatsPerBar: Int = 4): Boolean {
         if (!ensureCreated()) return false
         val f = flattenTracks(tracks)
         return nativeStartMultitrackPlayback(
             handle, f.clipBuffers, f.clipStartFrames, f.clipBufferOffsetFrames, f.clipLengthFrames,
-            f.trackClipCounts, f.trackGains, f.trackMuted, f.trackSoloed,
+            f.trackClipCounts, f.trackGains, f.trackMuted, f.trackSoloed, bpm, beatsPerBar,
         )
+    }
+
+    /**
+     * The Metronome switch: clicks after the count-in while recording, and
+     * during multitrack playback. Takes effect live, mid-take or
+     * mid-playback. Remembered here too, so a value set before the native
+     * engine exists still applies once it's created.
+     */
+    fun setMetronomeOn(on: Boolean) {
+        metronomeOn = on
+        if (handle != 0L) nativeSetMetronomeOn(handle, on)
     }
 
     /**
@@ -476,7 +492,10 @@ class AudioEngine {
         trackGains: FloatArray,
         trackMuted: BooleanArray,
         trackSoloed: BooleanArray,
+        bpm: Double,
+        beatsPerBar: Int,
     ): Boolean
+    private external fun nativeSetMetronomeOn(handle: Long, on: Boolean)
     private external fun nativePunchIn(
         existingCount: Int,
         existingClipStartFrames: LongArray,

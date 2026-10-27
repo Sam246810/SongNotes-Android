@@ -285,6 +285,10 @@ fun ScratchpadScreen(
         projectLoaded = true
     }
 
+    // The engine's Metronome switch follows the project's, live — including
+    // mid-take and mid-playback, which is the point of it.
+    LaunchedEffect(project.metronomeOn) { engine.setMetronomeOn(project.metronomeOn) }
+
     // Auto-save, debounced so typing a BPM or a burst of mute/solo taps is
     // one write. Launched on AppScope rather than this composable's scope
     // so closing the editor right after an edit can't cancel the pending
@@ -599,6 +603,8 @@ fun ScratchpadScreen(
                 selectedTrackIndex = selectedTrackIndex,
                 playbackFrame = engineState.playbackFrame,
                 playbackTotalFrames = engineState.playbackTotalFrames,
+                metronomeOn = project.metronomeOn,
+                onMetronomeToggle = { commit(project.copy(metronomeOn = !project.metronomeOn)) },
                 onAddTrack = { commit(project.addTrack()) },
                 onRecordPressed = ::onRecordPressed,
                 onPlayToggle = ::togglePlayback,
@@ -702,6 +708,8 @@ fun ScratchpadScreen(
                 },
                 beatsPerBar = project.beatsPerBar,
                 onBeatsPerBarChange = { commit(project.copy(beatsPerBar = it)) },
+                countInBars = project.countInBars,
+                onCountInBarsChange = { commit(project.copy(countInBars = it)) },
                 enabled = !isRecording,
                 route = currentInputRoute,
                 forceBuiltinMic = forceBuiltinMic,
@@ -855,6 +863,8 @@ private fun SessionSettingsCard(
     onBpmChange: (String) -> Unit,
     beatsPerBar: Int,
     onBeatsPerBarChange: (Int) -> Unit,
+    countInBars: Int,
+    onCountInBarsChange: (Int) -> Unit,
     enabled: Boolean,
     route: AudioRoute?,
     forceBuiltinMic: Boolean,
@@ -871,7 +881,7 @@ private fun SessionSettingsCard(
                 Text("Session", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
                 if (!expanded) {
                     Text(
-                        "$bpmText BPM · ${beatsPerBar}/4",
+                        "$bpmText BPM · ${beatsPerBar}/4 · ${countInLabel(countInBars)} count-in",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -912,6 +922,22 @@ private fun SessionSettingsCard(
                                 onClick = { onBeatsPerBarChange(beatsPerBar + 1) },
                             ) { Text("+", style = MaterialTheme.typography.titleMedium) }
                         }
+                    }
+                }
+
+                // Count-in before each take (Ableton's Count-In setting).
+                // Independent of the Metronome switch in the transport bar:
+                // a chosen count-in always clicks.
+                Spacer(Modifier.height(12.dp))
+                Text("Count-in", style = MaterialTheme.typography.bodySmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (bars in 0..2) {
+                        FilterChip(
+                            selected = countInBars == bars,
+                            onClick = { onCountInBarsChange(bars) },
+                            enabled = enabled,
+                            label = { Text(countInLabel(bars)) },
+                        )
                     }
                 }
 
@@ -963,6 +989,12 @@ private fun SessionSettingsCard(
             }
         }
     }
+}
+
+private fun countInLabel(bars: Int): String = when (bars) {
+    0 -> "Off"
+    1 -> "1 bar"
+    else -> "$bars bars"
 }
 
 /**
@@ -1155,6 +1187,8 @@ private fun ScratchpadTransportBar(
     selectedTrackIndex: Int?,
     playbackFrame: Int,
     playbackTotalFrames: Int,
+    metronomeOn: Boolean,
+    onMetronomeToggle: () -> Unit,
     onAddTrack: () -> Unit,
     onRecordPressed: () -> Unit,
     onPlayToggle: () -> Unit,
@@ -1168,6 +1202,7 @@ private fun ScratchpadTransportBar(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
             val statusText = when {
+                isArmed && countInBeatsRemaining == 0 -> "Starting…" // no count-in: just the pre-roll
                 isArmed -> "Counting in: $countInBeatsRemaining"
                 isRecording && recordedSeconds >= kMaxTakeSeconds - kTakeLimitWarnSeconds ->
                     "Recording onto track ${(selectedTrackIndex ?: 0) + 1} — stops automatically in " +
@@ -1194,6 +1229,24 @@ private fun ScratchpadTransportBar(
                     label = "Add track",
                     enabled = !isRecording && !isPlaying,
                     onClick = onAddTrack,
+                )
+                // Always enabled: switching the click on/off mid-take or
+                // mid-playback is exactly what it's for.
+                TransportAction(
+                    icon = Icons.Filled.MusicNote,
+                    label = if (metronomeOn) "Click on" else "Click off",
+                    enabled = true,
+                    containerColor = if (metronomeOn) {
+                        MaterialTheme.colorScheme.tertiaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    },
+                    contentColor = if (metronomeOn) {
+                        MaterialTheme.colorScheme.onTertiaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    },
+                    onClick = onMetronomeToggle,
                 )
                 TransportAction(
                     icon = if (isPlaying) Icons.Filled.Stop else Icons.Filled.PlayArrow,

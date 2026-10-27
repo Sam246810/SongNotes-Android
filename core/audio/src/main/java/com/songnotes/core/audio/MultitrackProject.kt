@@ -44,6 +44,14 @@ data class MultitrackProject(
      * clicks are notated.
      */
     val beatsPerBar: Int = 4,
+    /**
+     * The Metronome switch (Ableton's): click after the count-in while
+     * recording, and during playback. Pushed to the engine live via
+     * [AudioEngine.setMetronomeOn] — it isn't baked into anything.
+     */
+    val metronomeOn: Boolean = true,
+    /** Bars of count-in before a take: 0 (none), 1, or 2. The count-in always clicks. */
+    val countInBars: Int = 1,
 ) {
 
     /** The furthest clip end across every track — what a full playback/export run would cover. */
@@ -128,8 +136,8 @@ data class MultitrackProject(
         return updateTrack(index) { it.copy(clips = splicedClips) }
     }
 
-    /** Plays every track in this project via [AudioEngine.startMultitrackPlayback]. */
-    fun play(engine: AudioEngine): Boolean = engine.startMultitrackPlayback(tracks)
+    /** Plays every track in this project via [AudioEngine.startMultitrackPlayback], with the click on this project's beat grid. */
+    fun play(engine: AudioEngine): Boolean = engine.startMultitrackPlayback(tracks, bpm, beatsPerBar)
 
     /**
      * Arms a real overdub recording onto [targetIndex] — every OTHER
@@ -138,9 +146,9 @@ data class MultitrackProject(
      * new take lands at [backingTracksStartFrame] on this project's shared
      * timeline. Uses this project's own [bpm]/[beatsPerBar] rather than
      * taking them as parameters — they're project state now, not a
-     * per-call choice — with the count-in always one full bar
-     * ([beatsPerBar] beats), so changing the meter changes how long the
-     * count-in is too, not just the click's accent pattern. Does NOT
+     * per-call choice — with a count-in of [countInBars] whole bars, so
+     * changing the meter changes how long the count-in is too, not just
+     * the click's accent pattern. Does NOT
      * itself commit the resulting take: call [withPunchIn] with the take's
      * samples once recording stops and the file's been read back into
      * memory — same manual sequence the "Overdub + punch-in, end to end"
@@ -156,7 +164,7 @@ data class MultitrackProject(
     ): Boolean {
         val backingTracks = tracks.filterIndexed { i, _ -> i != targetIndex }
         return engine.armRecording(
-            filePath, bpm, beatsPerBar, countInBeats = beatsPerBar, calibrationOffsetFrames, backingTracks,
+            filePath, bpm, beatsPerBar, countInBeats = countInBars * beatsPerBar, calibrationOffsetFrames, backingTracks,
             backingTracksStartFrame,
         )
     }
