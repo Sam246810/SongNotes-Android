@@ -603,6 +603,8 @@ fun ScratchpadScreen(
                 selectedTrackIndex = selectedTrackIndex,
                 playbackFrame = engineState.playbackFrame,
                 playbackTotalFrames = engineState.playbackTotalFrames,
+                inputPeakMilli = engineState.inputPeakMilli,
+                inputClipped = engineState.inputClipped,
                 metronomeOn = project.metronomeOn,
                 onMetronomeToggle = { commit(project.copy(metronomeOn = !project.metronomeOn)) },
                 onAddTrack = { commit(project.addTrack()) },
@@ -1187,6 +1189,8 @@ private fun ScratchpadTransportBar(
     selectedTrackIndex: Int?,
     playbackFrame: Int,
     playbackTotalFrames: Int,
+    inputPeakMilli: Int,
+    inputClipped: Boolean,
     metronomeOn: Boolean,
     onMetronomeToggle: () -> Unit,
     onAddTrack: () -> Unit,
@@ -1217,6 +1221,10 @@ private fun ScratchpadTransportBar(
                     style = MaterialTheme.typography.labelMedium,
                     color = if (isRecording || isArmed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(Modifier.height(8.dp))
+            }
+            if (isRecording || isArmed) {
+                InputLevelMeter(peakMilli = inputPeakMilli, clipped = inputClipped)
                 Spacer(Modifier.height(8.dp))
             }
             Row(
@@ -1281,6 +1289,51 @@ private fun ScratchpadTransportBar(
                     onClick = onExport,
                 )
             }
+        }
+    }
+}
+
+private val MeterGreen = Color(0xFF43A047)
+private val MeterAmber = Color(0xFFFFA000)
+
+/**
+ * Mic input level while armed/recording: a bar over −60…0 dBFS, green up to
+ * −6 dB and amber above. Once anything in the take has hit full scale the
+ * bar turns red and stays red for the take, with a hint, since a clipped
+ * take can't be fixed afterwards.
+ */
+@Composable
+private fun InputLevelMeter(peakMilli: Int, clipped: Boolean) {
+    val peak = peakMilli / 1000f
+    val db = if (peak > 0f) 20f * kotlin.math.log10(peak) else -60f
+    val fraction = ((db + 60f) / 60f).coerceIn(0f, 1f)
+    val barColor = when {
+        clipped -> MaterialTheme.colorScheme.error
+        db > -6f -> MeterAmber
+        else -> MeterGreen
+    }
+    Column {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(fraction)
+                    .height(6.dp)
+                    .background(barColor),
+            )
+        }
+        if (clipped) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Clipped — move back from the mic or sing softer",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
     }
 }

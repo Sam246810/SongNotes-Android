@@ -276,6 +276,9 @@ bool NativeAudioEngine::armRecording(const std::string &filePath, double bpm, in
     mState.isArmed.store(1, std::memory_order_relaxed);
     mState.isRecording.store(0, std::memory_order_relaxed);
     mState.countInBeatsRemaining.store(countInBeats, std::memory_order_relaxed);
+    mState.inputPeakMilli.store(0, std::memory_order_relaxed);
+    mState.inputClipped.store(0, std::memory_order_relaxed);
+    mInputMeterPeak = 0.0f; // RT-owned, but the RT thread isn't metering until it drains the Arm below
     mWriterShouldRun.store(true, std::memory_order_relaxed);
     mWriterThread = std::thread(&NativeAudioEngine::writerThreadLoop, this, filePath, headSkipFrames);
 
@@ -687,6 +690,16 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
     // just callback-accurate, since this boundary determines exactly how
     // much of the file the writer thread later discards as pre-roll.
     if (mode == EngineMode::Armed || mode == EngineMode::Recording) {
+        // Input meter (EngineStateBlock::inputPeakMilli): this callback's
+        // peak, held against an exponential ~300 ms fall from the last one.
+        float blockPeak = 0.0f;
+        const size_t inSamples = static_cast<size_t>(framesWanted) * static_cast<size_t>(inChannels);
+        for (size_t i = 0; i < inSamples; i++) blockPeak = std::max(blockPeak, std::fabs(mInputScratch[i]));
+        const double fall = std::exp(-static_cast<double>(numFrames) / (kMeterFallSeconds * stream->getSampleRate()));
+        mInputMeterPeak = std::max(blockPeak, static_cast<float>(mInputMeterPeak * fall));
+        mState.inputPeakMilli.store(static_cast<int32_t>(mInputMeterPeak * 1000.0f), std::memory_order_relaxed);
+        if (blockPeak >= kClipThreshold) mState.inputClipped.store(1, std::memory_order_relaxed);
+
         const int64_t callbackEndFrame = mStreamFrameCounter + numFrames;
         if (callbackEndFrame > mPreRollStartFrame) {
             const int64_t skipWithinCallback = std::max<int64_t>(0, mPreRollStartFrame - mStreamFrameCounter);

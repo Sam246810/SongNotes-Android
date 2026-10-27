@@ -30,9 +30,15 @@ struct EngineStateBlock {
     std::atomic<int32_t> countInBeatsRemaining{0}; // for the UI's "3, 2, 1..." display
     std::atomic<int32_t> isCalibrating{0};              // Phase 3: sweep playback + loopback capture in flight
     std::atomic<int32_t> calibrationFramesCaptured{0};  // counts up to the capture target, then isCalibrating drops
+    // Input level while Armed/Recording, for the scratchpad's meter: peak
+    // |sample| x 1000 with a ~300 ms fall, so the UI's 100 ms poll can't
+    // miss a short peak. inputClipped latches 1 once any sample of the
+    // current take reaches full scale; reset when a take is armed.
+    std::atomic<int32_t> inputPeakMilli{0};
+    std::atomic<int32_t> inputClipped{0};
 };
 
-static_assert(sizeof(EngineStateBlock) == 44,
+static_assert(sizeof(EngineStateBlock) == 52,
               "EngineStateBlock layout changed — update EngineState.kt's offsets to match");
 
 } // namespace songnotes

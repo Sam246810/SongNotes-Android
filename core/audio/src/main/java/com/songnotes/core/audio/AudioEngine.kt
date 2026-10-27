@@ -440,6 +440,8 @@ class AudioEngine {
             countInBeatsRemaining = buf.getInt(EngineState.OFFSET_COUNT_IN_BEATS_REMAINING),
             isCalibrating = buf.getInt(EngineState.OFFSET_IS_CALIBRATING) != 0,
             calibrationFramesCaptured = buf.getInt(EngineState.OFFSET_CALIBRATION_FRAMES_CAPTURED),
+            inputPeakMilli = buf.getInt(EngineState.OFFSET_INPUT_PEAK_MILLI),
+            inputClipped = buf.getInt(EngineState.OFFSET_INPUT_CLIPPED) != 0,
         )
     }
 

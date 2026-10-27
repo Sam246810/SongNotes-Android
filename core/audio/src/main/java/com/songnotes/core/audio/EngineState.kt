@@ -17,6 +17,10 @@ data class EngineState(
     val countInBeatsRemaining: Int,
     val isCalibrating: Boolean,
     val calibrationFramesCaptured: Int,
+    /** Input peak while armed/recording, as |sample| x 1000 (1000 = full scale), with a ~300 ms fall. */
+    val inputPeakMilli: Int,
+    /** Latched once any sample of the current take hit full scale; cleared when the next take is armed. */
+    val inputClipped: Boolean,
 ) {
     companion object {
         const val OFFSET_IS_RECORDING = 0
@@ -30,7 +34,9 @@ data class EngineState(
         const val OFFSET_COUNT_IN_BEATS_REMAINING = 32
         const val OFFSET_IS_CALIBRATING = 36
         const val OFFSET_CALIBRATION_FRAMES_CAPTURED = 40
-        const val SIZE_BYTES = 44
+        const val OFFSET_INPUT_PEAK_MILLI = 44
+        const val OFFSET_INPUT_CLIPPED = 48
+        const val SIZE_BYTES = 52
 
         fun idle() = EngineState(
             isRecording = false,
@@ -44,6 +50,8 @@ data class EngineState(
             countInBeatsRemaining = 0,
             isCalibrating = false,
             calibrationFramesCaptured = 0,
+            inputPeakMilli = 0,
+            inputClipped = false,
         )
     }
 }

@@ -296,6 +296,11 @@ private:
     const std::vector<float> *mActiveClickTemplate = nullptr;
     int32_t mActiveClickReadPos = 0;
     std::atomic<bool> mMetronomeOn{true}; // see setMetronomeOn()
+
+    // Input meter state behind EngineStateBlock::inputPeakMilli — RT-owned.
+    static constexpr double kMeterFallSeconds = 0.3;
+    static constexpr float kClipThreshold = 0.999f;
+    float mInputMeterPeak = 0.0f;
     // Playback click grid, set by startMultitrackPlayback() before its
     // mode store (same handoff as mMultitrackTotalFrames). Fractional so a
     // long playback doesn't drift off the timeline's own beat grid.
