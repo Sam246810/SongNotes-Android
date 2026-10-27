@@ -109,6 +109,17 @@ import kotlinx.coroutines.withContext
 
 private const val kSampleRate = 48000
 
+/**
+ * Longest single take; recording stops and saves itself here. Bounded by
+ * memory, not storage: a finished take is held whole as a FloatArray
+ * (~11.5 MB per minute at 48 kHz mono), along with every other take in the
+ * project, so a much longer cap needs takes streamed from disk instead.
+ */
+private const val kMaxTakeSeconds = 10 * 60
+
+/** How long before [kMaxTakeSeconds] the transport starts counting down. */
+private const val kTakeLimitWarnSeconds = 60
+
 /** How many edits Undo can step back through. */
 private const val kUndoDepth = 30
 
@@ -445,7 +456,7 @@ fun ScratchpadScreen(
         statusMessage = null
     }
 
-    fun stopRecordingAndCommit() {
+    fun stopRecordingAndCommit(hitTakeLimit: Boolean = false) {
         engine.stopRecording()
         context.stopService(Intent(context, RecordingForegroundService::class.java))
         val targetIndex = selectedTrackIndex
@@ -459,9 +470,11 @@ fun ScratchpadScreen(
             }
             val newClip = MultitrackClipSpec(buffer = takeSamples, startFrame = scrubFrame)
             commit(project.withPunchIn(engine, targetIndex, newClip))
-            statusMessage = "Recorded %.1fs onto track %d.".format(
-                takeSamples.size / kSampleRate.toDouble(), targetIndex + 1,
-            )
+            statusMessage = if (hitTakeLimit) {
+                "Reached the ${kMaxTakeSeconds / 60}-minute take limit — take saved onto track ${targetIndex + 1}."
+            } else {
+                "Recorded %.1fs onto track %d.".format(takeSamples.size / kSampleRate.toDouble(), targetIndex + 1)
+            }
         }
     }
 
@@ -516,6 +529,14 @@ fun ScratchpadScreen(
         while (isRecording || isPlaying) {
             engineState = engine.state()
             if (isPlaying && !engineState.isPlaying) isPlaying = false
+            // Runs whether or not the scratchpad UI is showing (this
+            // composable stays alive while minimized to the lyrics), so the
+            // cap holds from there too. stopRecordingAndCommit flips
+            // isRecording off, which ends this loop.
+            if (isRecording && engineState.framesRecorded >= kMaxTakeSeconds * kSampleRate) {
+                stopRecordingAndCommit(hitTakeLimit = true)
+                break
+            }
             delay(100)
         }
     }
@@ -1148,6 +1169,9 @@ private fun ScratchpadTransportBar(
         ) {
             val statusText = when {
                 isArmed -> "Counting in: $countInBeatsRemaining"
+                isRecording && recordedSeconds >= kMaxTakeSeconds - kTakeLimitWarnSeconds ->
+                    "Recording onto track ${(selectedTrackIndex ?: 0) + 1} — stops automatically in " +
+                        "${(kMaxTakeSeconds - recordedSeconds).coerceAtLeast(0)}s"
                 isRecording -> "Recording onto track ${(selectedTrackIndex ?: 0) + 1} — ${recordedSeconds}s so far"
                 isPlaying -> "Playback: $playbackFrame / $playbackTotalFrames"
                 else -> null
@@ -1273,7 +1297,14 @@ private fun MinimizedRecordingBubble(elapsedSeconds: Int, onClick: () -> Unit, m
         ) {
             Icon(Icons.Filled.Mic, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
-            Text(formatElapsed(elapsedSeconds), style = MaterialTheme.typography.labelLarge)
+            Text(
+                if (elapsedSeconds >= kMaxTakeSeconds - kTakeLimitWarnSeconds) {
+                    "${formatElapsed(elapsedSeconds)} / ${formatElapsed(kMaxTakeSeconds)}"
+                } else {
+                    formatElapsed(elapsedSeconds)
+                },
+                style = MaterialTheme.typography.labelLarge,
+            )
             Spacer(Modifier.width(8.dp))
             Text("Recording — tap to view", style = MaterialTheme.typography.labelMedium)
         }
