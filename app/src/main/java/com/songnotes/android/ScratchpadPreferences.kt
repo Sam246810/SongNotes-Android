@@ -27,6 +27,15 @@ class ScratchpadPreferences(context: Context) {
         get() = prefs.getString(KEY_TUTORIAL_REQUESTED, null)?.let { runCatching { ScratchpadMode.valueOf(it) }.getOrNull() }
         set(value) { prefs.edit().putString(KEY_TUTORIAL_REQUESTED, value?.name).apply() }
 
+    /**
+     * Whether Simple mode and the lyrics bar play the song's other tracks
+     * along with the voice note (Track 1). Off by default: those views are
+     * about the voice note, and the rest is Advanced's.
+     */
+    var hearAllTracks: Boolean
+        get() = prefs.getBoolean(KEY_HEAR_ALL, false)
+        set(value) { prefs.edit().putBoolean(KEY_HEAR_ALL, value).apply() }
+
     /** Whether the user has been asked for notification permission (asked once, on the first Record). */
     var notificationPermissionAsked: Boolean
         get() = prefs.getBoolean(KEY_NOTIF_ASKED, false)
@@ -38,5 +47,6 @@ class ScratchpadPreferences(context: Context) {
         const val KEY_MODE = "mode"
         const val KEY_TUTORIAL_REQUESTED = "tutorial_requested_mode"
         const val KEY_NOTIF_ASKED = "notification_permission_asked"
+        const val KEY_HEAR_ALL = "simple_hear_all_tracks"
     }
 }

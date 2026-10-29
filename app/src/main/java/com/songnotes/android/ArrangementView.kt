@@ -99,7 +99,7 @@ private const val RulerEdgeMaxDpPerSecond = 900f
 /** A clip, addressed by position in the project. */
 data class ClipRef(val track: Int, val clip: Int)
 
-/** A take in progress, drawn as a growing clip on its track. [peaks] are input levels, one per [framesPerPeak] frames. */
+/** A take in progress, drawn as a growing clip on its track. [peaks] are the take's own peaks (max |sample|), one per [framesPerPeak] frames. */
 data class RecordingPreview(
     val trackIndex: Int,
     val startFrame: Long,
@@ -765,7 +765,6 @@ private fun ArrangementClip(
     val currentOnSelect by rememberUpdatedState(onSelect)
     val currentTrackCount by rememberUpdatedState(trackCount)
 
-    val onSurface = MaterialTheme.colorScheme.onSurface
     val selectionColor = MaterialTheme.colorScheme.primary
     // Ableton's look: a light body in the track colour with a dark waveform,
     // and a slightly deeper header strip. Readable on both paper themes.
@@ -844,15 +843,25 @@ private fun ArrangementClip(
             )
             if (selected) {
                 drawRoundRect(selectionColor, cornerRadius = radius, style = Stroke(width = 2.5.dp.toPx()))
-                // Trim tabs, only where the real edge is on screen.
-                val tabW = 6.dp.toPx()
-                val tabH = size.height * 0.45f
+                // Trim tabs, only where the real edge is on screen: small
+                // tabs in the selection colour, flush with its outline, with
+                // two light grip lines (the same language as Simple mode's
+                // trim handles) rather than heavy dark bars.
+                val tabW = 10.dp.toPx()
+                val tabH = minOf(24.dp.toPx(), (size.height - headerPx) * 0.7f)
                 val tabTop = headerPx + (size.height - headerPx - tabH) / 2f
-                if (fullLeft >= left - 1f) {
-                    drawRoundRect(onSurface, topLeft = Offset(2f, tabTop), size = Size(tabW, tabH), cornerRadius = CornerRadius(tabW))
+                val gripColor = Color.White.copy(alpha = 0.9f)
+                val clipWidth = size.width // read here: inside buildList, `size` is the list's
+                val tabs = buildList {
+                    if (fullLeft >= left - 1f) add(0f)
+                    if (fullRight <= right + 1f) add(clipWidth - tabW)
                 }
-                if (fullRight <= right + 1f) {
-                    drawRoundRect(onSurface, topLeft = Offset(size.width - tabW - 2f, tabTop), size = Size(tabW, tabH), cornerRadius = CornerRadius(tabW))
+                for (tabX in tabs) {
+                    drawRoundRect(selectionColor, topLeft = Offset(tabX, tabTop), size = Size(tabW, tabH), cornerRadius = CornerRadius(4.dp.toPx()))
+                    val gx = tabX + tabW / 2f
+                    for (dx in listOf(-1.75.dp.toPx(), 1.75.dp.toPx())) {
+                        drawLine(gripColor, Offset(gx + dx, tabTop + tabH * 0.28f), Offset(gx + dx, tabTop + tabH * 0.72f), strokeWidth = 1.2.dp.toPx())
+                    }
                 }
             }
         }

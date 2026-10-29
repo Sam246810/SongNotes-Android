@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -63,6 +64,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -139,10 +143,12 @@ fun ScratchpadControlBar(
     onExport: () -> Unit,
     onSwitchToSimple: () -> Unit,
     onCalibrate: () -> Unit,
+    /** Shows where the phone's mic is for a few seconds; null when the phone doesn't say. */
+    onShowMic: (() -> Unit)?,
     onTutorial: () -> Unit,
     tutorialTargets: TutorialTargets? = null,
 ) {
-    val left: @Composable () -> Unit = {
+    val back: @Composable () -> Unit = {
         if (isRecording) {
             TextButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -152,6 +158,14 @@ fun ScratchpadControlBar(
         } else {
             IconButton(onClick = onBack) { Icon(Icons.Filled.Close, contentDescription = "Back to lyrics") }
         }
+        ModeSwitch(
+            mode = ScratchpadMode.ADVANCED,
+            enabled = !isRecording,
+            onSelect = { onSwitchToSimple() },
+            modifier = Modifier.padding(horizontal = 4.dp),
+        )
+    }
+    val left: @Composable () -> Unit = {
         ControlChip(text = "${formatBpm(bpm)} BPM", enabled = editsEnabled, onClick = onTempoClick)
         TimeSignatureChip(beatsPerBar, enabled = editsEnabled, onChange = onBeatsPerBarChange)
         MetronomeButton(metronomeOn, countInBars, editsEnabled, onMetronomeToggle, onCountInChange)
@@ -200,7 +214,7 @@ fun ScratchpadControlBar(
     val right: @Composable () -> Unit = {
         IconButton(enabled = canUndo, onClick = onUndo) { Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo") }
         IconButton(enabled = canRedo, onClick = onRedo) { Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo") }
-        OverflowMenu(isExporting, editsEnabled, onExport, onSwitchToSimple, onCalibrate, onTutorial)
+        OverflowMenu(isExporting, editsEnabled, onExport, onCalibrate, onShowMic, onTutorial)
     }
 
     Surface(
@@ -209,10 +223,11 @@ fun ScratchpadControlBar(
         modifier = Modifier.tutorialTarget(tutorialTargets, "controls"),
     ) {
         if (compact) {
-            // Two rows: settings on top, transport + undo/redo/menu below, so
-            // nothing (above all the menu, the way back to landscape) gets
-            // pushed off a narrow screen.
+            // Three rows: back + mode, settings, then transport +
+            // undo/redo/menu, so nothing (above all the menu, the way back
+            // to landscape) gets pushed off a narrow screen.
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) { back() }
                 Row(verticalAlignment = Alignment.CenterVertically) { left() }
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(start = 12.dp, bottom = 6.dp),
@@ -228,11 +243,51 @@ fun ScratchpadControlBar(
                 modifier = Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                back()
                 left()
                 Spacer(Modifier.weight(1f))
                 transport()
                 Spacer(Modifier.weight(1f))
                 right()
+            }
+        }
+    }
+}
+
+/**
+ * Which Scratchpad this is, as two segments with the current one filled;
+ * tap the other to switch. It sits in the same top-left spot in both modes,
+ * so the way back is always where the way there was. Locked while a take
+ * rolls, since the take's destination was decided when it started.
+ */
+@Composable
+fun ModeSwitch(mode: ScratchpadMode, enabled: Boolean, onSelect: (ScratchpadMode) -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+            .padding(3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        for (option in ScratchpadMode.entries) {
+            val selected = option == mode
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.Transparent)
+                    .selectable(selected = selected, enabled = enabled, role = Role.Tab) { if (!selected) onSelect(option) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    if (option == ScratchpadMode.SIMPLE) "Simple" else "Advanced",
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    color = when {
+                        selected -> MaterialTheme.colorScheme.onPrimary
+                        enabled -> MaterialTheme.colorScheme.onSurfaceVariant
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                    },
+                )
             }
         }
     }
@@ -367,8 +422,8 @@ private fun OverflowMenu(
     isExporting: Boolean,
     editsEnabled: Boolean,
     onExport: () -> Unit,
-    onSwitchToSimple: () -> Unit,
     onCalibrate: () -> Unit,
+    onShowMic: (() -> Unit)?,
     onTutorial: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
@@ -382,17 +437,18 @@ private fun OverflowMenu(
                 onClick = { open = false; onExport() },
             )
             DropdownMenuItem(
-                text = { Text("Simple mode") },
-                leadingIcon = { Icon(Icons.Filled.Mic, contentDescription = null) },
-                enabled = editsEnabled,
-                onClick = { open = false; onSwitchToSimple() },
-            )
-            DropdownMenuItem(
                 text = { Text("Calibrate recording latency") },
                 leadingIcon = { Icon(Icons.Filled.Tune, contentDescription = null) },
                 enabled = editsEnabled,
                 onClick = { open = false; onCalibrate() },
             )
+            if (onShowMic != null) {
+                DropdownMenuItem(
+                    text = { Text("Where's the mic?") },
+                    leadingIcon = { Icon(Icons.Filled.Mic, contentDescription = null) },
+                    onClick = { open = false; onShowMic() },
+                )
+            }
             HorizontalDivider()
             DropdownMenuItem(
                 text = { Text("Scratchpad tutorial") },
@@ -413,6 +469,8 @@ private fun OverflowMenu(
 fun TrackHeader(
     index: Int,
     track: MultitrackTrackSpec,
+    /** The track Simple mode and the lyrics bar show, record and play (Track 1 unless another was picked). */
+    isVoiceNote: Boolean,
     compact: Boolean,
     armed: Boolean,
     enabled: Boolean,
@@ -466,6 +524,19 @@ fun TrackHeader(
                     tint = MaterialTheme.colorScheme.outline,
                     modifier = Modifier.size(16.dp),
                 )
+            }
+            if (isVoiceNote) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Mic, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(12.dp))
+                    Spacer(Modifier.width(3.dp))
+                    Text(
+                        "In Simple",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        modifier = Modifier.semantics { contentDescription = "The track Simple mode and the lyrics bar show" },
+                    )
+                }
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 HeaderToggle(

@@ -88,8 +88,11 @@ private const val kUndoDepth = 30
 /** Capture starts this long before the downbeat (`kPreRollSeconds` in audio_engine.h); framesRecorded includes it. */
 private const val kPreRollFrames = 36_000
 
-/** The engine state poll interval, which is also one live-waveform peak of a take being recorded. */
+/** The engine state poll interval. */
 private const val kPollMs = 100L
+
+/** One live-waveform peak of a take being recorded: 50 ms, read from the take file as it's written. */
+private const val kLivePeakFrames = kSampleRate / 20
 
 /**
  * A song's Scratchpad: its own multitrack demo, laid out like Ableton 12's
@@ -151,6 +154,8 @@ fun ScratchpadScreen(
     var tutorialMode by remember { mutableStateOf<ScratchpadMode?>(null) }
     var pendingTutorial by remember { mutableStateOf<ScratchpadMode?>(null) }
     val livePeaks = remember { mutableStateListOf<Float>() }
+    // Reads the take's real audio as it's written, for the live waveform.
+    var liveTakeReader by remember { mutableStateOf<LiveTakePeaks?>(null) }
     val scope = rememberCoroutineScope()
     val storage = remember(songId) { MultitrackProjectStorage(context, songId) }
     val prefs = remember { ScratchpadPreferences(context) }
@@ -163,6 +168,20 @@ fun ScratchpadScreen(
     // song's voice note (Track 1; Simple mode and the lyrics bar) or
     // Advanced's armed track.
     var recordVoiceNote by remember { mutableStateOf(false) }
+    // The track Simple mode and the lyrics bar show, play and record onto:
+    // Track 1 unless another is picked from the menu by its name; null once
+    // it's deleted, until one is picked or a new take starts a new track.
+    var simpleTrackPick by remember { mutableStateOf<Int?>(0) }
+    // What Delete took away, so Undo can bring the view back to it.
+    var deletedSimpleTrack by remember { mutableStateOf<Int?>(null) }
+    // Simple mode and the lyrics bar hear the voice note alone unless this
+    // is on (the chip under the note); Advanced always hears every track.
+    var hearAllTracks by remember { mutableStateOf(prefs.hearAllTracks) }
+    val simpleTrack: Int? = simpleTrackPick?.takeIf { it < project.tracks.size }
+    // Which of the project's tracks are loaded in the engine right now
+    // (what's playing, or a take's backing tracks), so live mute/solo/volume
+    // changes go to the same list.
+    var engineTracks by remember { mutableStateOf<List<Int>>(emptyList()) }
     val inputPreference = remember { RecordingInputPreference(context) }
     var forceBuiltinMic by remember { mutableStateOf(false) }
     var currentInputRoute by remember { mutableStateOf<AudioRoute?>(null) }
@@ -198,6 +217,8 @@ fun ScratchpadScreen(
             // Shown exactly as left (including empty); bpm follows the chart.
             project = if (songBpm > 0) loaded.copy(bpm = songBpm.toDouble()) else loaded
             armedTrack = if (loaded.tracks.isEmpty()) null else 0
+            // The playhead starts at the end of Track 1, where a take carries on.
+            insertFrame = loaded.tracks.firstOrNull()?.clips?.maxOfOrNull { it.startFrame + it.lengthFrames } ?: 0L
         } else if (songBpm > 0) {
             project = project.copy(bpm = songBpm.toDouble())
         }
@@ -224,13 +245,14 @@ fun ScratchpadScreen(
     }
 
     // While the Scratchpad is on screen it turns with the phone, respecting
-    // the system auto-rotate lock (FULL_USER); every other screen stays
-    // portrait. The manifest's configChanges keep rotation from recreating
-    // the activity, which owns the audio engine.
+    // the system auto-rotate lock (USER, which unlike FULL_USER leaves out
+    // upside-down portrait); every other screen stays portrait. The
+    // manifest's configChanges keep rotation from recreating the activity,
+    // which owns the audio engine.
     val activity = remember(context) { context.findActivity() }
     DisposableEffect(visible) {
         activity?.requestedOrientation =
-            if (visible) ActivityInfo.SCREEN_ORIENTATION_FULL_USER else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            if (visible) ActivityInfo.SCREEN_ORIENTATION_USER else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
     }
 
@@ -298,6 +320,12 @@ fun ScratchpadScreen(
             project.tracks.isEmpty() -> null
             else -> (armedTrack ?: 0).coerceAtMost(project.tracks.lastIndex)
         }
+        // Undoing a Delete in Simple shows the track again.
+        val deleted = deletedSimpleTrack
+        if (simpleTrackPick == null && deleted != null && deleted < project.tracks.size) {
+            simpleTrackPick = deleted
+            deletedSimpleTrack = null
+        }
     }
 
     fun undo() {
@@ -313,7 +341,8 @@ fun ScratchpadScreen(
     }
 
     fun beginRecording() {
-        // The voice note is always Track 1, created by its first take.
+        // Simple mode and the lyrics bar record onto their picked track
+        // (Track 1 by default); with none picked, the take starts a new one.
         // Advanced: onto the armed track, like Ableton.
         val voiceNote = recordVoiceNote
         if (!voiceNote && project.tracks.isEmpty()) return
@@ -321,16 +350,19 @@ fun ScratchpadScreen(
             statusMessage = "Set a tempo before recording."
             return
         }
-        val createsTrack = voiceNote && project.tracks.isEmpty()
-        val armProject = if (createsTrack) project.withVoiceNoteTrack() else project
-        val targetIndex = if (voiceNote) 0 else (armedTrack ?: 0).coerceAtMost(project.tracks.lastIndex)
+        val createsTrack = voiceNote && simpleTrack == null
+        val armProject = if (createsTrack) project.withNewVoiceTrack() else project
+        val targetIndex = if (voiceNote) simpleTrack ?: armProject.tracks.lastIndex else (armedTrack ?: 0).coerceAtMost(project.tracks.lastIndex)
         if (!voiceNote) armedTrack = targetIndex
         selectedClip = null
-        // A voice note only ever grows, Samsung Voice Recorder style: every
-        // take goes on the end of Track 1, wherever the playhead is (seeking
-        // is for listening). Advanced records at the insert marker.
+        // Simple mode and the lyrics bar record from the playhead, which
+        // waits at the end of the track unless moved (so by default a take
+        // carries straight on); moved back, the take records over what it
+        // covers. Never past the end, so a take can't leave a gap. Advanced
+        // records at the insert marker.
         val startFrame = if (voiceNote) {
-            armProject.tracks[0].clips.maxOfOrNull { it.startFrame + it.lengthFrames } ?: 0L
+            val trackEnd = armProject.tracks[targetIndex].clips.maxOfOrNull { it.startFrame + it.lengthFrames } ?: 0L
+            insertFrame.coerceIn(0L, trackEnd)
         } else {
             insertFrame
         }
@@ -339,11 +371,15 @@ fun ScratchpadScreen(
         val calibrationOffsetFrames = CalibrationStore(context).load(route.routeKey)?.offsetFrames ?: 0.0
 
         RecordingForegroundService.start(context, songTitle)
-        val armed = armProject.armOverdub(
+        // A voice note heard alone records without backing tracks too.
+        val alone = voiceNote && !hearAllTracks
+        val armSource = if (alone) armProject.copy(tracks = listOf(armProject.tracks[targetIndex])) else armProject
+        val armed = armSource.armOverdub(
             engine, takeFile.absolutePath,
-            targetIndex = targetIndex, backingTracksStartFrame = startFrame,
+            targetIndex = if (alone) 0 else targetIndex, backingTracksStartFrame = startFrame,
             calibrationOffsetFrames = calibrationOffsetFrames,
         )
+        engineTracks = if (alone) emptyList() else project.tracks.indices.filter { it != targetIndex }
         if (!armed) {
             RecordingForegroundService.stop(context)
             statusMessage = "Couldn't start recording — see Diagnostics for the last error."
@@ -353,6 +389,7 @@ fun ScratchpadScreen(
         recordingTrack = targetIndex
         recordingCreatesTrack = createsTrack
         livePeaks.clear()
+        liveTakeReader = LiveTakePeaks(takeFile, kLivePeakFrames)
         isRecording = true
         statusMessage = null
     }
@@ -373,14 +410,17 @@ fun ScratchpadScreen(
                 return@launch
             }
             val newClip = MultitrackClipSpec(buffer = takeSamples, startFrame = recordStartFrame)
-            // A first voice note's track is only added once its take exists,
-            // so an empty or failed take never leaves an empty track behind;
-            // one undo step removes track and take together.
-            val base = if (createsTrack && project.tracks.isEmpty()) project.withVoiceNoteTrack() else project
+            // A new track is only added once its take exists, so an empty or
+            // failed take never leaves an empty track behind; one undo step
+            // removes track and take together.
+            val base = if (createsTrack && project.tracks.size == targetIndex) project.withNewVoiceTrack() else project
             commit(base.withPunchIn(engine, targetIndex, newClip))
             if (armedTrack == null) armedTrack = targetIndex
-            // The playhead waits at the end of the take, where the next one goes.
-            if (voiceNote) insertFrame = recordStartFrame + takeSamples.size
+            if (voiceNote) {
+                simpleTrackPick = targetIndex
+                // The playhead waits at the end of the take, where the next one goes.
+                insertFrame = recordStartFrame + takeSamples.size
+            }
             val name = project.tracks[targetIndex].name
             statusMessage = if (hitTakeLimit) {
                 "Reached the ${kMaxTakeSeconds / 60}-minute take limit — take saved on $name."
@@ -390,20 +430,45 @@ fun ScratchpadScreen(
         }
     }
 
-    fun togglePlayback() {
+    /** Track indices a view hears: the voice-note views (Simple, the lyrics bar) hear their picked track alone unless [hearAllTracks]. */
+    fun heardTracks(voiceNoteView: Boolean): List<Int> =
+        if (voiceNoteView && !hearAllTracks) listOfNotNull(simpleTrack) else project.tracks.indices.toList()
+
+    fun heardEnd(voiceNoteView: Boolean): Long =
+        heardTracks(voiceNoteView).maxOfOrNull { i -> project.tracks[i].clips.maxOfOrNull { it.startFrame + it.lengthFrames } ?: 0L } ?: 0L
+
+    fun startPlayback(from: Long, voiceNoteView: Boolean): Boolean {
+        val heard = heardTracks(voiceNoteView)
+        engineTracks = heard
+        return engine.startMultitrackPlayback(heard.map { project.tracks[it] }, project.bpm, project.beatsPerBar, from)
+    }
+
+    fun togglePlayback(voiceNoteView: Boolean = mode == ScratchpadMode.SIMPLE) {
         if (isPlaying) {
             engine.stopPlayback()
             isPlaying = false
             return
         }
-        if (project.tracks.isEmpty() || project.totalFrames == 0L) {
+        val end = heardEnd(voiceNoteView)
+        if (end == 0L) {
             statusMessage = "Nothing to play yet — record a take first."
             return
         }
         // Ableton plays from the insert marker; past the end, from the top.
-        val from = if (insertFrame < project.totalFrames) insertFrame else 0L
-        isPlaying = project.play(engine, from)
+        val from = if (insertFrame < end) insertFrame else 0L
+        isPlaying = startPlayback(from, voiceNoteView)
         if (!isPlaying) statusMessage = "Playback failed to start — see Diagnostics for the last error."
+    }
+
+    fun setHearAllTracks(on: Boolean) {
+        hearAllTracks = on
+        prefs.hearAllTracks = on
+        // Swap what's playing without losing the place.
+        if (isPlaying) {
+            val at = engineState.playbackFrame.toLong()
+            engine.stopPlayback()
+            isPlaying = at < heardEnd(true) && startPlayback(at, true)
+        }
     }
 
     fun exportMixdown() {
@@ -457,8 +522,9 @@ fun ScratchpadScreen(
         while (isRecording || isPlaying) {
             engineState = engine.state()
             if (isPlaying && !engineState.isPlaying) isPlaying = false
-            if (isRecording && !engineState.isArmed && engineState.framesRecorded > kPreRollFrames) {
-                livePeaks.add(engineState.inputPeakMilli / 1000f)
+            if (isRecording) {
+                val reader = liveTakeReader
+                if (reader != null) livePeaks.addAll(withContext(Dispatchers.IO) { reader.readNew() })
             }
             // Runs while minimized too, so the cap holds from the lyrics.
             if (isRecording && engineState.framesRecorded >= kMaxTakeSeconds * kSampleRate) {
@@ -472,17 +538,12 @@ fun ScratchpadScreen(
     LaunchedEffect(isRecording) { onRecordingChanged(isRecording) }
 
     // Mute/solo/volume changes reach what's already playing (or the backing
-    // tracks of a take) live, without restarting. The engine's track list
-    // during a take is every track except the one being recorded onto.
+    // tracks of a take) live, without restarting, sent for exactly the
+    // tracks the engine has ([engineTracks]).
     val mixFlags = project.tracks.map { Triple(it.gain, it.muted, it.soloed) }
-    LaunchedEffect(mixFlags, isPlaying, isRecording) {
+    LaunchedEffect(mixFlags, isPlaying, isRecording, engineTracks) {
         if (!isPlaying && !isRecording) return@LaunchedEffect
-        val live = if (isRecording && !recordingCreatesTrack) {
-            project.tracks.filterIndexed { i, _ -> i != recordingTrack }
-        } else {
-            project.tracks
-        }
-        engine.setMultitrackMix(live)
+        engine.setMultitrackMix(engineTracks.mapNotNull { project.tracks.getOrNull(it) })
     }
 
     // Simple mode's seeker. While playing, dragging only previews (moving
@@ -501,7 +562,7 @@ fun ScratchpadScreen(
         scrubFrame = null
         insertFrame = frame
         engine.stopPlayback()
-        isPlaying = frame < project.totalFrames && project.play(engine, frame)
+        isPlaying = frame < heardEnd(true) && startPlayback(frame, true)
     }
 
     fun switchMode(to: ScratchpadMode) {
@@ -538,6 +599,25 @@ fun ScratchpadScreen(
     // doesn't say. Shown as a pointer while a take is armed or rolling.
     val micNatural = remember { locateBuiltinMic(context) }
     val usingBuiltinMic = currentInputRoute.let { it == null || it.isBuiltinMic || it.isBluetooth } || forceBuiltinMic
+    // "Where's the mic?" in the ⋮ menus: the glow shows for a few seconds on
+    // request (it used to show on every take, over Simple's record button).
+    var micHintShown by remember { mutableStateOf(false) }
+    LaunchedEffect(micHintShown) {
+        if (micHintShown) {
+            delay(5000)
+            micHintShown = false
+        }
+    }
+    val showMic: (() -> Unit)? = if (micNatural == null) null else {
+        {
+            micHintShown = true
+            statusMessage = if (usingBuiltinMic) {
+                "Your phone's mic is where the red glow is."
+            } else {
+                "You're recording from a connected mic, not the phone's own."
+            }
+        }
+    }
 
     val positionFrame = when {
         scrubFrame != null -> scrubFrame!!
@@ -557,7 +637,7 @@ fun ScratchpadScreen(
                     startFrame = recordStartFrame,
                     lengthFrames = (engineState.framesRecorded - kPreRollFrames).coerceAtLeast(0).toLong(),
                     peaks = livePeaks.toList(),
-                    framesPerPeak = (kSampleRate * kPollMs / 1000).toInt(),
+                    framesPerPeak = kLivePeakFrames,
                 )
             } else {
                 null
@@ -568,7 +648,6 @@ fun ScratchpadScreen(
                         SimpleScratchpad(
                             engine = engine,
                             tracks = shownTracks,
-                            songTitle = songTitle,
                             landscape = landscape,
                             isRecording = isRecording,
                             isArmed = engineState.isArmed && isRecording,
@@ -593,24 +672,41 @@ fun ScratchpadScreen(
                             onBack = onDone,
                             onSeek = { frame, done -> seekSimple(frame, done) },
                             onRecord = { onRecordPressed() },
-                            onPlay = ::togglePlayback,
+                            onPlay = { togglePlayback(voiceNoteView = true) },
+                            hearAllTracks = hearAllTracks,
+                            onHearAllTracksChange = ::setHearAllTracks,
                             onMetronomeToggle = { commit(project.copy(metronomeOn = !project.metronomeOn)) },
                             onTempoClick = { tempoDialogOpen = true },
                             onCountInChange = { commit(project.copy(countInBars = it)) },
                             onUndo = ::undo,
                             onRedo = ::redo,
-                            onMuteToggle = { i -> commit(project.withTrackMuted(i, !project.tracks[i].muted)) },
-                            onSoloToggle = { i -> commit(project.withTrackSoloed(i, !project.tracks[i].soloed)) },
-                            onGainChange = { i, g -> commit(project.withTrackGain(i, g)) },
-                            onRename = { i, name -> commit(project.renameTrack(i, name)) },
-                            onDelete = { i ->
-                                commit(project.removeTrack(i))
-                                armedTrack = if (project.tracks.isEmpty()) null else (armedTrack ?: 0).coerceAtMost(project.tracks.lastIndex)
+                            selectedTrack = if (showingExample) 0 else simpleTrack,
+                            onSelectTrack = { i ->
+                                if (isPlaying) togglePlayback(voiceNoteView = true)
+                                simpleTrackPick = i
+                                // At its end, ready to carry on recording it.
+                                insertFrame = project.tracks.getOrNull(i)?.clips?.maxOfOrNull { it.startFrame + it.lengthFrames } ?: 0L
                             },
-                            onTrim = { i, start, end -> commit(project.trimTrack(i, start, end)) },
+                            onTrim = { start, end -> simpleTrack?.let { commit(project.trimTrack(it, start, end)) } },
+                            onRenameTrack = { name -> simpleTrack?.let { commit(project.renameTrack(it, name)) } },
+                            onDeleteTrack = {
+                                simpleTrack?.let { i ->
+                                    commit(project.removeTrack(i))
+                                    deletedSimpleTrack = i
+                                    simpleTrackPick = null
+                                    insertFrame = 0L
+                                    armedTrack = when {
+                                        project.tracks.isEmpty() -> null
+                                        armedTrack == i -> i.coerceAtMost(project.tracks.lastIndex)
+                                        armedTrack != null && armedTrack!! > i -> armedTrack!! - 1
+                                        else -> armedTrack
+                                    }
+                                }
+                            },
                             onSwitchToAdvanced = { switchMode(ScratchpadMode.ADVANCED) },
                             onExport = ::exportMixdown,
                             onCalibrate = { showCalibration = true },
+                            onShowMic = showMic,
                             onTutorial = { tutorialMode = ScratchpadMode.SIMPLE },
                             tutorialTargets = tutorialTargets,
                             modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing),
@@ -627,9 +723,9 @@ fun ScratchpadScreen(
                                 message = it,
                                 onDismiss = { statusMessage = null },
                                 modifier = Modifier
-                                    .align(if (landscape) Alignment.BottomStart else Alignment.BottomCenter)
+                                    .align(Alignment.BottomCenter)
                                     .windowInsetsPadding(WindowInsets.safeDrawing)
-                                    .padding(bottom = if (landscape) 16.dp else 210.dp, start = 16.dp, end = 16.dp),
+                                    .padding(bottom = if (landscape) 112.dp else 292.dp, start = 16.dp, end = 16.dp),
                             )
                         }
                     }
@@ -664,13 +760,14 @@ fun ScratchpadScreen(
                         onMetronomeToggle = { commit(project.copy(metronomeOn = !project.metronomeOn)) },
                         onCountInChange = { commit(project.copy(countInBars = it)) },
                         onSnapToggle = { snapOn = !snapOn },
-                        onPlay = ::togglePlayback,
+                        onPlay = { togglePlayback() },
                         onRecord = { onRecordPressed() },
                         onUndo = ::undo,
                         onRedo = ::redo,
                         onExport = ::exportMixdown,
                         onSwitchToSimple = { switchMode(ScratchpadMode.SIMPLE) },
                         onCalibrate = { showCalibration = true },
+                        onShowMic = showMic,
                         onTutorial = { tutorialMode = ScratchpadMode.ADVANCED },
                         tutorialTargets = tutorialTargets,
                     )
@@ -701,6 +798,7 @@ fun ScratchpadScreen(
                             },
                             onMoveTrack = { from, to ->
                                 commit(project.moveTrack(from, to))
+                                simpleTrackPick = simpleTrackPick?.let { movedIndex(it, from, to) }
                                 if (armedTrack == from) {
                                     armedTrack = to
                                 } else if (armedTrack != null) {
@@ -724,6 +822,7 @@ fun ScratchpadScreen(
                                 TrackHeader(
                                     index = index,
                                     track = track,
+                                    isVoiceNote = index == simpleTrack && !showingExample,
                                     compact = !landscape,
                                     armed = armedTrack == index,
                                     enabled = editsEnabled,
@@ -738,6 +837,13 @@ fun ScratchpadScreen(
                                     onDelete = {
                                         commit(project.removeTrack(index))
                                         selectedClip = null
+                                        simpleTrackPick = simpleTrackPick?.let { p ->
+                                            when {
+                                                p == index -> null
+                                                p > index -> p - 1
+                                                else -> p
+                                            }
+                                        }
                                         armedTrack = when {
                                             project.tracks.isEmpty() -> null
                                             armedTrack == index -> index.coerceAtMost(project.tracks.lastIndex)
@@ -797,10 +903,10 @@ fun ScratchpadScreen(
                 }
             }
 
-            if (isRecording && usingBuiltinMic && micNatural != null) {
+            if (micHintShown && usingBuiltinMic && micNatural != null) {
                 val configuration = LocalConfiguration.current
                 val rotation = remember(configuration) { context.display?.rotation ?: android.view.Surface.ROTATION_0 }
-                MicPointer(rotateNaturalFraction(micNatural, rotation), Modifier.windowInsetsPadding(WindowInsets.safeDrawing))
+                MicPointer(rotateNaturalFraction(micNatural, rotation))
             }
 
             // A replay queued from Settings (switching to its mode if needed),
@@ -863,7 +969,7 @@ fun ScratchpadScreen(
                 countInBeatsTotal = project.countInBars * project.beatsPerBar,
                 isPlaying = isPlaying,
                 positionFrame = positionFrame,
-                totalFrames = project.totalFrames,
+                totalFrames = heardEnd(true),
                 sampleRate = kSampleRate,
                 limitCaption = if (isRecording && recordedSeconds >= kMaxTakeSeconds - kTakeLimitWarnSeconds) {
                     "stops in ${(kMaxTakeSeconds - recordedSeconds).coerceAtLeast(0)}s"
@@ -875,7 +981,7 @@ fun ScratchpadScreen(
                 metronomeOn = project.metronomeOn,
                 countInBars = project.countInBars,
                 onRecord = { onRecordPressed(voiceNote = true) },
-                onPlayToggle = ::togglePlayback,
+                onPlayToggle = { togglePlayback(voiceNoteView = true) },
                 onSeek = { frame, done -> seekSimple(frame, done) },
                 onMetronomeToggle = { commit(project.copy(metronomeOn = !project.metronomeOn)) },
                 onCountInChange = { commit(project.copy(countInBars = it)) },
@@ -907,9 +1013,25 @@ private fun MultitrackProject.findClip(track: Int, clip: MultitrackClipSpec): Cl
     return if (index >= 0) ClipRef(track, index) else null
 }
 
-/** Track 1 of an empty project: the song's voice note, which its first take creates. */
-private fun MultitrackProject.withVoiceNoteTrack(): MultitrackProject =
-    addTrack(MultitrackTrackSpec(clips = emptyList(), name = "Voice note", colorIndex = 0))
+/**
+ * A new track at the end for a take Simple mode or the lyrics bar starts
+ * with no track picked: "Voice note" (Track 1 of a new song), or "Voice
+ * note 2" and so on if that's taken, in the next unused colour.
+ */
+private fun MultitrackProject.withNewVoiceTrack(): MultitrackProject {
+    val taken = tracks.map { it.name }.toSet()
+    val name = generateSequence(1) { it + 1 }.map { if (it == 1) "Voice note" else "Voice note $it" }.first { it !in taken }
+    val color = (tracks.maxOfOrNull { it.colorIndex } ?: -1) + 1
+    return addTrack(MultitrackTrackSpec(clips = emptyList(), name = name, colorIndex = color))
+}
+
+/** Where the track at [index] ends up when the track at [from] moves to [to]. */
+private fun movedIndex(index: Int, from: Int, to: Int): Int = when {
+    index == from -> to
+    from < index && to >= index -> index - 1
+    from > index && to <= index -> index + 1
+    else -> index
+}
 
 /** Ableton-style position: bar.beat.sixteenth, 1-based. */
 private fun formatPosition(frame: Long, framesPerBeat: Double, beatsPerBar: Int): String {
@@ -946,10 +1068,13 @@ private fun BluetoothNotice(onCalibrate: () -> Unit, onDismiss: () -> Unit, modi
         Row(modifier = Modifier.padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Filled.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.onTertiaryContainer, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
+            // Weighted, or on a narrow screen the text took the whole row and
+            // squeezed Calibrate/✕ into a column of single letters.
             Text(
                 "Bluetooth audio lags. Wired headphones stay in time best.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onTertiaryContainer,
+                modifier = Modifier.weight(1f, fill = false),
             )
             TextButton(onClick = onCalibrate) { Text("Calibrate") }
             IconButton(onClick = onDismiss) {

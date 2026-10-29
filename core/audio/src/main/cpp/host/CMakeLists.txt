@@ -37,6 +37,7 @@ add_library(songnotes_dsp STATIC
     ../dsp/matched_filter.cpp
     ../dsp/calibration_stats.cpp
     ../dsp/click_track.cpp
+    ../dsp/record_click.cpp
     ../dsp/mix.cpp
     ../dsp/track_mixer.cpp
     ../dsp/wav_encoder.cpp
@@ -59,6 +60,7 @@ add_executable(dsp_tests
     test_spsc_ring_buffer.cpp
     test_scene.cpp
     test_click_track.cpp
+    test_record_click.cpp
     test_mix.cpp
     test_track_mixer.cpp
     test_wav_encoder.cpp

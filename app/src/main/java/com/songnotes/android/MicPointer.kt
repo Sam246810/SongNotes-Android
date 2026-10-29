@@ -11,34 +11,19 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import kotlin.math.roundToInt
 
 /**
  * Where the phone's built-in mic is, as fractions of the screen in the
@@ -90,55 +75,49 @@ fun rotateNaturalFraction(natural: Pair<Float, Float>, rotation: Int): Pair<Floa
 }
 
 /**
- * A small pulsing "Mic" tag pinned to the screen edge nearest the phone's
- * built-in mic, with an arrow pointing off-screen toward it, shown while a
- * take is armed or recording so it's obvious where to sing.
+ * Where to sing: a slim pulsing red glow on the very edge of the screen
+ * nearest the phone's built-in mic, shown for a few seconds from the
+ * Scratchpad's "Where's the mic?" menu item. Drawn in
+ * the screen's outer strip (under the navigation bar, not inset from it),
+ * because the mic often sits right where a control is (on the Fold, Simple
+ * mode's record button); the tag this replaced covered it. A Canvas with no
+ * pointer input, so taps pass straight through.
  */
 @Composable
 fun MicPointer(fraction: Pair<Float, Float>, modifier: Modifier = Modifier) {
     val pulse by rememberInfiniteTransition(label = "mic").animateFloat(
-        initialValue = 0.55f,
+        initialValue = 0.45f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse),
         label = "micPulse",
     )
     val (fx, fy) = fraction
-    // Snap to the nearest edge; the tag sits just inside it.
+    // Snap to the nearest edge.
     val distances = listOf(fx, 1f - fx, fy, 1f - fy)
     val edge = distances.indexOf(distances.min()) // 0 left, 1 right, 2 top, 3 bottom
-    val arrowRotation = when (edge) { 0 -> 180f; 1 -> 0f; 2 -> 270f; else -> 90f }
-    val density = LocalDensity.current
-    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
-        val w = constraints.maxWidth.toFloat()
-        val h = constraints.maxHeight.toFloat()
-        val tagDp = 44.dp
-        val tagSize = with(density) { tagDp.toPx() }
-        val inset = with(density) { 6.dp.toPx() }
-        val x = when (edge) {
-            0 -> inset
-            1 -> w - tagSize - inset
-            else -> (fx * w - tagSize / 2f).coerceIn(inset, w - tagSize - inset)
+    Canvas(modifier = modifier.fillMaxSize().semantics { contentDescription = "Your phone's microphone is here" }) {
+        val length = 72.dp.toPx()
+        val thickness = 5.dp.toPx()
+        val glow = 48.dp.toPx()
+        val along = if (edge <= 1) fy * size.height else fx * size.width
+        val centre = when (edge) {
+            0 -> Offset(0f, along)
+            1 -> Offset(size.width, along)
+            2 -> Offset(along, 0f)
+            else -> Offset(along, size.height)
         }
-        val y = when (edge) {
-            2 -> inset
-            3 -> h - tagSize - inset
-            else -> (fy * h - tagSize / 2f).coerceIn(inset, h - tagSize - inset)
+        drawCircle(
+            Brush.radialGradient(listOf(RecordRed.copy(alpha = 0.45f * pulse), Color.Transparent), center = centre, radius = glow),
+            radius = glow,
+            center = centre,
+        )
+        val barSize = if (edge <= 1) Size(thickness, length) else Size(length, thickness)
+        val topLeft = when (edge) {
+            0 -> Offset(0f, along - length / 2f)
+            1 -> Offset(size.width - thickness, along - length / 2f)
+            2 -> Offset(along - length / 2f, 0f)
+            else -> Offset(along - length / 2f, size.height - thickness)
         }
-        // A plain Box, not a Surface: Material's Surface swallows touches, and
-        // the mic often sits right where a control is (Simple mode's record
-        // button), so the tag must let taps through.
-        Column(
-            modifier = Modifier
-                .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
-                .size(tagDp)
-                .alpha(pulse * 0.9f)
-                .clip(RoundedCornerShape(12.dp))
-                .background(RecordRed),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Text("➜", modifier = Modifier.rotate(arrowRotation), style = MaterialTheme.typography.labelLarge, color = Color.White)
-            Icon(Icons.Filled.Mic, contentDescription = "Your phone's microphone is this way", tint = Color.White, modifier = Modifier.size(16.dp))
-        }
+        drawRoundRect(RecordRed.copy(alpha = pulse), topLeft = topLeft, size = barSize, cornerRadius = CornerRadius(thickness / 2f))
     }
 }

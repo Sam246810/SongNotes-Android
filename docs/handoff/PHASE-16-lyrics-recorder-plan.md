@@ -1,13 +1,76 @@
 # Phase 16 (plan): record from the lyrics, Simple mode as a voice note
 
-Status (2026-10-27, branch `scratchpad-ui-overhaul`): **steps 2–4 built**, with
-the recommended answer to each open question. Checked on the Fold: count-in
-dots, the recording state, a take landing on the top track at the playhead,
-the playhead waiting at the take's end, and undo. Not yet checked on the
-device: the autoscroll toggle on a song long enough to scroll, and the bar
-hiding under a chord's panel or the piano. Steps 1 (click phase) and 5
-(Simple mode rebuild) are still to do; Simple mode now records onto Track 1
-but still draws the old layer cards.
+Status (2026-10-29, branch `scratchpad-ui-overhaul`): **steps 1–5 built**,
+plus the follow-ups below. Steps 2–4 were committed as a791351
+(2026-10-27); everything since then is not committed yet.
+
+## For you to test (needs ears or two fingers; I couldn't check these)
+
+1. **Metronome stays on the song's beat across takes (step 1).** Built and
+   unit-tested (`dsp/record_click`, `host/test_record_click.cpp`: built with
+   the NDK and run on the Fold through a GoogleTest shim, 6/6 pass). Never
+   *heard*, because the phone was muted. To test, with headphones and the
+   metronome on:
+   - Record a few bars, stop partway through a beat, then record again.
+     The count-in should lead into the song's next beat, not restart the
+     beat from wherever the last take stopped.
+   - Play the whole note back with the metronome on. The clicks should
+     stay with both takes.
+   - In Advanced, punch in on beat 3 with a one-bar count-in. The accent
+     (high click) should fall on the bar's beat 1, not on the first click.
+2. **Pinch to zoom in Simple mode** (adb can only send one finger):
+   - Pinch the waveform in and out. The "N× · fit" badge should reset the
+     zoom.
+   - While zoomed, drag the playhead to either edge. The view should glide
+     along like the Advanced ruler.
+   - Drag a trim handle against an edge while zoomed. Same glide.
+3. **Landscape Simple mode** (only seen mid-rotation): the bottom bar, and
+   the voice-note block staying centred and on the ruled lines.
+4. **Bluetooth warning layout fix:** it can only be seen with Bluetooth
+   audio connected.
+5. **Smaller items:**
+   - Autoscroll on a song long enough to scroll.
+   - The lyrics bar hiding under a chord's panel or the piano.
+   - The Simple tour's new steps.
+
+## Checked on the Fold
+
+- **Lyrics bar:** count-in dots and recording state, takes landing on the
+  picked track, undo.
+- **Simple mode:**
+  - One centred voice-note block on ruled paper.
+  - Text sitting on the lines.
+  - The track name (renamable) and the ▾ track picker.
+  - Trim and Delete buttons. Delete removes the track and leads to the
+    "No track picked" page; Undo restores it.
+  - The "Play along with N tracks" toggle, including switching it
+    mid-playback.
+  - A timeline sized to what you hear.
+  - The real waveform while recording (read from the take file), with the
+    earlier audio leading in.
+- **Recording from the playhead:**
+  - The playhead is parked at the end by default.
+  - Moved back, the take records over what it covers, and the caption
+    says so.
+- **Trim:**
+  - The cut parts are hatched red with "✂ cut" and "Cuts N s".
+  - Bracket handles with tabs. The playhead stays draggable, and taps
+    seek.
+  - The zoom state survives edits (fixed a stale-state bug).
+- **Advanced:**
+  - The Simple | Advanced switch.
+  - The "In Simple" label on the picked track.
+  - Sleeker clip trim tabs.
+  - Ruler edge-scroll and lane-tap placement (both fixed for a stale zoom
+    level).
+- **Elsewhere:**
+  - "Where's the mic?" in the ⋮ menus (no automatic pointer).
+  - Autoscroll moved to the toolbar.
+
+What step 1 does: `planRecordClick` puts the count-in and metronome on the
+project's beat grid. A take starting between beats counts in to the next
+grid beat, and the take still lands at its start point. Bar accents follow
+the song's bars, so a punch-in on beat 3 no longer accents beat 3.
 
 ## The idea in one paragraph
 
@@ -41,11 +104,12 @@ is the only place you can multitrack; there, the voice note is just Track 1.
 - Always `project.tracks[0]`. If the song has no tracks, recording creates
   one named "Voice note". Positional, like "the top track" in Ableton: if the
   user reorders tracks in Advanced, whatever is on top is the voice note.
-- **Record always appends** to the end of Track 1, wherever the playhead
-  is, like Samsung Voice Recorder resuming a recording. Seeking only moves
-  where playback starts. (First built as "record from the playhead",
-  which overwrote everything after a seek back to 0:00; changed on the
-  user's request 2026-10-27.) An explicit overwrite mode can come later.
+- **Record starts at the playhead**, which waits at the end of the track
+  by default (on open, on picking a track, after each take), so a take
+  carries straight on. Move it back and the take records over what it
+  covers; the caption under the clock says so, and Undo brings the old
+  audio back. (Built append-only on 2026-10-27; changed to this on the
+  user's request 2026-10-29.)
 - Stop saves (auto-save already does this). No separate "Save" step.
 
 ### The lyrics recorder bar (replaces `DemoMiniPlayer`)
@@ -150,7 +214,5 @@ deliver "record from the lyrics"; 5 is the Simple-mode rework.
 
 ## Open questions
 
-1. Simple mode with extra tracks: play them along (recommended) or play the
-   voice note alone?
-2. ~~Record after a note exists~~: decided, always append to the end.
-3. Autoscroll: move to the top bar (recommended) or drop it?
+All decided: Simple plays other tracks along; Record always appends to the
+end; autoscroll moved to the toolbar (second row, beside text size).

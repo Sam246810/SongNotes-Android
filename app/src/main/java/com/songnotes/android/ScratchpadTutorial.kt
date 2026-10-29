@@ -131,7 +131,7 @@ private val SimpleSteps = listOf(
     TutorialStep(
         "simple_record",
         "Record a voice note",
-        "Tap the big red button and sing, hum or play. Tap it again to stop. Record again and it adds on to the end. For more tracks, use Advanced.",
+        "Tap the big red button and sing, hum or play. Tap it again to stop. Record again and it carries on from the playhead: at the end unless you move it, and over what's there if you move it back (Undo brings it back). For more tracks, use Advanced.",
         TourHint.Tap,
     ),
     TutorialStep(
@@ -141,21 +141,22 @@ private val SimpleSteps = listOf(
         TourHint.Tap,
     ),
     TutorialStep(
-        "first_layer_wave",
-        "Scrub through your demo",
-        "This is a layer's waveform (here, an example; your own takes will look like this). Drag along it, or along the bar under the clock, to move the playhead: that's where play starts.",
+        "voice_note_wave",
+        "Scrub through your note",
+        "This is your voice note (here, an example; yours will look like this). Drag along it, or along the bar under the clock, to move the playhead: that's where play, and your next take, start.",
         TourHint.DragSideways,
     ),
     TutorialStep(
-        "simple_layers",
-        "Your layers",
-        "Each layer has mute and solo, which work even while it plays, and a ⋮ menu for volume, renaming, deleting, and Trim to cut a take's start or end.",
+        "voice_note_actions",
+        "Trim or start over",
+        "Trim cuts the note's start or end; Delete starts over. Undo brings anything back. Tracks you add in Advanced can play along: tap the chip under the note.",
+        TourHint.Tap,
     ),
     TutorialStep(null, "Saved on this phone", SavedOnPhone),
     TutorialStep(
         null,
         "Want more control?",
-        "Advanced mode works like a small DAW: bars and beats, a snap grid, and moving, trimming and splitting clips across tracks. Both modes edit the same demo, so you can switch any time from the ⋮ menu.\n\nReplay these tours from Settings → Scratchpad tutorials.",
+        "Advanced mode works like a small DAW: bars and beats, a snap grid, and moving, trimming and splitting clips across tracks. Both modes edit the same demo, so you can switch any time with the Simple | Advanced switch at the top.\n\nReplay these tours from Settings → Scratchpad tutorials.",
     ),
 )
 
@@ -199,7 +200,7 @@ private val AdvancedSteps = listOf(
     TutorialStep(
         null,
         "Saved on this phone",
-        SavedOnPhone + "\n\nSimple mode is in the ⋮ menu, and you can replay this tour from Settings → Scratchpad tutorials.",
+        SavedOnPhone + "\n\nThe Simple | Advanced switch at the top takes you back to Simple mode, and you can replay this tour from Settings → Scratchpad tutorials.",
     ),
 )
 

@@ -9,6 +9,7 @@
 #include <fstream>
 
 #include "dsp/click.h"
+#include "dsp/record_click.h"
 #include "dsp/sine_wave.h"
 #include "dsp/track_mixer.h"
 
@@ -654,13 +655,18 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
             // downbeat at mArmFrame would put the capture start in the
             // past, the head trim would eat real audio, and the take would
             // land preRoll early on the timeline.
-            const int64_t countInFrames = static_cast<int64_t>(cmd.countInBeats) * mBeatIntervalFrames;
-            mDownbeatFrame = mArmFrame + std::max(countInFrames, cmd.preRollFrames);
+            // Clicks stay on the project's beat grid, not the take's own:
+            // a take starting between beats (a voice note's next take
+            // starts where the last ended) counts in to the next grid beat
+            // — see dsp/record_click.h. mBackingTracksStartFrame was
+            // written before this command was queued.
+            const auto plan = dsp::planRecordClick(mBeatIntervalFrames, mBeatsPerBar, cmd.countInBeats,
+                                                   cmd.preRollFrames, mBackingTracksStartFrame);
+            mDownbeatFrame = mArmFrame + plan.downbeatOffset;
             mPreRollStartFrame = mDownbeatFrame - cmd.preRollFrames;
-            // First click is the first count-in beat (or, with no count-in,
-            // the downbeat itself) — always on the take's own beat grid.
-            mNextClickFrame = mDownbeatFrame - countInFrames;
-            mBeatIndexInBar = 0;
+            mCountInEndFrame = mArmFrame + plan.countInEndOffset;
+            mNextClickFrame = mArmFrame + plan.firstClickOffset;
+            mBeatIndexInBar = plan.firstBeatIndexInBar;
             mActiveClickTemplate = nullptr;
             mActiveClickReadPos = 0;
             mMode.store(static_cast<int32_t>(EngineMode::Armed), std::memory_order_release);
@@ -931,11 +937,11 @@ oboe::DataCallbackResult NativeAudioEngine::onAudioReady(oboe::AudioStream *stre
             // immediately rather than silently dropping the beat.
             const auto offsetInCallback =
                 static_cast<int32_t>(std::max<int64_t>(0, mNextClickFrame - mStreamFrameCounter));
-            // Only a click whose own beat is the downbeat or later follows
-            // the switch; one still inside the count-in always plays, even
-            // if it falls in the same callback as the downbeat.
+            // Only a click on the first grid beat of the take or later
+            // follows the switch; one still inside the count-in always
+            // plays, even if it falls in the same callback as the downbeat.
             const bool thisClickAudible =
-                mNextClickFrame < mDownbeatFrame || mMetronomeOn.load(std::memory_order_relaxed);
+                mNextClickFrame < mCountInEndFrame || mMetronomeOn.load(std::memory_order_relaxed);
             startClick(out, numFrames, outChannels, tmpl, offsetInCallback, thisClickAudible);
 
             if (mode == EngineMode::Armed) {

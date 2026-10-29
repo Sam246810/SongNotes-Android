@@ -302,6 +302,7 @@ private:
     int64_t mArmFrame = 0;
     int64_t mDownbeatFrame = 0;
     int64_t mPreRollStartFrame = 0;
+    int64_t mCountInEndFrame = 0; // first grid beat of the take; clicks before it are count-in
     int64_t mNextClickFrame = 0;
     int32_t mBeatIndexInBar = 0;
     std::vector<float> mClickTemplateDownbeat;
