@@ -358,7 +358,7 @@ private fun SimpleTopBar(
             IconButton(onClick = { menuOpen = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(
-                    text = { Text(if (isExporting) "Exporting…" else "Export mixdown (WAV)") },
+                    text = { Text(if (isExporting) "Exporting…" else "Share as WAV") },
                     leadingIcon = { Icon(Icons.Filled.SaveAlt, contentDescription = null) },
                     enabled = editsEnabled && !isExporting,
                     onClick = { menuOpen = false; onExport() },

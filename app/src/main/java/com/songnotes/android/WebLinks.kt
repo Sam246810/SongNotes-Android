@@ -25,10 +25,10 @@ const val WEB_FORGOT_PASSWORD_URL = "https://www.songnotes.cloud/forgot-password
  * it -- and Android links out to the web page rather than reimplementing the
  * delete flow natively, same rationale as [WEB_FORGOT_PASSWORD_URL] above.
  *
- * The web app is now deployed at https://song-notes-jet.vercel.app. Play
- * Console's Data safety -> Account deletion field must also be set to this
- * same URL -- Play checks that field independently of what the app links to,
- * so updating this constant alone does not satisfy the Play Store
- * requirement.
+ * Same custom domain as [WEB_FORGOT_PASSWORD_URL], and the exact URL in Play
+ * Console's Data safety -> Account deletion field: Play checks that field
+ * independently of what the app links to, and the two should match. (This
+ * pointed at the Vercel deployment address until 2026-10-31; both served the
+ * same page.)
  */
-const val WEB_DELETE_ACCOUNT_URL = "https://song-notes-jet.vercel.app/delete-account"
+const val WEB_DELETE_ACCOUNT_URL = "https://www.songnotes.cloud/delete-account"

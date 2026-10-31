@@ -431,7 +431,7 @@ private fun OverflowMenu(
         IconButton(onClick = { open = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             DropdownMenuItem(
-                text = { Text(if (isExporting) "Exporting…" else "Export mixdown (WAV)") },
+                text = { Text(if (isExporting) "Exporting…" else "Share as WAV") },
                 leadingIcon = { Icon(Icons.Filled.SaveAlt, contentDescription = null) },
                 enabled = editsEnabled && !isExporting,
                 onClick = { open = false; onExport() },

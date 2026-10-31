@@ -476,12 +476,20 @@ fun ScratchpadScreen(
             statusMessage = "Nothing to export yet — record a take first."
             return
         }
+        // What you hear is what you get: Simple mode with play-along off
+        // shares just its track; otherwise the whole demo.
+        val heard = heardTracks(voiceNoteView = mode == ScratchpadMode.SIMPLE)
+        val source = project.copy(tracks = heard.map { project.tracks[it] })
+        if (source.totalFrames == 0L) {
+            statusMessage = "Nothing to export yet — record a take first."
+            return
+        }
         isExporting = true
-        val outFile = File(context.filesDir, "exports/scratchpad_mixdown.wav").also { it.parentFile?.mkdirs() }
+        val outFile = mixdownFile(context, songTitle)
         scope.launch {
-            val ok = withContext(Dispatchers.Default) { project.exportToWav(engine, outFile.absolutePath, kSampleRate) }
+            val ok = withContext(Dispatchers.Default) { source.exportToWav(engine, outFile.absolutePath, kSampleRate) }
             isExporting = false
-            statusMessage = if (ok) "Exported to ${outFile.absolutePath}" else "Export failed."
+            if (ok) shareMixdown(context, outFile, songTitle) else statusMessage = "Export failed."
         }
     }
 

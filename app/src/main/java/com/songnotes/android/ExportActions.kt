@@ -124,6 +124,33 @@ fun shareSongAsText(context: Context, song: Song) {
 }
 
 /**
+ * Where a WAV mixdown is written before sharing: the FileProvider-exposed
+ * `cache/exports/`, named after the song, so the file a user saves or sends
+ * is called "My Song.wav" rather than an internal name.
+ */
+fun mixdownFile(context: Context, songTitle: String): File {
+    val exportsDir = File(context.cacheDir, "exports").apply { mkdirs() }
+    return File(exportsDir, "${sanitizeFilename(songTitle.ifBlank { "Untitled" })}.wav")
+}
+
+/**
+ * Opens the share sheet for a finished WAV mixdown ([mixdownFile]), the same
+ * FileProvider path as [shareSongAsPdf], so it can be saved to Files or
+ * Drive, or sent. It used to stay in the app's private storage, where no one
+ * could reach it.
+ */
+fun shareMixdown(context: Context, file: File, songTitle: String) {
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "audio/wav"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, songTitle.ifBlank { "Untitled" })
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share ${songTitle.ifBlank { "demo" }}"))
+}
+
+/**
  * Renders [song] as a paginated PDF (US Letter; title, then each line's
  * chords directly above its lyrics, wrapped to the page width the same way
  * the plain-text export wraps to [TEXT_EXPORT_COLUMNS]) and opens Android's
@@ -215,7 +242,7 @@ private fun writeSongPdf(context: Context, song: Song): File {
 }
 
 /** Same sanitization rule as the web app's `sanitizeFilename` in `src/utils/export.js`. */
-private fun sanitizeFilename(name: String): String {
+internal fun sanitizeFilename(name: String): String {
     val cleaned = name.replace(Regex("[^a-zA-Z0-9_\\- ]"), "").trim().replace(Regex("\\s+"), "_")
     return cleaned.ifEmpty { "song" }
 }
