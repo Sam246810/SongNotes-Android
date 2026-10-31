@@ -260,15 +260,15 @@ Anything that breaks or confuses you, just tell me. Thank you!
 
 ## 5. Building what you upload
 
-Once the upload key is set up in `local.properties`, build the bundle:
-```bash
-./gradlew bundleRelease
+The upload key is set up (`C:/Users/Sam/Documents/songnotes-release.jks`,
+wired in through `local.properties`). Build the bundle from the project
+folder in PowerShell:
 ```
-It's written to `app/build/outputs/bundle/release/app-release.aab`.
+.\gradlew bundleRelease
+```
+It's written to `app/build/outputs/bundle/release/app-release.aab`, as
+version 1.0.0 (versionCode 1).
 
-Before the first upload:
-- Set `versionName` to `1.0.0` in `app/build.gradle.kts`. It's still
-  `0.0.1-phase0`, and users see it.
 - Raise `versionCode` by one for every later upload (2, 3, …). Play
   rejects a repeat.
 - When asked, enroll in **Play App Signing**. It's the default for new
