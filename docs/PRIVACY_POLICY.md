@@ -7,8 +7,7 @@ used, and the choices you have. It's written to match what the app's code
 actually does, not a generic template — see the "How this was written"
 note at the bottom if you want to verify any claim yourself.
 
-**Before publishing:** the only gap left is the contact email near the end.
-Host this page somewhere public (planned: `https://www.songnotes.cloud/privacy`),
+**Before publishing:** nothing left to fill in. Host this page somewhere public (planned: `https://www.songnotes.cloud/privacy`),
 put that URL in the Play Console listing, and leave this note and the "How
 this was written" section out of the public copy.
 
@@ -116,7 +115,7 @@ new version applies from that date.
 
 ## Contact
 
-Questions about this policy or your data: **[FILL IN contact email]**
+Questions about this policy or your data: smths0063@gmail.com
 
 ---
 

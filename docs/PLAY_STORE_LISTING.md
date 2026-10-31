@@ -85,12 +85,10 @@ Works offline; optional encrypted sync.
 - **Category:** Music & Audio
 - **Tags** (Play suggests the list; pick the closest ones): Songwriting,
   Music notation / chords, Voice recorder, Notes
-- **Contact email:** **[YOU]** a public address Play shows on the listing
-  (it doesn't have to be your personal one)
+- **Contact email:** `smths0063@gmail.com`
 - **Website:** `https://www.songnotes.cloud`
-- **Privacy policy URL:** **[YOU]** where you host `docs/PRIVACY_POLICY.md`
-  once it's filled in (see section 6). For example
-  `https://www.songnotes.cloud/privacy`.
+- **Privacy policy URL:** `https://www.songnotes.cloud/privacy` (see
+  section 6)
 
 ---
 
@@ -278,6 +276,6 @@ version 1.0.0 (versionCode 1).
 
 ## 6. Privacy policy
 
-`docs/PRIVACY_POLICY.md` is filled in, apart from the **contact email**
-near the end. Once that's in, publish it at
-`https://www.songnotes.cloud/privacy` and use that URL in Play Console.
+`docs/PRIVACY_POLICY.md` is complete (contact: `smths0063@gmail.com`). It's
+served by the web app at `https://www.songnotes.cloud/privacy`; use that
+URL in Play Console.
