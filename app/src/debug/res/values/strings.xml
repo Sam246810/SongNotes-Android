@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: tells the development app apart from the Play
+     version on the home screen, since the two install side by side. -->
+<resources>
+    <string name="app_name">SongNotes (dev)</string>
+</resources>

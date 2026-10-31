@@ -45,8 +45,9 @@ android {
         applicationId = "com.songnotes.android"
         minSdk = 30
         targetSdk = 36
+        // Raise versionCode by one for every upload to Play; Play rejects a repeat.
         versionCode = 1
-        versionName = "0.0.1-phase0"
+        versionName = "1.0.0"
     }
 
     signingConfigs {
@@ -71,6 +72,13 @@ android {
     }
 
     buildTypes {
+        // Debug builds are their own app (com.songnotes.android.debug,
+        // "SongNotes (dev)" via src/debug/res), so a development build installs
+        // alongside the Play version instead of clashing with its signature.
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
