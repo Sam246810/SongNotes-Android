@@ -98,8 +98,8 @@ Works offline; optional encrypted sync.
 
 | Asset | File | Notes |
 |---|---|---|
-| App icon, 512 × 512 | `docs/store/play-icon-512.png` | The same design as the launcher icon in the app (beamed notes on notebook paper). |
-| Feature graphic, 1024 × 500 | `docs/store/feature-graphic-1024x500.png` | "SongNotes / Write it. Hum it. Keep it." with a voice-note waveform. |
+| App icon, 512 × 512 | `docs/store/play-icon-512.png` | The same design as the launcher icon in the app: a studio REC light drawn on notebook paper. |
+| Feature graphic, 1024 × 500 | `docs/store/feature-graphic-1024x500.png` | The REC light, "SongNotes / Write it. Hum it. Keep it.", and a voice-note waveform. |
 | Phone screenshots, 1080 × 1920 | `docs/store/screenshots/01…06` | Captioned and framed in this order: chords over lyrics, recording from the lyrics, Simple mode, trimming, Advanced mode, chord diagrams. |
 
 The screenshots use a made-up song ("Paper Boats") and synthesized demo

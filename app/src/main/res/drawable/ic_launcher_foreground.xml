@@ -1,30 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Launcher icon foreground: two beamed eighth notes in the app's accent,
-     kept inside the adaptive icon's 66dp safe circle. Also the monochrome
-     (themed icon) layer, where only its shape is used. -->
+<!-- Launcher icon foreground: a studio "REC" light sketched onto the notebook
+     page, tilted a touch with an ink outline, glowing. Kept inside the
+     adaptive icon's 66dp safe circle. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <group
-        android:pivotX="54"
-        android:pivotY="54"
-        android:scaleX="0.9"
-        android:scaleY="0.9"
-        android:translateX="-2"
-        android:translateY="3">
-        <!-- Beam -->
-        <path android:fillColor="#B45309" android:pathData="M47,36L78.4,29.5L78.4,38L47,44.5Z" />
-        <!-- Stems -->
-        <path android:fillColor="#B45309" android:pathData="M47,38h3.4v33h-3.4z" />
-        <path android:fillColor="#B45309" android:pathData="M75,31h3.4v33h-3.4z" />
-        <!-- Note heads: tilted ovals -->
-        <group android:pivotX="41" android:pivotY="72" android:rotation="-22">
-            <path android:fillColor="#B45309" android:pathData="M31.5,72a9.5,7 0 1,0 19,0a9.5,7 0 1,0 -19,0z" />
-        </group>
-        <group android:pivotX="69" android:pivotY="65" android:rotation="-22">
-            <path android:fillColor="#B45309" android:pathData="M59.5,65a9.5,7 0 1,0 19,0a9.5,7 0 1,0 -19,0z" />
-        </group>
+    <group android:pivotX="54" android:pivotY="54" android:rotation="-4">
+        <!-- Glow -->
+        <path android:pathData="M18,54a36,36 0 1,0 72,0a36,36 0 1,0 -72,0z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="radial"
+                    android:centerX="54"
+                    android:centerY="54"
+                    android:gradientRadius="36"
+                    android:startColor="#59E5483B"
+                    android:endColor="#00E5483B" />
+            </aapt:attr>
+        </path>
+        <!-- Mount -->
+        <path
+            android:fillColor="#3B2A1E"
+            android:pathData="M48.5,33h11a1.5,1.5 0 0 1 1.5,1.5v4.5h-14v-4.5a1.5,1.5 0 0 1 1.5,-1.5z" />
+        <!-- Lamp, inked -->
+        <path
+            android:fillColor="#E5483B"
+            android:strokeColor="#3B2A1E"
+            android:strokeWidth="1.6"
+            android:pathData="M34,39h40a7,7 0 0 1 7,7v16a7,7 0 0 1 -7,7h-40a7,7 0 0 1 -7,-7v-16a7,7 0 0 1 7,-7z" />
+        <!-- Shine -->
+        <path
+            android:fillColor="#38FFFFFF"
+            android:pathData="M34,42h40a4,4 0 0 1 4,4v3h-48v-3a4,4 0 0 1 4,-4z" />
+        <!-- REC -->
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="3.4"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M37,47.5V61M37,47.5h5a3.5,3.5 0 0 1 0,7h-5M41,54.5L45.5,61M58,47.5H50.5V61H58M50.5,54.2H56.5M73,49.6A6.6,6.6 0 1,0 73,58.9" />
     </group>
 </vector>

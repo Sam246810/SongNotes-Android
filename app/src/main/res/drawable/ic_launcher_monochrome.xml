@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon layer (Android 13+): the REC light as one-colour line art,
+     since only shape survives tinting. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:pivotX="54" android:pivotY="54" android:rotation="-4">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M48.5,33h11a1.5,1.5 0 0 1 1.5,1.5v4.5h-14v-4.5a1.5,1.5 0 0 1 1.5,-1.5z" />
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.6"
+            android:pathData="M34,39h40a7,7 0 0 1 7,7v16a7,7 0 0 1 -7,7h-40a7,7 0 0 1 -7,-7v-16a7,7 0 0 1 7,-7z" />
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="3.4"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M37,47.5V61M37,47.5h5a3.5,3.5 0 0 1 0,7h-5M41,54.5L45.5,61M58,47.5H50.5V61H58M50.5,54.2H56.5M73,49.6A6.6,6.6 0 1,0 73,58.9" />
+    </group>
+</vector>

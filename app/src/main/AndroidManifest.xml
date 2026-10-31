@@ -18,8 +18,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
 
-    <!-- Adaptive launcher icon (res/mipmap-anydpi-v26): beamed notes on the
-         notebook page; minSdk 30, so no bitmap fallbacks are needed. -->
+    <!-- Adaptive launcher icon (res/mipmap-anydpi-v26): a studio REC light on
+         the notebook page; minSdk 30, so no bitmap fallbacks are needed. -->
     <application
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
