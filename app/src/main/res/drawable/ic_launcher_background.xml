@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launcher icon background: the notebook page Simple mode is drawn on
+     (parchment, faint ruled lines, the margin line). 108dp adaptive canvas;
+     the launcher shows the middle 72dp in its own shape. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#F7F1E6" android:pathData="M0,0h108v108h-108z" />
+    <path android:fillColor="#E9D3BC" android:pathData="M0,40.25h108v1.5h-108z" />
+    <path android:fillColor="#E9D3BC" android:pathData="M0,56.25h108v1.5h-108z" />
+    <path android:fillColor="#E9D3BC" android:pathData="M0,72.25h108v1.5h-108z" />
+    <path android:fillColor="#E6BDAF" android:pathData="M27.25,0h1.5v108h-1.5z" />
+</vector>

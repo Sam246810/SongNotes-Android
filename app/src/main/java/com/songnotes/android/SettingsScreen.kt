@@ -147,7 +147,7 @@ fun SettingsScreen(
                         Text(
                             when {
                                 queued == tour -> "It'll play the next time you open a song's Scratchpad."
-                                tour == ScratchpadMode.SIMPLE -> "Recording layers, the metronome, and where your demo is saved."
+                                tour == ScratchpadMode.SIMPLE -> "Recording a voice note, trimming it, picking tracks, and the metronome."
                                 else -> "The arrangement view: the ruler and insert marker, clips, snapping and tracks."
                             },
                             style = MaterialTheme.typography.bodySmall,

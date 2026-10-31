@@ -94,38 +94,19 @@ Works offline; optional encrypted sync.
 
 ---
 
-## 2. Graphics
+## 2. Graphics (ready, in `docs/store/`)
 
-| Asset | Size | Notes |
+| Asset | File | Notes |
 |---|---|---|
-| App icon | 512 × 512 PNG, 32-bit, up to 1 MB | The app has no icon yet. This one has to exist before you can publish. |
-| Feature graphic | 1024 × 500 PNG or JPG, no transparency | Shown at the top of the listing. Keep text minimal and centred; Play crops the edges on some devices. |
-| Phone screenshots | 2–8, 16:9 or 9:16, each side 320–3840 px | At least 4 are needed to be eligible for some Play promotion slots. |
+| App icon, 512 × 512 | `docs/store/play-icon-512.png` | The same design as the launcher icon in the app (beamed notes on notebook paper). |
+| Feature graphic, 1024 × 500 | `docs/store/feature-graphic-1024x500.png` | "SongNotes / Write it. Hum it. Keep it." with a voice-note waveform. |
+| Phone screenshots, 1080 × 1920 | `docs/store/screenshots/01…06` | Captioned and framed in this order: chords over lyrics, recording from the lyrics, Simple mode, trimming, Advanced mode, chord diagrams. |
 
-**Feature graphic idea:** the ruled notebook paper background, with one
-line of chords over lyrics on the left and a voice-note waveform on the
-right. Text: "Write it. Hum it. Keep it."
+The screenshots use a made-up song ("Paper Boats") and synthesized demo
+takes. There are no real lyrics or recordings in them.
 
-**Suggested screenshots, in order, with captions you can put on them:**
-
-1. A song with chords over lyrics. *"Chords right where they're sung"*
-2. The lyrics page with the voice-note bar at the bottom, mid-recording.
-   *"Record from the lyrics"*
-3. Simple mode with a voice note. *"A voice recorder for your songs"*
-4. Simple mode trimming (the red "cut" hatching). *"Trim with zoom, see what
-   goes"*
-5. Advanced mode with a few tracks. *"Build a demo, track by track"*
-6. A chord diagram or the piano. *"Every chord, every voicing"*
-7. The song list. *"Offline, private, yours"*
-
-Use a song you wrote or a made-up one for these. Don't use real
-copyrighted lyrics in store screenshots.
-
-To capture screenshots from the Fold while it's plugged in, run this. Use
-the display id from `adb shell dumpsys SurfaceFlinger --display-id`:
-```bash
-adb shell screencap -d <display-id> -p /sdcard/shot.png
-```
+`docs/store/launcher-preview.png` shows the icon at launcher sizes, for
+reference only; don't upload it.
 
 ---
 
@@ -295,21 +276,8 @@ Before the first upload:
 
 ---
 
-## 6. Privacy policy: what's left to fill in
+## 6. Privacy policy
 
-`docs/PRIVACY_POLICY.md` is written from the code. Before you host it:
-
-- **Last updated:** the date you publish.
-- **Account deletion** (replace the `[FILL IN]` there):
-  > To delete your account and all synced data, go to
-  > https://www.songnotes.cloud/delete-account (also linked from the app's
-  > Account screen), sign in, and confirm. This permanently deletes your
-  > account and every song stored with it from our backend. Data stored
-  > only on your phone is removed when you uninstall the app or clear its
-  > storage.
-- **Changes to this policy:** simplest honest version:
-  > If this policy changes, we'll update the date above and the new
-  > version will apply from then on.
-- **Contact:** **[YOU]** the same public email as the listing.
-- Delete the "Before publishing" and "How this was written" notes from the
-  public copy.
+`docs/PRIVACY_POLICY.md` is filled in, apart from the **contact email**
+near the end. Once that's in, publish it at
+`https://www.songnotes.cloud/privacy` and use that URL in Play Console.

@@ -1,15 +1,16 @@
 # Privacy Policy for SongNotes
 
-**Last updated: [FILL IN DATE BEFORE PUBLISHING]**
+**Last updated: 31 October 2026**
 
 This policy describes what data SongNotes ("the app") collects, how it's
 used, and the choices you have. It's written to match what the app's code
 actually does, not a generic template — see the "How this was written"
 note at the bottom if you want to verify any claim yourself.
 
-**Before publishing:** replace every `[FILL IN ...]` placeholder below, host
-this page somewhere public (a GitHub Pages site, a plain webpage, etc.), and
-put that URL in the Play Console listing.
+**Before publishing:** the only gap left is the contact email near the end.
+Host this page somewhere public (planned: `https://www.songnotes.cloud/privacy`),
+put that URL in the Play Console listing, and leave this note and the "How
+this was written" section out of the public copy.
 
 ## Summary
 
@@ -88,10 +89,11 @@ brokers.
 Locally stored data is deleted when you delete the app or clear its storage
 from your device's app settings.
 
-To delete your account and any synced data from our backend:
-**[FILL IN — e.g. "email us at [address] and we'll delete your account and
-all associated data within X days" — see the note below about adding an
-in-app deletion option, which Google Play requires]**.
+To delete your account and all synced data, go to
+https://www.songnotes.cloud/delete-account (also linked from the app's
+Account screen), sign in, and confirm. This permanently deletes your account
+and every song stored with it from our backend. You don't need to contact us
+to do it.
 
 ## Children's privacy
 
@@ -109,9 +111,8 @@ collect personal information from children under 13.
 
 ## Changes to this policy
 
-If this policy changes, we'll update the "Last updated" date above.
-[FILL IN if you want a stronger commitment, e.g. "and notify users via the
-app" — only promise what you'll actually do.]
+If this policy changes, we'll update the "Last updated" date above, and the
+new version applies from that date.
 
 ## Contact
 

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launcher icon foreground: two beamed eighth notes in the app's accent,
+     kept inside the adaptive icon's 66dp safe circle. Also the monochrome
+     (themed icon) layer, where only its shape is used. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.9"
+        android:scaleY="0.9"
+        android:translateX="-2"
+        android:translateY="3">
+        <!-- Beam -->
+        <path android:fillColor="#B45309" android:pathData="M47,36L78.4,29.5L78.4,38L47,44.5Z" />
+        <!-- Stems -->
+        <path android:fillColor="#B45309" android:pathData="M47,38h3.4v33h-3.4z" />
+        <path android:fillColor="#B45309" android:pathData="M75,31h3.4v33h-3.4z" />
+        <!-- Note heads: tilted ovals -->
+        <group android:pivotX="41" android:pivotY="72" android:rotation="-22">
+            <path android:fillColor="#B45309" android:pathData="M31.5,72a9.5,7 0 1,0 19,0a9.5,7 0 1,0 -19,0z" />
+        </group>
+        <group android:pivotX="69" android:pivotY="65" android:rotation="-22">
+            <path android:fillColor="#B45309" android:pathData="M59.5,65a9.5,7 0 1,0 19,0a9.5,7 0 1,0 -19,0z" />
+        </group>
+    </group>
+</vector>
